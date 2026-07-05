@@ -1,30 +1,40 @@
-"""Orchestrator Agent (vision.md 5.1) — Phase 1 MVP.
+"""Orchestrator Agent (vision.md 5.1).
 
-Drives one full cycle: understand codebase -> implement one feature -> test
--> deploy to preview. Feature selection is still human-provided at this
-stage; the Product Discovery Agent (vision.md 5.3, Phase 2) that picks
-features from analytics is not built yet.
+Drives one full cycle: understand codebase -> discover (or accept) a feature
+-> implement -> test -> deploy to preview -> assess measurability -> repeat.
+If no feature is given, the Product Discovery Agent (vision.md 5.3) picks one
+from the codebase, analytics, and what's already shipped — this is what makes
+the system autonomous instead of a prompt-driven assistant.
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentos.agents import codebase, deployment, implementation, testing
+from agentos.agents import codebase, deployment, discovery, feedback, implementation, testing
 from agentos.memory import Memory
+from agentos.ranking import rank
 
 
 @dataclass
 class CycleReport:
     run_id: str
+    feature: str
     codebase_ok: bool
     implementation_ok: bool
     testing_ok: bool
     deployment_ok: bool | None
-    summary: str
+    opportunities_considered: list[dict] = field(default_factory=list)
+    summary: str = ""
 
 
-async def run_cycle(repo: Path, objective: str, feature: str, skip_deploy: bool = False) -> CycleReport:
+async def run_cycle(
+    repo: Path,
+    objective: str,
+    feature: str | None = None,
+    analytics_summary: str = "not available",
+    skip_deploy: bool = False,
+) -> CycleReport:
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = uuid.uuid4().hex[:8]
@@ -35,15 +45,32 @@ async def run_cycle(repo: Path, objective: str, feature: str, skip_deploy: bool 
     mem.write("architecture", "codebase", cb.text)
     mem.log(run_id, f"codebase agent: ok={cb.ok} turns={cb.turns} cost=${cb.cost_usd:.4f}")
     if not cb.ok:
-        return CycleReport(run_id, False, False, False, None, "codebase understanding failed; aborting cycle")
+        return CycleReport(run_id, feature or "", False, False, False, None, [], "codebase understanding failed; aborting cycle")
+
+    opportunities: list[dict] = []
+    feature_brief = feature or ""
+    if feature is None:
+        mem.log(run_id, "discovery agent: starting")
+        disc = await discovery.run(repo, objective, cb.text, analytics_summary, mem.shipped_features())
+        mem.write("decisions", f"{run_id}-discovery", disc.text)
+        mem.log(run_id, f"discovery agent: ok={disc.ok} turns={disc.turns} cost=${disc.cost_usd:.4f}")
+        opportunities = rank((disc.json_data or {}).get("opportunities", []))
+        if not disc.ok or not opportunities:
+            mem.write("failures", f"{run_id}-discovery", disc.text)
+            return CycleReport(run_id, "", True, False, False, None, [], "discovery failed to produce any feature opportunity; aborting cycle")
+        top = opportunities[0]
+        feature = top["feature"]
+        feature_brief = f"{top['feature']}: {top.get('description', '')} (reason: {top.get('reason', '')})"
+        mem.log(run_id, f"discovery agent: selected {feature!r} from {len(opportunities)} candidates")
 
     mem.log(run_id, "implementation agent: starting")
-    impl = await implementation.run(repo, objective, feature, cb.text)
+    impl = await implementation.run(repo, objective, feature_brief, cb.text)
     mem.write("features", f"{run_id}-{_slug(feature)}", impl.text)
     mem.log(run_id, f"implementation agent: ok={impl.ok} turns={impl.turns} cost=${impl.cost_usd:.4f}")
     if not impl.ok:
         mem.write("failures", f"{run_id}-implementation", impl.text)
-        return CycleReport(run_id, True, False, False, None, "implementation failed; aborting cycle")
+        return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
+    mem.record_shipped(feature)
 
     mem.log(run_id, "testing agent: starting")
     test = await testing.run(repo, cb.text)
@@ -61,6 +88,12 @@ async def run_cycle(repo: Path, objective: str, feature: str, skip_deploy: bool 
         if not deploy_ok:
             mem.write("failures", f"{run_id}-deployment", deploy.text)
 
+    if test_passed:
+        mem.log(run_id, "feedback agent: starting")
+        fb = await feedback.run(repo, objective, feature)
+        mem.write("metrics", f"{run_id}-{_slug(feature)}", fb.text)
+        mem.log(run_id, f"feedback agent: ok={fb.ok} turns={fb.turns} cost=${fb.cost_usd:.4f}")
+
     mem.write(
         "decisions",
         f"{run_id}-summary",
@@ -71,10 +104,12 @@ async def run_cycle(repo: Path, objective: str, feature: str, skip_deploy: bool 
 
     return CycleReport(
         run_id=run_id,
+        feature=feature,
         codebase_ok=True,
         implementation_ok=impl.ok,
         testing_ok=test_passed,
         deployment_ok=deploy_ok,
+        opportunities_considered=opportunities,
         summary=f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} deployment_ok={deploy_ok}",
     )
 

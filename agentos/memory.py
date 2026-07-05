@@ -6,6 +6,7 @@ with the repo and accumulates across runs.
 """
 
 import datetime as dt
+import json
 from pathlib import Path
 
 CATEGORIES = ("architecture", "decisions", "features", "metrics", "failures")
@@ -16,6 +17,7 @@ class Memory:
         self.root = repo / ".agentos"
         self.memory_root = self.root / "memory"
         self.log_root = self.root / "logs"
+        self.shipped_path = self.root / "shipped.json"
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -37,3 +39,14 @@ class Memory:
             timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
             f.write(f"[{timestamp}] {content}\n")
         return path
+
+    def shipped_features(self) -> list[str]:
+        if not self.shipped_path.exists():
+            return []
+        return json.loads(self.shipped_path.read_text())
+
+    def record_shipped(self, feature: str) -> None:
+        features = self.shipped_features()
+        if feature not in features:
+            features.append(feature)
+            self.shipped_path.write_text(json.dumps(features, indent=2))
