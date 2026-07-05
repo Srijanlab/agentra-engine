@@ -37,6 +37,7 @@ class CycleReport:
     deployment_ok: bool | None
     opportunities_considered: list[dict] = field(default_factory=list)
     summary: str = ""
+    pre_prod_verified: bool | None = None
 
 
 @dataclass
@@ -104,14 +105,15 @@ async def run_cycle(
         return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
     mem.record_shipped(feature)
 
-    mem.log(run_id, "testing agent: starting")
-    test = await testing.run(repo, cb.text)
-    mem.log(run_id, f"testing agent: ok={test.ok} turns={test.turns} cost=${test.cost_usd:.4f}")
+    mem.log(run_id, "testing agent: starting (local)")
+    test = await testing.run_local(repo, cb.text)
+    mem.log(run_id, f"testing agent (local): ok={test.ok} turns={test.turns} cost=${test.cost_usd:.4f}")
     test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
     if not test_passed:
         mem.write("failures", f"{run_id}-testing", test.text)
 
     deploy_ok = None
+    pre_prod_verified = None
     if not skip_deploy and test_passed:
         mem.log(run_id, "deployment agent: deploying to pre-prod")
         deploy = await deployment.deploy_pre_prod(repo, env)
@@ -119,8 +121,27 @@ async def run_cycle(
         deploy_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         if not deploy_ok:
             mem.write("failures", f"{run_id}-deployment", deploy.text)
+        else:
+            preview_url = (deploy.json_data or {}).get("preview_url")
+            if preview_url:
+                mem.log(run_id, "testing agent: starting (live pre-prod verification)")
+                pre_prod_test = await testing.run_pre_prod(repo, cb.text, preview_url)
+                mem.log(
+                    run_id,
+                    f"testing agent (pre-prod): ok={pre_prod_test.ok} turns={pre_prod_test.turns} "
+                    f"cost=${pre_prod_test.cost_usd:.4f}",
+                )
+                pre_prod_verified = pre_prod_test.ok and (pre_prod_test.json_data or {}).get("status") != "fail"
+                if not pre_prod_verified:
+                    mem.write("failures", f"{run_id}-pre-prod-verification", pre_prod_test.text)
+            else:
+                mem.log(run_id, "deployment reported no preview_url; skipping live verification")
 
-    if test_passed:
+    # If nothing was deployed this cycle, local passing tests are all there is to go on.
+    # If something was deployed, feedback about measurable impact only makes sense once
+    # the live deployment has actually been verified — not just "the deploy step didn't error".
+    feedback_ready = test_passed if skip_deploy else bool(pre_prod_verified)
+    if feedback_ready:
         mem.log(run_id, "feedback agent: starting")
         fb = await feedback.run(repo, objective, feature)
         mem.write("metrics", f"{run_id}-{_slug(feature)}", fb.text)
@@ -130,7 +151,8 @@ async def run_cycle(
         "decisions",
         f"{run_id}-summary",
         f"# Cycle {run_id}\n\nObjective: {objective}\nFeature: {feature}\n\n"
-        f"- codebase: ok\n- implementation: {impl.ok}\n- testing: {test_passed}\n- deployment (pre-prod): {deploy_ok}\n"
+        f"- codebase: ok\n- implementation: {impl.ok}\n- testing (local): {test_passed}\n"
+        f"- deployment (pre-prod): {deploy_ok}\n- verified live in pre-prod: {pre_prod_verified}\n"
         f"\nProduction promotion is a separate, human-gated step: `agentos promote --repo {repo}`.\n",
     )
     mem.log(run_id, "cycle complete")
@@ -143,7 +165,11 @@ async def run_cycle(
         testing_ok=test_passed,
         deployment_ok=deploy_ok,
         opportunities_considered=opportunities,
-        summary=f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} pre_prod_deployed={deploy_ok}",
+        summary=(
+            f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} "
+            f"pre_prod_deployed={deploy_ok} pre_prod_verified={pre_prod_verified}"
+        ),
+        pre_prod_verified=pre_prod_verified,
     )
 
 
@@ -209,15 +235,28 @@ async def run_prod_debug_cycle(
         mem.log(run_id, "prod-debug: pre-prod deploy failed; NOT promoting to prod")
         return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
-    test = await testing.run(repo, cb.text)
-    test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
-    mem.log(run_id, f"prod-debug: pre-prod testing passed={test_passed}")
-    if not test_passed:
-        mem.write("failures", f"{run_id}-hotfix-testing", test.text)
-        mem.log(run_id, "prod-debug: hotfix failed pre-prod testing; NOT promoting to prod")
+    preview_url = (deploy.json_data or {}).get("preview_url")
+    if not preview_url:
+        mem.write(
+            "failures",
+            f"{run_id}-hotfix-pre-prod-verify",
+            "Deploy reported success but returned no preview_url — cannot verify the live "
+            "deployment before promoting to prod, so refusing to promote.",
+        )
+        mem.log(run_id, "prod-debug: no preview_url returned; NOT promoting to prod")
         return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
-    mem.log(run_id, "prod-debug: hotfix verified in pre-prod; auto-promoting to prod (auto_remediate_prod=true)")
+    # Must verify the actual live deployment here, not re-run local tests — the whole point
+    # of this gate is proving the hotfix works once deployed, before it's ever allowed near prod.
+    test = await testing.run_pre_prod(repo, cb.text, preview_url)
+    test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
+    mem.log(run_id, f"prod-debug: live pre-prod verification passed={test_passed}")
+    if not test_passed:
+        mem.write("failures", f"{run_id}-hotfix-testing", test.text)
+        mem.log(run_id, "prod-debug: hotfix failed live pre-prod verification; NOT promoting to prod")
+        return ProdDebugReport(run_id, True, severity, True, False, diag.text)
+
+    mem.log(run_id, "prod-debug: hotfix verified live in pre-prod; auto-promoting to prod (auto_remediate_prod=true)")
     promote = await deployment.promote_prod(repo, env)
     promoted_ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
     mem.log(run_id, f"prod-debug: promotion ok={promoted_ok}")
@@ -228,7 +267,8 @@ async def run_prod_debug_cycle(
         "decisions",
         f"{run_id}-hotfix-summary",
         f"# Prod hotfix {run_id}\n\nSeverity: {severity}\nDiagnosis: {data.get('diagnosis', '')}\n"
-        f"Fix: {proposed_fix}\n\n- pre-prod deploy: {pre_prod_ok}\n- pre-prod tests: {test_passed}\n- promoted to prod: {promoted_ok}\n",
+        f"Fix: {proposed_fix}\n\n- pre-prod deploy: {pre_prod_ok}\n- verified live in pre-prod: {test_passed}\n"
+        f"- promoted to prod: {promoted_ok}\n",
     )
 
     return ProdDebugReport(run_id, True, severity, True, promoted_ok, diag.text)

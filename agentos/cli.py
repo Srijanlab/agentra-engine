@@ -56,10 +56,11 @@ def _print_report(report) -> None:
         print("  opportunities considered:")
         for opp in report.opportunities_considered:
             print(f"    - {opp.get('feature')} (impact={opp.get('impact')}, effort={opp.get('effort')})")
-    print(f"  codebase understood: {report.codebase_ok}")
-    print(f"  implementation ok:   {report.implementation_ok}")
-    print(f"  tests passed:        {report.testing_ok}")
-    print(f"  deployed to pre-prod: {report.deployment_ok}")
+    print(f"  codebase understood:   {report.codebase_ok}")
+    print(f"  implementation ok:     {report.implementation_ok}")
+    print(f"  local tests passed:    {report.testing_ok}")
+    print(f"  deployed to pre-prod:  {report.deployment_ok}")
+    print(f"  verified live:         {report.pre_prod_verified}")
 
 
 def _prompt(label: str, default: str) -> str:
