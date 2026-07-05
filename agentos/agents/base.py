@@ -14,7 +14,7 @@ from agentos.agents.safety import make_can_use_tool
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 
 
-async def _single_prompt_stream(prompt: str) -> AsyncIterator[dict[str, Any]]:
+async def single_prompt_stream(prompt: str) -> AsyncIterator[dict[str, Any]]:
     """can_use_tool requires streaming input; wrap a plain string prompt as one."""
     yield {
         "type": "user",
@@ -69,7 +69,7 @@ async def run_agent(
     )
 
     result_msg: ResultMessage | None = None
-    async for message in query(prompt=_single_prompt_stream(prompt), options=options):
+    async for message in query(prompt=single_prompt_stream(prompt), options=options):
         if isinstance(message, ResultMessage):
             result_msg = message
 

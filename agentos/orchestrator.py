@@ -96,7 +96,7 @@ async def run_cycle(
         mem.log(run_id, f"discovery agent: selected {feature!r} from {len(opportunities)} candidates")
 
     mem.log(run_id, "implementation agent: starting")
-    impl = await implementation.run(repo, objective, feature_brief, cb.text)
+    impl = await implementation.run(repo, objective, feature_brief, cb.text, env)
     mem.write("features", f"{run_id}-{_slug(feature)}", impl.text)
     mem.log(run_id, f"implementation agent: ok={impl.ok} turns={impl.turns} cost=${impl.cost_usd:.4f}")
     if not impl.ok:
@@ -194,7 +194,7 @@ async def run_prod_debug_cycle(
 
     mem.log(run_id, "prod-debug: auto_remediate_prod is on; building fix")
     cb = await codebase.run(repo)
-    impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text)
+    impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env)
     mem.write("features", f"{run_id}-hotfix", impl.text)
     mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
     if not impl.ok:

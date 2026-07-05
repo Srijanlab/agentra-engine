@@ -3,6 +3,7 @@ import asyncio
 from pathlib import Path
 
 from agentos import environments
+from agentos.agents.brain import run_autonomous_cycle
 from agentos.orchestrator import run_cycle, run_prod_debug_cycle, run_promote
 
 
@@ -28,6 +29,24 @@ def _add_common_run_args(parser: argparse.ArgumentParser) -> None:
         help="Path to an analytics export (JSON/CSV/text) to inform feature discovery",
     )
     parser.add_argument("--skip-deploy", action="store_true", help="Skip the beta deployment step")
+    parser.add_argument(
+        "--autonomous",
+        action="store_true",
+        help=(
+            "Let the Orchestrator Agent decide which specialized agent to call, in what "
+            "order (agents/brain.py), instead of the fixed understand->discover->implement->"
+            "test->deploy sequence. Production is never reachable from this mode either way."
+        ),
+    )
+
+
+def _print_autonomous_report(report) -> None:
+    print(f"\nRun {report.run_id}")
+    print("  actions taken:")
+    for action in report.actions:
+        print(f"    - {action}")
+    print(f"\n  final message: {report.final_message}")
+    print(f"  cost: ${report.cost_usd:.4f}")
 
 
 def _print_report(report) -> None:
@@ -125,24 +144,54 @@ def main() -> None:
 
     if args.command == "run":
         analytics_summary = _read_analytics(args.analytics)
-        report = asyncio.run(
-            run_cycle(
-                args.repo,
-                args.objective,
-                feature=args.feature,
-                analytics_summary=analytics_summary,
-                skip_deploy=args.skip_deploy,
+        if args.autonomous:
+            repo = args.repo.resolve()
+            env = environments.load(repo) or environments.EnvironmentConfig()
+            report = asyncio.run(
+                run_autonomous_cycle(
+                    repo,
+                    args.objective,
+                    env,
+                    analytics_summary=analytics_summary,
+                    feature=args.feature,
+                    skip_deploy=args.skip_deploy,
+                )
             )
-        )
-        _print_report(report)
-        print(f"\nDetails written to <repo>/.agentos/memory/ and <repo>/.agentos/logs/{report.run_id}.log")
+            _print_autonomous_report(report)
+        else:
+            report = asyncio.run(
+                run_cycle(
+                    args.repo,
+                    args.objective,
+                    feature=args.feature,
+                    analytics_summary=analytics_summary,
+                    skip_deploy=args.skip_deploy,
+                )
+            )
+            _print_report(report)
+            print(f"\nDetails written to <repo>/.agentos/memory/ and <repo>/.agentos/logs/{report.run_id}.log")
         print("Ready for production? Run: agentos promote --repo <repo>")
 
     elif args.command == "loop":
         analytics_summary = _read_analytics(args.analytics)
+        repo = args.repo.resolve()
+        env = environments.load(repo) or environments.EnvironmentConfig() if args.autonomous else None
         for i in range(1, args.cycles + 1):
             print(f"\n{'=' * 60}\nCycle {i}/{args.cycles}\n{'=' * 60}")
             feature = args.feature if i == 1 else None
+            if args.autonomous:
+                report = asyncio.run(
+                    run_autonomous_cycle(
+                        repo,
+                        args.objective,
+                        env,
+                        analytics_summary=analytics_summary,
+                        feature=feature,
+                        skip_deploy=args.skip_deploy,
+                    )
+                )
+                _print_autonomous_report(report)
+                continue
             report = asyncio.run(
                 run_cycle(
                     args.repo,
