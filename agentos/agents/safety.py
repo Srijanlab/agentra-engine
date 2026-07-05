@@ -5,6 +5,18 @@ production deploys, no destructive data operations, no secrets/billing edits,
 no irreversible operations. This is a blunt regex net, not a sandbox — it
 exists to catch an agent following bad instructions, not a malicious one.
 
+LAYERED SAFETY MODEL
+--------------------
+Primary boundary  — Docker container (see CONTAINER.md): the Claude CLI
+    subprocess can only reach the bind-mounted target repo and explicitly
+    provided env vars; host filesystem, SSH keys, and other secrets are
+    invisible to the container entirely.
+
+Secondary boundary — this module: even inside a container, the regex
+    patterns below block the most dangerous bash commands and file edits
+    (destructive ops, secrets, production deploys) as a defence-in-depth
+    measure.
+
 Production access is normally blocked outright. The *only* exception is the
 Production Debugging Agent's opt-in auto-remediate path (orchestrator.py),
 which passes allow_prod=True for the single promote-to-prod call it makes —
