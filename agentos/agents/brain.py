@@ -17,7 +17,7 @@ Production is deliberately not one of the seven tools; promote_prod() stays
 reachable only via `agentos promote` (human) or the debug-prod
 auto-remediate path, never from an autonomous sequencing decision. And the
 one invariant that must hold no matter what the model decides — never
-deploy before tests pass — is enforced in deploy_beta's handler itself
+deploy before tests pass — is enforced in deploy_pre_prod's handler itself
 (a real boolean check), not left to the system prompt.
 """
 
@@ -139,14 +139,14 @@ def _tools_for(session: OrchestratorSession) -> list:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Implemented and committed {feature_name!r}. Call run_tests before deploy_beta.",
+                    "text": f"Implemented and committed {feature_name!r}. Call run_tests before deploy_pre_prod.",
                 }
             ]
         }
 
     @tool(
         "run_tests",
-        "Independently verify the current state of the repo. Required before deploy_beta "
+        "Independently verify the current state of the repo. Required before deploy_pre_prod "
         "will do anything — it refuses if this hasn't passed since the last implementation.",
         {},
     )
@@ -166,24 +166,24 @@ def _tools_for(session: OrchestratorSession) -> list:
         }
 
     @tool(
-        "deploy_beta",
-        "Deploy the current state to the beta environment.",
+        "deploy_pre_prod",
+        "Deploy the current state to the pre-prod environment.",
         {},
     )
-    async def deploy_beta(_args):
+    async def deploy_pre_prod(_args):
         if session.skip_deploy:
-            session.note("deploy_beta: skipped (skip_deploy set for this run)")
+            session.note("deploy_pre_prod: skipped (skip_deploy set for this run)")
             return {"content": [{"type": "text", "text": "Skipped: this run was started with deploy disabled."}]}
         if not session.tests_passed:
-            session.note("deploy_beta: refused, tests not passed")
+            session.note("deploy_pre_prod: refused, tests not passed")
             return {
-                "content": [{"type": "text", "text": "Refused: run_tests must pass before deploying to beta."}],
+                "content": [{"type": "text", "text": "Refused: run_tests must pass before deploying to pre-prod."}],
                 "is_error": True,
             }
-        deploy = await deployment.deploy_beta(session.repo, session.env)
+        deploy = await deployment.deploy_pre_prod(session.repo, session.env)
         session.cost_usd += deploy.cost_usd
         ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
-        session.note(f"deploy_beta: ok={ok}")
+        session.note(f"deploy_pre_prod: ok={ok}")
         if not ok:
             session.mem.write("failures", f"{session.run_id}-deployment", deploy.text)
         return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": not ok}
@@ -191,7 +191,7 @@ def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "assess_feedback",
         "Check whether the shipped feature is actually measurable (instrumentation) and "
-        "name concrete success metrics. Call after a successful deploy_beta.",
+        "name concrete success metrics. Call after a successful deploy_pre_prod.",
         {},
     )
     async def assess_feedback(_args):
@@ -208,7 +208,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         discover_opportunities,
         implement_feature,
         run_tests,
-        deploy_beta,
+        deploy_pre_prod,
         assess_feedback,
     ]
 
@@ -218,7 +218,7 @@ engineering system (vision.md 5.1). You decide which specialized agent to \
 invoke next, in what order, and when this run is complete — there is no \
 fixed script to follow. You have exactly seven tools, each delegating to a \
 specialized agent: understand_codebase, check_backlog, \
-discover_opportunities, implement_feature, run_tests, deploy_beta, \
+discover_opportunities, implement_feature, run_tests, deploy_pre_prod, \
 assess_feedback. You do not have Read/Write/Edit/Bash yourself. Production \
 is deliberately not reachable from this session under any circumstance.
 
@@ -227,7 +227,7 @@ Use judgment, not a rigid script, but this is generally sound:
 2. Check the backlog — a known production bug always outranks a \
    nice-to-have feature.
 3. If no feature was suggested to you, discover opportunities and pick one.
-4. Implement it, then run tests. deploy_beta refuses if tests haven't \
+4. Implement it, then run tests. deploy_pre_prod refuses if tests haven't \
    passed since the last implementation — if that happens, fix the \
    underlying issue and re-test, don't just retry the deploy.
 5. Once deployed, assess feedback so impact is actually measurable later.
@@ -277,7 +277,7 @@ async def run_autonomous_cycle(
     if feature:
         prompt += f"A feature has been suggested to prioritize: {feature}\n"
     if skip_deploy:
-        prompt += "Deployment is disabled for this run — do not call deploy_beta.\n"
+        prompt += "Deployment is disabled for this run — do not call deploy_pre_prod.\n"
     prompt += "Decide what to do and carry it out."
 
     options = ClaudeAgentOptions(

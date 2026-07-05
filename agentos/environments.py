@@ -1,10 +1,11 @@
-"""Per-app dev/beta/prod environment configuration.
+"""Per-app local/pre-prod/prod environment configuration.
 
 Every app the system operates on gets one of these, stored at
 <repo>/.agentos/environments.yaml. It's the thing that turns "deploy" from a
-single generic step into a real pipeline: dev branch -> beta (isolated
-Firebase project + Vercel preview) -> prod (gated, or auto-remediated only
-when the app has explicitly opted in).
+single generic step into a real pipeline: local (agentos's own branch, fast
+iteration, nothing deployed) -> pre-prod (isolated Firebase project + Vercel
+preview, a real deployed environment for integration testing) -> prod
+(gated, or auto-remediated only when the app has explicitly opted in).
 """
 
 import json
@@ -15,16 +16,16 @@ from pathlib import Path
 
 @dataclass
 class EnvironmentConfig:
-    dev_branch: str = "dev"
-    beta_branch: str = "beta"
+    local_branch: str = "dev"
+    pre_prod_branch: str = "beta"
     prod_branch: str = "main"
     vercel: bool = False
     firebase: bool = False
-    firebase_beta_alias: str = "beta"
+    firebase_pre_prod_alias: str = "beta"
     firebase_prod_alias: str = "default"
     # Opt-in only. When true, the Production Debugging Agent may deploy a
-    # verified hotfix straight to prod once it passes beta testing, with no
-    # human approval step. False is the safe default for every app.
+    # verified hotfix straight to prod once it passes pre-prod testing, with
+    # no human approval step. False is the safe default for every app.
     auto_remediate_prod: bool = False
 
     @property
@@ -98,8 +99,10 @@ def detect(repo: Path) -> EnvironmentConfig:
             data = json.loads(firebaserc.read_text())
             aliases = data.get("projects", {})
             config.firebase = bool(aliases)
-            if "beta" in aliases:
-                config.firebase_beta_alias = "beta"
+            for candidate in ("pre-prod", "pre_prod", "beta", "staging"):
+                if candidate in aliases:
+                    config.firebase_pre_prod_alias = candidate
+                    break
             if "default" in aliases:
                 config.firebase_prod_alias = "default"
         except (json.JSONDecodeError, OSError):
@@ -110,14 +113,16 @@ def detect(repo: Path) -> EnvironmentConfig:
         if candidate in branches:
             config.prod_branch = candidate
             break
-    if "beta" in branches:
-        config.beta_branch = "beta"
-    elif "staging" in branches:
-        config.beta_branch = "staging"
+    for candidate in ("pre-prod", "pre_prod", "beta", "staging"):
+        if candidate in branches:
+            config.pre_prod_branch = candidate
+            break
     if "dev" in branches:
-        config.dev_branch = "dev"
+        config.local_branch = "dev"
     elif "develop" in branches:
-        config.dev_branch = "develop"
+        config.local_branch = "develop"
+    elif "local" in branches:
+        config.local_branch = "local"
 
     return config
 

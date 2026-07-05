@@ -4,10 +4,10 @@ Owns the implement -> test -> fix -> retry loop for a single feature. Runs
 inside one long agent turn so it can self-correct against its own test runs
 before handing off to the independent Testing Agent for final QA.
 
-Must commit to the app's configured dev branch, not just "whatever is
-currently checked out" — Deployment Agent's beta step merges from
-dev_branch specifically (see agents/deployment.py), so a commit landing
-anywhere else is silently invisible to beta and gets deployed over.
+Must commit to the app's configured local branch, not just "whatever is
+currently checked out" — Deployment Agent's pre-prod step merges from
+local_branch specifically (see agents/deployment.py), so a commit landing
+anywhere else is silently invisible to pre-prod and gets deployed over.
 """
 
 from pathlib import Path
@@ -19,16 +19,16 @@ SYSTEM_PROMPT = """You are the Implementation Agent in an autonomous product \
 engineering system. You are given a codebase summary and a specific feature \
 to build. Work in a tight loop:
 
-0. Before anything else, make sure you are on the dev branch: \
-   `git checkout {dev_branch}` if it exists, otherwise \
-   `git checkout -B {dev_branch}` to create it from the current HEAD. All \
-   work this run happens on {dev_branch} — never main/{prod_branch} or any \
+0. Before anything else, make sure you are on the local branch: \
+   `git checkout {local_branch}` if it exists, otherwise \
+   `git checkout -B {local_branch}` to create it from the current HEAD. All \
+   work this run happens on {local_branch} — never main/{prod_branch} or any \
    other branch.
 1. Implement the smallest coherent version of the feature.
 2. Run the project's existing test/build commands yourself via Bash.
 3. If anything fails, fix it and re-run. Repeat until green or you are \
    confident further attempts won't help.
-4. Make a git commit of your change on {dev_branch} once it's working. Do \
+4. Make a git commit of your change on {local_branch} once it's working. Do \
    not push, do not open a PR, do not touch git history beyond one commit.
 
 Constraints:
@@ -56,7 +56,7 @@ Codebase summary:
 {codebase_summary}
 
 Implement this feature now, following the loop in your system prompt."""
-    system_prompt = SYSTEM_PROMPT.format(dev_branch=env.dev_branch, prod_branch=env.prod_branch)
+    system_prompt = SYSTEM_PROMPT.format(local_branch=env.local_branch, prod_branch=env.prod_branch)
     return await run_agent(
         prompt=prompt,
         system_prompt=system_prompt,

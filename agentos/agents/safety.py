@@ -44,7 +44,7 @@ PROD_ONLY_BASH_PATTERNS = [
     r"--prod\b",
     r"vercel\s+[^\n]*--prod",
     r"firebase\s+deploy[^\n]*production",
-    r"firebase\s+use\s+(?!beta\b)\S+",  # switching to any firebase alias other than beta
+    r"firebase\s+use\s+(?!(pre-prod|pre_prod|beta|staging)\b)\S+",  # only the known non-prod aliases
 ]
 
 FORBIDDEN_EDIT_PATH_PATTERNS = [

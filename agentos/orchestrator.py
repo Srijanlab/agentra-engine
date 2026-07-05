@@ -3,7 +3,7 @@
 Two entry points:
 
 run_cycle() — the regular loop: understand codebase -> discover (or accept)
-a feature -> implement -> test -> deploy to BETA -> assess measurability ->
+a feature -> implement -> test -> deploy to PRE-PROD -> assess measurability ->
 repeat. Never touches production. If no feature is given, the Product
 Discovery Agent (5.3) picks one, prioritizing any known bugs filed by the
 Production Debugging Agent above ordinary feature work.
@@ -11,7 +11,7 @@ Production Debugging Agent above ordinary feature work.
 run_prod_debug_cycle() — on-demand: diagnose a production issue. If the
 app's EnvironmentConfig.auto_remediate_prod is off (the default), it stops
 at diagnosis and files a known bug for the next run_cycle() to pick up. If
-it's on, it builds the fix, proves it in beta, and only then promotes to
+it's on, it builds the fix, proves it in pre-prod, and only then promotes to
 prod — the one path in this system allowed to touch production without a
 human in the loop, and only because the app explicitly opted in.
 """
@@ -113,8 +113,8 @@ async def run_cycle(
 
     deploy_ok = None
     if not skip_deploy and test_passed:
-        mem.log(run_id, "deployment agent: deploying to beta")
-        deploy = await deployment.deploy_beta(repo, env)
+        mem.log(run_id, "deployment agent: deploying to pre-prod")
+        deploy = await deployment.deploy_pre_prod(repo, env)
         mem.log(run_id, f"deployment agent: ok={deploy.ok} turns={deploy.turns} cost=${deploy.cost_usd:.4f}")
         deploy_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         if not deploy_ok:
@@ -130,7 +130,7 @@ async def run_cycle(
         "decisions",
         f"{run_id}-summary",
         f"# Cycle {run_id}\n\nObjective: {objective}\nFeature: {feature}\n\n"
-        f"- codebase: ok\n- implementation: {impl.ok}\n- testing: {test_passed}\n- deployment (beta): {deploy_ok}\n"
+        f"- codebase: ok\n- implementation: {impl.ok}\n- testing: {test_passed}\n- deployment (pre-prod): {deploy_ok}\n"
         f"\nProduction promotion is a separate, human-gated step: `agentos promote --repo {repo}`.\n",
     )
     mem.log(run_id, "cycle complete")
@@ -143,7 +143,7 @@ async def run_cycle(
         testing_ok=test_passed,
         deployment_ok=deploy_ok,
         opportunities_considered=opportunities,
-        summary=f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} beta_deployed={deploy_ok}",
+        summary=f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} pre_prod_deployed={deploy_ok}",
     )
 
 
@@ -201,23 +201,23 @@ async def run_prod_debug_cycle(
         mem.write("failures", f"{run_id}-hotfix-implementation", impl.text)
         return ProdDebugReport(run_id, True, severity, False, False, diag.text)
 
-    mem.log(run_id, "prod-debug: deploying hotfix to beta for verification")
-    deploy = await deployment.deploy_beta(repo, env)
-    beta_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
-    if not beta_ok:
-        mem.write("failures", f"{run_id}-hotfix-beta-deploy", deploy.text)
-        mem.log(run_id, "prod-debug: beta deploy failed; NOT promoting to prod")
+    mem.log(run_id, "prod-debug: deploying hotfix to pre-prod for verification")
+    deploy = await deployment.deploy_pre_prod(repo, env)
+    pre_prod_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
+    if not pre_prod_ok:
+        mem.write("failures", f"{run_id}-hotfix-pre-prod-deploy", deploy.text)
+        mem.log(run_id, "prod-debug: pre-prod deploy failed; NOT promoting to prod")
         return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
     test = await testing.run(repo, cb.text)
     test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
-    mem.log(run_id, f"prod-debug: beta testing passed={test_passed}")
+    mem.log(run_id, f"prod-debug: pre-prod testing passed={test_passed}")
     if not test_passed:
         mem.write("failures", f"{run_id}-hotfix-testing", test.text)
-        mem.log(run_id, "prod-debug: hotfix failed beta testing; NOT promoting to prod")
+        mem.log(run_id, "prod-debug: hotfix failed pre-prod testing; NOT promoting to prod")
         return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
-    mem.log(run_id, "prod-debug: hotfix verified in beta; auto-promoting to prod (auto_remediate_prod=true)")
+    mem.log(run_id, "prod-debug: hotfix verified in pre-prod; auto-promoting to prod (auto_remediate_prod=true)")
     promote = await deployment.promote_prod(repo, env)
     promoted_ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
     mem.log(run_id, f"prod-debug: promotion ok={promoted_ok}")
@@ -228,7 +228,7 @@ async def run_prod_debug_cycle(
         "decisions",
         f"{run_id}-hotfix-summary",
         f"# Prod hotfix {run_id}\n\nSeverity: {severity}\nDiagnosis: {data.get('diagnosis', '')}\n"
-        f"Fix: {proposed_fix}\n\n- beta deploy: {beta_ok}\n- beta tests: {test_passed}\n- promoted to prod: {promoted_ok}\n",
+        f"Fix: {proposed_fix}\n\n- pre-prod deploy: {pre_prod_ok}\n- pre-prod tests: {test_passed}\n- promoted to prod: {promoted_ok}\n",
     )
 
     return ProdDebugReport(run_id, True, severity, True, promoted_ok, diag.text)

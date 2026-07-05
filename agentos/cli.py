@@ -28,7 +28,7 @@ def _add_common_run_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Path to an analytics export (JSON/CSV/text) to inform feature discovery",
     )
-    parser.add_argument("--skip-deploy", action="store_true", help="Skip the beta deployment step")
+    parser.add_argument("--skip-deploy", action="store_true", help="Skip the pre-prod deployment step")
     parser.add_argument(
         "--autonomous",
         action="store_true",
@@ -59,7 +59,7 @@ def _print_report(report) -> None:
     print(f"  codebase understood: {report.codebase_ok}")
     print(f"  implementation ok:   {report.implementation_ok}")
     print(f"  tests passed:        {report.testing_ok}")
-    print(f"  deployed to beta:    {report.deployment_ok}")
+    print(f"  deployed to pre-prod: {report.deployment_ok}")
 
 
 def _prompt(label: str, default: str) -> str:
@@ -76,33 +76,35 @@ def _prompt_bool(label: str, default: bool) -> bool:
 
 
 def _interactive_env_init(detected: environments.EnvironmentConfig) -> environments.EnvironmentConfig:
-    print("Configuring the dev -> beta -> prod pipeline. Press enter to accept each detected default.\n")
-    dev_branch = _prompt("Dev branch", detected.dev_branch)
-    beta_branch = _prompt("Beta branch", detected.beta_branch)
+    print("Configuring the local -> pre-prod -> prod pipeline. Press enter to accept each detected default.\n")
+    local_branch = _prompt("Local branch", detected.local_branch)
+    pre_prod_branch = _prompt("Pre-prod branch", detected.pre_prod_branch)
     prod_branch = _prompt("Prod branch", detected.prod_branch)
     vercel = _prompt_bool("Vercel configured for this app?", detected.vercel)
     firebase = _prompt_bool("Firebase configured for this app?", detected.firebase)
-    firebase_beta_alias = detected.firebase_beta_alias
+    firebase_pre_prod_alias = detected.firebase_pre_prod_alias
     firebase_prod_alias = detected.firebase_prod_alias
     if firebase:
-        firebase_beta_alias = _prompt("Firebase BETA project alias (in .firebaserc)", detected.firebase_beta_alias)
+        firebase_pre_prod_alias = _prompt(
+            "Firebase PRE-PROD project alias (in .firebaserc)", detected.firebase_pre_prod_alias
+        )
         firebase_prod_alias = _prompt("Firebase PROD project alias (in .firebaserc)", detected.firebase_prod_alias)
     print(
         "\nBy default, production is only ever touched via `agentos promote` "
         "(a human runs it deliberately). The option below lets the Production "
         "Debugging Agent skip that and deploy a verified hotfix straight to "
-        "prod on its own, once it has passed beta testing."
+        "prod on its own, once it has passed pre-prod testing."
     )
     auto_remediate_prod = _prompt_bool(
         "Allow autonomous hotfix deploys to production (no human approval)?", False
     )
     return environments.EnvironmentConfig(
-        dev_branch=dev_branch,
-        beta_branch=beta_branch,
+        local_branch=local_branch,
+        pre_prod_branch=pre_prod_branch,
         prod_branch=prod_branch,
         vercel=vercel,
         firebase=firebase,
-        firebase_beta_alias=firebase_beta_alias,
+        firebase_pre_prod_alias=firebase_pre_prod_alias,
         firebase_prod_alias=firebase_prod_alias,
         auto_remediate_prod=auto_remediate_prod,
     )
@@ -112,7 +114,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="agentos")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_p = sub.add_parser("run", help="Run one understand->discover->implement->test->deploy-to-beta cycle")
+    run_p = sub.add_parser("run", help="Run one understand->discover->implement->test->deploy-to-pre-prod cycle")
     _add_common_run_args(run_p)
 
     loop_p = sub.add_parser("loop", help="Run repeated autonomous cycles (vision.md section 6)")
@@ -124,14 +126,14 @@ def main() -> None:
         help="Stop the loop as soon as a cycle fails implementation or testing",
     )
 
-    env_p = sub.add_parser("env", help="Manage per-app dev/beta/prod environment config")
+    env_p = sub.add_parser("env", help="Manage per-app local/pre-prod/prod environment config")
     env_sub = env_p.add_subparsers(dest="env_command", required=True)
     env_init_p = env_sub.add_parser("init", help="Detect and configure this app's environment pipeline")
     env_init_p.add_argument("--repo", required=True, type=Path)
     env_init_p.add_argument("--yes", action="store_true", help="Skip prompts; use detected values and flags as-is")
     env_init_p.add_argument("--auto-remediate-prod", action="store_true", default=False)
 
-    promote_p = sub.add_parser("promote", help="Human-approved: promote the current beta branch to production")
+    promote_p = sub.add_parser("promote", help="Human-approved: promote the current pre-prod branch to production")
     promote_p.add_argument("--repo", required=True, type=Path)
     promote_p.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
 
@@ -229,7 +231,7 @@ def main() -> None:
         env = environments.load(repo) or environments.EnvironmentConfig()
         if not args.yes:
             confirm = input(
-                f"This will merge '{env.beta_branch}' into '{env.prod_branch}' and deploy to PRODUCTION. "
+                f"This will merge '{env.pre_prod_branch}' into '{env.prod_branch}' and deploy to PRODUCTION. "
                 f"Type 'promote' to confirm: "
             ).strip()
             if confirm != "promote":
