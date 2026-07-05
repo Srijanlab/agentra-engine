@@ -1,17 +1,28 @@
 """Orchestrator Agent (vision.md 5.1).
 
-Drives one full cycle: understand codebase -> discover (or accept) a feature
--> implement -> test -> deploy to preview -> assess measurability -> repeat.
-If no feature is given, the Product Discovery Agent (vision.md 5.3) picks one
-from the codebase, analytics, and what's already shipped — this is what makes
-the system autonomous instead of a prompt-driven assistant.
+Two entry points:
+
+run_cycle() — the regular loop: understand codebase -> discover (or accept)
+a feature -> implement -> test -> deploy to BETA -> assess measurability ->
+repeat. Never touches production. If no feature is given, the Product
+Discovery Agent (5.3) picks one, prioritizing any known bugs filed by the
+Production Debugging Agent above ordinary feature work.
+
+run_prod_debug_cycle() — on-demand: diagnose a production issue. If the
+app's EnvironmentConfig.auto_remediate_prod is off (the default), it stops
+at diagnosis and files a known bug for the next run_cycle() to pick up. If
+it's on, it builds the fix, proves it in beta, and only then promotes to
+prod — the one path in this system allowed to touch production without a
+human in the loop, and only because the app explicitly opted in.
 """
 
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentos.agents import codebase, deployment, discovery, feedback, implementation, testing
+from agentos.agents import codebase, deployment, discovery, feedback, implementation, prod_debug, testing
+from agentos.environments import EnvironmentConfig
+from agentos import environments
 from agentos.memory import Memory
 from agentos.ranking import rank
 
@@ -28,6 +39,24 @@ class CycleReport:
     summary: str = ""
 
 
+@dataclass
+class ProdDebugReport:
+    run_id: str
+    root_cause_found: bool
+    severity: str | None
+    fix_attempted: bool
+    promoted_to_prod: bool
+    diagnosis_text: str
+
+
+def _load_env(repo: Path, mem: Memory, run_id: str) -> EnvironmentConfig:
+    env = environments.load(repo)
+    if env is None:
+        mem.log(run_id, "no .agentos/environments.yaml found; using defaults (run `agentos env init` to configure)")
+        env = EnvironmentConfig()
+    return env
+
+
 async def run_cycle(
     repo: Path,
     objective: str,
@@ -39,6 +68,7 @@ async def run_cycle(
     mem = Memory(repo)
     run_id = uuid.uuid4().hex[:8]
     mem.log(run_id, f"cycle start | objective={objective!r} feature={feature!r}")
+    env = _load_env(repo, mem, run_id)
 
     mem.log(run_id, "codebase agent: starting")
     cb = await codebase.run(repo)
@@ -51,7 +81,9 @@ async def run_cycle(
     feature_brief = feature or ""
     if feature is None:
         mem.log(run_id, "discovery agent: starting")
-        disc = await discovery.run(repo, objective, cb.text, analytics_summary, mem.shipped_features())
+        disc = await discovery.run(
+            repo, objective, cb.text, analytics_summary, mem.shipped_features(), mem.known_bugs()
+        )
         mem.write("decisions", f"{run_id}-discovery", disc.text)
         mem.log(run_id, f"discovery agent: ok={disc.ok} turns={disc.turns} cost=${disc.cost_usd:.4f}")
         opportunities = rank((disc.json_data or {}).get("opportunities", []))
@@ -81,8 +113,8 @@ async def run_cycle(
 
     deploy_ok = None
     if not skip_deploy and test_passed:
-        mem.log(run_id, "deployment agent: starting")
-        deploy = await deployment.run(repo)
+        mem.log(run_id, "deployment agent: deploying to beta")
+        deploy = await deployment.deploy_beta(repo, env)
         mem.log(run_id, f"deployment agent: ok={deploy.ok} turns={deploy.turns} cost=${deploy.cost_usd:.4f}")
         deploy_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         if not deploy_ok:
@@ -98,7 +130,8 @@ async def run_cycle(
         "decisions",
         f"{run_id}-summary",
         f"# Cycle {run_id}\n\nObjective: {objective}\nFeature: {feature}\n\n"
-        f"- codebase: ok\n- implementation: {impl.ok}\n- testing: {test_passed}\n- deployment: {deploy_ok}\n",
+        f"- codebase: ok\n- implementation: {impl.ok}\n- testing: {test_passed}\n- deployment (beta): {deploy_ok}\n"
+        f"\nProduction promotion is a separate, human-gated step: `agentos promote --repo {repo}`.\n",
     )
     mem.log(run_id, "cycle complete")
 
@@ -110,8 +143,95 @@ async def run_cycle(
         testing_ok=test_passed,
         deployment_ok=deploy_ok,
         opportunities_considered=opportunities,
-        summary=f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} deployment_ok={deploy_ok}",
+        summary=f"feature={feature!r} implementation_ok={impl.ok} testing_ok={test_passed} beta_deployed={deploy_ok}",
     )
+
+
+async def run_promote(repo: Path) -> dict:
+    """Human-triggered prod promotion: `agentos promote`. Always allow_prod=True
+    here because a human explicitly invoked it — this is the approval gate."""
+    repo = repo.resolve()
+    mem = Memory(repo)
+    run_id = uuid.uuid4().hex[:8]
+    env = _load_env(repo, mem, run_id)
+    mem.log(run_id, "promote: human-approved promotion to production starting")
+    promote = await deployment.promote_prod(repo, env)
+    ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
+    mem.log(run_id, f"promote: ok={ok}")
+    if not ok:
+        mem.write("failures", f"{run_id}-prod-promote", promote.text)
+    return {"run_id": run_id, "ok": ok, "text": promote.text}
+
+
+async def run_prod_debug_cycle(
+    repo: Path,
+    objective: str,
+    symptom: str | None = None,
+) -> ProdDebugReport:
+    repo = repo.resolve()
+    mem = Memory(repo)
+    run_id = uuid.uuid4().hex[:8]
+    mem.log(run_id, f"prod-debug start | symptom={symptom!r}")
+    env = _load_env(repo, mem, run_id)
+
+    mem.log(run_id, "prod-debug agent: diagnosing")
+    diag = await prod_debug.diagnose(repo, env, symptom)
+    mem.write("failures", f"{run_id}-prod-issue", diag.text)
+    mem.log(run_id, f"prod-debug agent: ok={diag.ok} turns={diag.turns} cost=${diag.cost_usd:.4f}")
+
+    data = diag.json_data or {}
+    if not diag.ok or not data.get("root_cause_found"):
+        mem.log(run_id, "prod-debug: no confident root cause found; stopping")
+        return ProdDebugReport(run_id, False, None, False, False, diag.text)
+
+    severity = data.get("severity", "unknown")
+    proposed_fix = data.get("proposed_fix", "")
+
+    if not env.auto_remediate_prod:
+        mem.record_known_bug(run_id, severity, data.get("diagnosis", ""), proposed_fix)
+        mem.log(run_id, "prod-debug: auto_remediate_prod is off; filed as known bug for next discovery cycle")
+        return ProdDebugReport(run_id, True, severity, False, False, diag.text)
+
+    mem.log(run_id, "prod-debug: auto_remediate_prod is on; building fix")
+    cb = await codebase.run(repo)
+    impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text)
+    mem.write("features", f"{run_id}-hotfix", impl.text)
+    mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
+    if not impl.ok:
+        mem.write("failures", f"{run_id}-hotfix-implementation", impl.text)
+        return ProdDebugReport(run_id, True, severity, False, False, diag.text)
+
+    mem.log(run_id, "prod-debug: deploying hotfix to beta for verification")
+    deploy = await deployment.deploy_beta(repo, env)
+    beta_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
+    if not beta_ok:
+        mem.write("failures", f"{run_id}-hotfix-beta-deploy", deploy.text)
+        mem.log(run_id, "prod-debug: beta deploy failed; NOT promoting to prod")
+        return ProdDebugReport(run_id, True, severity, True, False, diag.text)
+
+    test = await testing.run(repo, cb.text)
+    test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
+    mem.log(run_id, f"prod-debug: beta testing passed={test_passed}")
+    if not test_passed:
+        mem.write("failures", f"{run_id}-hotfix-testing", test.text)
+        mem.log(run_id, "prod-debug: hotfix failed beta testing; NOT promoting to prod")
+        return ProdDebugReport(run_id, True, severity, True, False, diag.text)
+
+    mem.log(run_id, "prod-debug: hotfix verified in beta; auto-promoting to prod (auto_remediate_prod=true)")
+    promote = await deployment.promote_prod(repo, env)
+    promoted_ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
+    mem.log(run_id, f"prod-debug: promotion ok={promoted_ok}")
+    if not promoted_ok:
+        mem.write("failures", f"{run_id}-hotfix-prod-promote", promote.text)
+
+    mem.write(
+        "decisions",
+        f"{run_id}-hotfix-summary",
+        f"# Prod hotfix {run_id}\n\nSeverity: {severity}\nDiagnosis: {data.get('diagnosis', '')}\n"
+        f"Fix: {proposed_fix}\n\n- beta deploy: {beta_ok}\n- beta tests: {test_passed}\n- promoted to prod: {promoted_ok}\n",
+    )
+
+    return ProdDebugReport(run_id, True, severity, True, promoted_ok, diag.text)
 
 
 def _slug(text: str) -> str:

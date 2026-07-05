@@ -1,9 +1,15 @@
 """Safety gate shared by every agent that gets Bash/Write/Edit access.
 
-Implements the "Forbidden Actions" list from vision.md section 8: no production
-deploys, no destructive data operations, no secrets/billing edits, no
-irreversible operations. This is a blunt regex net, not a sandbox — it exists
-to catch an agent following bad instructions, not a malicious one.
+Implements the "Forbidden Actions" list from vision.md section 8: no
+production deploys, no destructive data operations, no secrets/billing edits,
+no irreversible operations. This is a blunt regex net, not a sandbox — it
+exists to catch an agent following bad instructions, not a malicious one.
+
+Production access is normally blocked outright. The *only* exception is the
+Production Debugging Agent's opt-in auto-remediate path (orchestrator.py),
+which passes allow_prod=True for the single promote-to-prod call it makes —
+and only for apps that set auto_remediate_prod: true in their environment
+config. Every other agent, and every other call, keeps prod blocked.
 """
 
 import re
@@ -14,14 +20,19 @@ FORBIDDEN_BASH_PATTERNS = [
     r"rm\s+-rf\s+/(?:\s|$)",
     r"git\s+push\s+[^\n]*--force",
     r"git\s+reset\s+--hard\s+[^\n]*(main|master|production)",
-    r"--prod\b",
-    r"vercel\s+[^\n]*--prod",
-    r"firebase\s+deploy[^\n]*production",
     r"\bDROP\s+TABLE\b",
     r"\bDELETE\s+FROM\s+\w+\s*;?\s*$",
     r"\.env(?:\.\w+)?\b",
     r"stripe\b",
     r"billing",
+]
+
+# Only enforced when allow_prod=False (the default for every agent call).
+PROD_ONLY_BASH_PATTERNS = [
+    r"--prod\b",
+    r"vercel\s+[^\n]*--prod",
+    r"firebase\s+deploy[^\n]*production",
+    r"firebase\s+use\s+(?!beta\b)\S+",  # switching to any firebase alias other than beta
 ]
 
 FORBIDDEN_EDIT_PATH_PATTERNS = [
@@ -31,24 +42,44 @@ FORBIDDEN_EDIT_PATH_PATTERNS = [
 ]
 
 
-async def guarded_can_use_tool(tool_name, tool_input, context: ToolPermissionContext):
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        for pattern in FORBIDDEN_BASH_PATTERNS:
-            if re.search(pattern, command, re.IGNORECASE):
-                return PermissionResultDeny(
-                    message=(
-                        f"Blocked by safety policy: command matches forbidden "
-                        f"pattern for autonomous execution ({pattern!r}). "
-                        "Production deploys, destructive data ops, and secrets "
-                        "access require human approval."
+def make_can_use_tool(allow_prod: bool = False):
+    """Build a can_use_tool callback. allow_prod must only be True for the
+    single, explicitly-approved prod-promotion call — never as a default."""
+
+    async def guarded_can_use_tool(tool_name, tool_input, context: ToolPermissionContext):
+        if tool_name == "Bash":
+            command = tool_input.get("command", "")
+            for pattern in FORBIDDEN_BASH_PATTERNS:
+                if re.search(pattern, command, re.IGNORECASE):
+                    return PermissionResultDeny(
+                        message=(
+                            f"Blocked by safety policy: command matches forbidden "
+                            f"pattern for autonomous execution ({pattern!r}). "
+                            "Destructive data ops and secrets/billing access are "
+                            "never allowed autonomously."
+                        )
                     )
-                )
-    if tool_name in ("Write", "Edit"):
-        path = str(tool_input.get("file_path", ""))
-        for pattern in FORBIDDEN_EDIT_PATH_PATTERNS:
-            if re.search(pattern, path, re.IGNORECASE):
-                return PermissionResultDeny(
-                    message=f"Blocked by safety policy: refusing to edit {path!r} autonomously."
-                )
-    return PermissionResultAllow()
+            if not allow_prod:
+                for pattern in PROD_ONLY_BASH_PATTERNS:
+                    if re.search(pattern, command, re.IGNORECASE):
+                        return PermissionResultDeny(
+                            message=(
+                                f"Blocked by safety policy: command touches production "
+                                f"({pattern!r}). Production changes require the explicit, "
+                                "opted-in promote/auto-remediate path, not this agent."
+                            )
+                        )
+        if tool_name in ("Write", "Edit"):
+            path = str(tool_input.get("file_path", ""))
+            for pattern in FORBIDDEN_EDIT_PATH_PATTERNS:
+                if re.search(pattern, path, re.IGNORECASE):
+                    return PermissionResultDeny(
+                        message=f"Blocked by safety policy: refusing to edit {path!r} autonomously."
+                    )
+        return PermissionResultAllow()
+
+    return guarded_can_use_tool
+
+
+# Default policy used by every agent unless it explicitly opts into allow_prod.
+guarded_can_use_tool = make_can_use_tool(allow_prod=False)

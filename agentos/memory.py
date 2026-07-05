@@ -18,6 +18,7 @@ class Memory:
         self.memory_root = self.root / "memory"
         self.log_root = self.root / "logs"
         self.shipped_path = self.root / "shipped.json"
+        self.known_bugs_path = self.root / "known_bugs.json"
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -50,3 +51,24 @@ class Memory:
         if feature not in features:
             features.append(feature)
             self.shipped_path.write_text(json.dumps(features, indent=2))
+
+    def known_bugs(self) -> list[dict]:
+        if not self.known_bugs_path.exists():
+            return []
+        return json.loads(self.known_bugs_path.read_text())
+
+    def record_known_bug(self, run_id: str, severity: str, diagnosis: str, proposed_fix: str) -> None:
+        bugs = self.known_bugs()
+        bugs.append(
+            {
+                "run_id": run_id,
+                "severity": severity,
+                "diagnosis": diagnosis,
+                "proposed_fix": proposed_fix,
+            }
+        )
+        self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
+
+    def clear_known_bug(self, run_id: str) -> None:
+        bugs = [b for b in self.known_bugs() if b.get("run_id") != run_id]
+        self.known_bugs_path.write_text(json.dumps(bugs, indent=2))

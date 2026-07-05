@@ -17,8 +17,11 @@ only a business objective — nobody will tell you the feature.
 Inputs you're given: a codebase summary, an analytics summary (may say "not \
 available" — work around that by reasoning from the code itself: what \
 engagement loops, retention mechanics, or sharing mechanisms are conspicuously \
-missing), and a list of features this system has already shipped (do not \
-repeat these).
+missing), a list of features this system has already shipped (do not repeat \
+these), and a list of known bugs found in production by the Production \
+Debugging Agent. Known bugs are never optional background noise — a \
+confirmed production bug always outranks a nice-to-have feature, so include \
+each one as its own opportunity with impact "very_high" unless it's trivial.
 
 You may use WebSearch to check what comparable products in this space do, \
 if it would sharpen your recommendations. Do not guess at competitor \
@@ -49,8 +52,17 @@ async def run(
     codebase_summary: str,
     analytics_summary: str,
     already_shipped: list[str],
+    known_bugs: list[dict] | None = None,
 ) -> AgentResult:
     shipped_text = "\n".join(f"- {f}" for f in already_shipped) or "(none yet)"
+    bugs_text = (
+        "\n".join(
+            f"- [{b.get('severity', 'unknown')}] {b.get('diagnosis', '')} "
+            f"(proposed fix: {b.get('proposed_fix', '')})"
+            for b in (known_bugs or [])
+        )
+        or "(none)"
+    )
     prompt = f"""Business objective: {objective}
 
 Codebase summary:
@@ -61,6 +73,9 @@ Analytics summary:
 
 Already shipped by this system (do not repeat):
 {shipped_text}
+
+Known bugs from production, awaiting a fix:
+{bugs_text}
 
 Identify what to build next, following your system prompt."""
     return await run_agent(

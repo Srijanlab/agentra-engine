@@ -9,7 +9,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
-from agentos.agents.safety import guarded_can_use_tool
+from agentos.agents.safety import make_can_use_tool
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 
@@ -51,14 +51,20 @@ async def run_agent(
     allowed_tools: list[str],
     permission_mode: str = "bypassPermissions",
     max_turns: int | None = None,
+    allow_prod: bool = False,
 ) -> AgentResult:
-    """Run one agent to completion and return its final result message."""
+    """Run one agent to completion and return its final result message.
+
+    allow_prod must only be set True for the single, explicitly-approved
+    prod-promotion call in the auto-remediate hotfix path — never as a
+    general default. See agents/safety.py.
+    """
     options = ClaudeAgentOptions(
         cwd=str(cwd),
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
-        can_use_tool=guarded_can_use_tool,
+        can_use_tool=make_can_use_tool(allow_prod=allow_prod),
         max_turns=max_turns,
     )
 
