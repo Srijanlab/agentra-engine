@@ -87,16 +87,19 @@ def _tools_for(session: OrchestratorSession) -> list:
 
     @tool(
         "check_backlog",
-        "See what's already shipped (don't repeat it) and what known bugs are pending "
-        "from production (a confirmed bug always outranks a nice-to-have feature).",
+        "See what's already shipped (don't repeat it), what known bugs are pending "
+        "(a confirmed bug always outranks a nice-to-have feature), and what's in the "
+        "feature request queue (customer/admin submitted -- outranks your own ideation).",
         {},
     )
     async def check_backlog(_args):
         shipped = session.mem.shipped_features()
         bugs = session.mem.known_bugs()
+        queue = session.mem.feature_queue()
         text = (
             f"Already shipped: {shipped or '(none)'}\n\n"
-            f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}"
+            f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
+            f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}"
         )
         session.note("check_backlog")
         return {"content": [{"type": "text", "text": text}]}
@@ -117,6 +120,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.analytics_summary,
             session.mem.shipped_features(),
             session.mem.known_bugs(),
+            session.mem.feature_queue(),
         )
         session.cost_usd += disc.cost_usd
         session.mem.write("decisions", f"{session.run_id}-discovery", disc.text)

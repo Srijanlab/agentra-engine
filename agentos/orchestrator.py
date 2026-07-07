@@ -83,7 +83,7 @@ async def run_cycle(
     if feature is None:
         mem.log(run_id, "discovery agent: starting")
         disc = await discovery.run(
-            repo, objective, cb.text, analytics_summary, mem.shipped_features(), mem.known_bugs()
+            repo, objective, cb.text, analytics_summary, mem.shipped_features(), mem.known_bugs(), mem.feature_queue()
         )
         mem.write("decisions", f"{run_id}-discovery", disc.text)
         mem.log(run_id, f"discovery agent: ok={disc.ok} turns={disc.turns} cost=${disc.cost_usd:.4f}")

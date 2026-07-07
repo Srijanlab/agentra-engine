@@ -2,8 +2,9 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from agentos import environments
+from agentos import environments, registry
 from agentos.agents.brain import run_autonomous_cycle
+from agentos.memory import Memory
 from agentos.orchestrator import run_cycle, run_prod_debug_cycle, run_promote
 
 
@@ -14,9 +15,30 @@ def _read_analytics(path: Path | None) -> str:
     return text[:20000]
 
 
+def _resolve_objective(repo: Path, cli_value: str | None) -> str:
+    """--objective always wins if given; otherwise fall back to the persistent
+    setting (`agentos objective set`, or an objective_change request absorbed by
+    `agentos dispatch`) so a scheduled/unattended run doesn't need one passed
+    in every time."""
+    if cli_value:
+        return cli_value
+    stored = Memory(repo).get_objective()
+    if stored:
+        return stored
+    raise SystemExit(
+        "No --objective given and none set for this repo. Either pass --objective, "
+        "or run `agentos objective set \"...\" --repo <repo>` first."
+    )
+
+
 def _add_common_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", required=True, type=Path, help="Path to the target repository")
-    parser.add_argument("--objective", required=True, help="Business objective, e.g. 'improve retention'")
+    parser.add_argument(
+        "--objective",
+        default=None,
+        help="Business objective, e.g. 'improve retention'. Omit to use the persistent "
+        "setting from `agentos objective set`.",
+    )
     parser.add_argument(
         "--feature",
         default=None,
@@ -147,20 +169,49 @@ def main() -> None:
 
     debug_p = sub.add_parser("debug-prod", help="Diagnose (and, if opted in, auto-remediate) a production issue")
     debug_p.add_argument("--repo", required=True, type=Path)
-    debug_p.add_argument("--objective", required=True, help="Business objective, used if a fix is built")
+    debug_p.add_argument(
+        "--objective", default=None, help="Business objective, used if a fix is built. Omit to use the persistent setting."
+    )
     debug_p.add_argument("--symptom", default=None, help="What's wrong, if known (else the agent scans logs itself)")
+
+    obj_p = sub.add_parser("objective", help="Manage the persistent business objective for a repo")
+    obj_sub = obj_p.add_subparsers(dest="objective_command", required=True)
+    obj_set_p = obj_sub.add_parser("set", help="Set the current objective")
+    obj_set_p.add_argument("objective_text")
+    obj_set_p.add_argument("--repo", required=True, type=Path)
+    obj_show_p = obj_sub.add_parser("show", help="Show the current objective")
+    obj_show_p.add_argument("--repo", required=True, type=Path)
+
+    apps_p = sub.add_parser("apps", help="Manage the multi-app registry (~/.agentos/apps.json)")
+    apps_sub = apps_p.add_subparsers(dest="apps_command", required=True)
+    apps_add_p = apps_sub.add_parser("add", help="Register an app")
+    apps_add_p.add_argument("name")
+    apps_add_p.add_argument("--repo", required=True, type=Path)
+    apps_sub.add_parser("list", help="List registered apps")
+    apps_remove_p = apps_sub.add_parser("remove", help="Unregister an app")
+    apps_remove_p.add_argument("name")
+
+    submit_p = sub.add_parser("submit", help="Durably submit a request into an app's inbox")
+    submit_p.add_argument("--app", required=True, help="Registered app name (see `agentos apps list`)")
+    submit_p.add_argument("--type", required=True, choices=registry.REQUEST_TYPES)
+    submit_p.add_argument("--description", required=True)
+    submit_p.add_argument("--severity", default=None, help="For --type bug: low|medium|high|critical")
+    submit_p.add_argument("--screenshot-url", default=None)
+
+    sub.add_parser("dispatch", help="Absorb everything currently in the inbox into each app's ledgers")
 
     args = parser.parse_args()
 
     if args.command == "run":
         analytics_summary = _read_analytics(args.analytics)
+        repo = args.repo.resolve()
+        objective = _resolve_objective(repo, args.objective)
         if args.autonomous:
-            repo = args.repo.resolve()
             env = environments.load(repo) or environments.EnvironmentConfig()
             report = asyncio.run(
                 run_autonomous_cycle(
                     repo,
-                    args.objective,
+                    objective,
                     env,
                     analytics_summary=analytics_summary,
                     feature=args.feature,
@@ -171,8 +222,8 @@ def main() -> None:
         else:
             report = asyncio.run(
                 run_cycle(
-                    args.repo,
-                    args.objective,
+                    repo,
+                    objective,
                     feature=args.feature,
                     analytics_summary=analytics_summary,
                     skip_deploy=args.skip_deploy,
@@ -185,6 +236,7 @@ def main() -> None:
     elif args.command == "loop":
         analytics_summary = _read_analytics(args.analytics)
         repo = args.repo.resolve()
+        objective = _resolve_objective(repo, args.objective)
         env = environments.load(repo) or environments.EnvironmentConfig() if args.autonomous else None
         for i in range(1, args.cycles + 1):
             print(f"\n{'=' * 60}\nCycle {i}/{args.cycles}\n{'=' * 60}")
@@ -193,7 +245,7 @@ def main() -> None:
                 report = asyncio.run(
                     run_autonomous_cycle(
                         repo,
-                        args.objective,
+                        objective,
                         env,
                         analytics_summary=analytics_summary,
                         feature=feature,
@@ -204,8 +256,8 @@ def main() -> None:
                 continue
             report = asyncio.run(
                 run_cycle(
-                    args.repo,
-                    args.objective,
+                    repo,
+                    objective,
                     feature=feature,
                     analytics_summary=analytics_summary,
                     skip_deploy=args.skip_deploy,
@@ -252,7 +304,9 @@ def main() -> None:
             print(f"  details written to <repo>/.agentos/memory/failures/{result['run_id']}-prod-promote.md")
 
     elif args.command == "debug-prod":
-        report = asyncio.run(run_prod_debug_cycle(args.repo, args.objective, symptom=args.symptom))
+        repo = args.repo.resolve()
+        objective = _resolve_objective(repo, args.objective)
+        report = asyncio.run(run_prod_debug_cycle(repo, objective, symptom=args.symptom))
         print(f"\nRun {report.run_id}")
         print(f"  root cause found:  {report.root_cause_found}")
         print(f"  severity:          {report.severity}")
@@ -263,6 +317,49 @@ def main() -> None:
                 "\n  Filed as a known bug for the next `agentos run`/`agentos loop` "
                 "cycle (auto_remediate_prod is off for this app)."
             )
+
+    elif args.command == "objective" and args.objective_command == "set":
+        path = Memory(args.repo.resolve()).set_objective(args.objective_text)
+        print(f"Wrote {path}")
+        print(f"objective: {args.objective_text}")
+
+    elif args.command == "objective" and args.objective_command == "show":
+        objective = Memory(args.repo.resolve()).get_objective()
+        print(objective if objective else "(no objective set for this repo)")
+
+    elif args.command == "apps" and args.apps_command == "add":
+        registry.register_app(args.name, str(args.repo.resolve()))
+        print(f"Registered {args.name!r} -> {args.repo.resolve()}")
+
+    elif args.command == "apps" and args.apps_command == "list":
+        apps = registry.list_apps()
+        if not apps:
+            print("(no apps registered)")
+        for name, info in apps.items():
+            print(f"  {name}: {info['repo_path']}")
+
+    elif args.command == "apps" and args.apps_command == "remove":
+        removed = registry.remove_app(args.name)
+        print(f"Removed {args.name!r}" if removed else f"{args.name!r} was not registered")
+
+    elif args.command == "submit":
+        request_id = registry.submit_request(
+            app=args.app,
+            request_type=args.type,
+            description=args.description,
+            severity=args.severity,
+            screenshot_url=args.screenshot_url,
+        )
+        print(f"Submitted request {request_id} for app {args.app!r} (pending in the inbox until `agentos dispatch` runs)")
+
+    elif args.command == "dispatch":
+        summary = registry.dispatch_once()
+        print(f"Resumed stale (crashed prior run): {summary.resumed_stale}")
+        print(f"Processed: {summary.processed}")
+        if summary.errors:
+            print(f"Errors ({len(summary.errors)}):")
+            for err in summary.errors:
+                print(f"  - {err}")
 
 
 if __name__ == "__main__":
