@@ -34,9 +34,18 @@ COPY --from=builder /install /usr/local
 # the image, instead of the root ownership Docker would otherwise copy in from a
 # root-created WORKDIR. This means cloning, committing, and everything else this image
 # does never needs --user root / chown / su anywhere, in local or server use.
+#
+# Same reasoning applies to /home/agentuser/.claude below: `useradd --create-home` only
+# creates /home/agentuser itself, never the nested .claude subdirectory the CLI expects
+# (CLAUDE_CONFIG_DIR) -- so a fresh named volume mounted there (agentos-claude-home in
+# docker-compose.yml / run-agent.sh) got Docker's default root:root mount-point
+# ownership instead. Confirmed live: the CLI's own session-env setup failed with
+# `EACCES: permission denied, mkdir '/home/agentuser/.claude/session-env'` on every
+# write/process-execution tool (Bash, Write) while read-only tools kept working --
+# consistent with agentuser being unable to write under a root-owned .claude.
 RUN useradd --create-home --shell /bin/bash agentuser \
-    && mkdir -p /workspace \
-    && chown agentuser:agentuser /workspace
+    && mkdir -p /workspace /home/agentuser/.claude \
+    && chown agentuser:agentuser /workspace /home/agentuser/.claude
 
 # Claude CLI stores its config here; a named volume is mounted at runtime
 # so OAuth tokens / session state persist across container restarts.
