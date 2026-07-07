@@ -39,7 +39,7 @@ export REPO_PATH=/Users/you/projects/my-app
 
 # 3. Set your git identity (used for commits made by the agent)
 export GIT_AUTHOR_NAME="agentos-bot"
-export GIT_AUTHOR_EMAIL="agentos@localhost"
+export GIT_AUTHOR_EMAIL="rossharma1@gmail.com"
 
 # 4. Run a single improvement cycle
 ./run-agent.sh run \
@@ -105,9 +105,9 @@ docker run --rm -it \
   --cap-drop ALL \
   --env CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
   --env GIT_AUTHOR_NAME="agentos-bot" \
-  --env GIT_AUTHOR_EMAIL="agentos@localhost" \
+  --env GIT_AUTHOR_EMAIL="rossharma1@gmail.com" \
   --env GIT_COMMITTER_NAME="agentos-bot" \
-  --env GIT_COMMITTER_EMAIL="agentos@localhost" \
+  --env GIT_COMMITTER_EMAIL="rossharma1@gmail.com" \
   agentos:local run \
     --objective "improve engagement" \
     --skip-deploy

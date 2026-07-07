@@ -59,9 +59,9 @@ docker run --rm -it \
   --env "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
   --env "GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-agentos-bot}" \
-  --env "GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-agentos@localhost}" \
+  --env "GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-rossharma1@gmail.com}" \
   --env "GIT_COMMITTER_NAME=${GIT_AUTHOR_NAME:-agentos-bot}" \
-  --env "GIT_COMMITTER_EMAIL=${GIT_AUTHOR_EMAIL:-agentos@localhost}" \
+  --env "GIT_COMMITTER_EMAIL=${GIT_AUTHOR_EMAIL:-rossharma1@gmail.com}" \
   --env "VERCEL_TOKEN=${VERCEL_TOKEN:-}" \
   --env "FIREBASE_TOKEN=${FIREBASE_TOKEN:-}" \
   "$IMAGE_NAME" "$@"
