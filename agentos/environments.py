@@ -16,6 +16,11 @@ from pathlib import Path
 
 @dataclass
 class EnvironmentConfig:
+    # Prefix for each cycle's dedicated feature branch (see feature_branch_name
+    # below), not a single shared branch -- every feature gets its own
+    # "{local_branch}/{run_id}-{feature-slug}" branch, forked fresh from
+    # pre-prod's tip, so concurrent/sequential features never pile onto or
+    # conflict with each other.
     local_branch: str = "dev"
     pre_prod_branch: str = "beta"
     prod_branch: str = "main"
@@ -23,6 +28,13 @@ class EnvironmentConfig:
     firebase: bool = False
     firebase_pre_prod_alias: str = "beta"
     firebase_prod_alias: str = "default"
+    # True when this app already has CI/CD that deploys on push to pre_prod_branch/
+    # prod_branch (GitHub Actions, Vercel's git integration, etc.) -- Deployment
+    # Agent then only merges + pushes (see agents/deployment.py) and verifies the
+    # resulting CI run, rather than also invoking `vercel deploy`/`firebase deploy`
+    # itself, which would be redundant with (and could race/conflict with) the
+    # pipeline that's about to fire from the same push.
+    ci_cd_on_push: bool = False
     # Opt-in only. When true, the Production Debugging Agent may deploy a
     # verified hotfix straight to prod once it passes pre-prod testing, with
     # no human approval step. False is the safe default for every app.
@@ -124,7 +136,36 @@ def detect(repo: Path) -> EnvironmentConfig:
     elif "local" in branches:
         config.local_branch = "local"
 
+    config.ci_cd_on_push = _has_push_triggered_workflow(repo)
+
     return config
+
+
+def _has_push_triggered_workflow(repo: Path) -> bool:
+    """Best-effort: any GitHub Actions workflow that triggers on push. Good enough as
+    a detected default -- the human confirms/overrides it in `agentos env init`."""
+    workflows_dir = repo / ".github" / "workflows"
+    if not workflows_dir.is_dir():
+        return False
+    for path in workflows_dir.glob("*.y*ml"):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        if "on:" in text and "push:" in text:
+            return True
+    return False
+
+
+def slug(text: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")[:60]
+
+
+def feature_branch_name(env: EnvironmentConfig, run_id: str, feature: str) -> str:
+    """Dedicated branch for one cycle's feature -- shared by both orchestrator.py's
+    fixed sequence and brain.py's dynamic tool loop. Never reuse a branch across
+    different run_ids/features (see EnvironmentConfig.local_branch above for why)."""
+    return f"{env.local_branch}/{run_id}-{slug(feature)}"
 
 
 def _git_branches(repo: Path) -> list[str]:

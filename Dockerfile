@@ -28,18 +28,29 @@ RUN npm install -g @anthropic-ai/claude-code vercel firebase-tools --no-update-n
 # Copy installed agentos from builder
 COPY --from=builder /install /usr/local
 
-# Create a non-root user for safer execution
-RUN useradd --create-home --shell /bin/bash agentuser
+# Create a non-root user for safer execution, and pre-create /workspace owned by it --
+# so a *fresh* named/anonymous volume mounted at /workspace (the server/clone-on-start
+# case: no pre-existing host checkout to bind-mount) inherits agentuser ownership from
+# the image, instead of the root ownership Docker would otherwise copy in from a
+# root-created WORKDIR. This means cloning, committing, and everything else this image
+# does never needs --user root / chown / su anywhere, in local or server use.
+RUN useradd --create-home --shell /bin/bash agentuser \
+    && mkdir -p /workspace \
+    && chown agentuser:agentuser /workspace
 
 # Claude CLI stores its config here; a named volume is mounted at runtime
 # so OAuth tokens / session state persist across container restarts.
 ENV CLAUDE_CONFIG_DIR=/home/agentuser/.claude
 
-# Target repo is always mounted at /workspace
 WORKDIR /workspace
 
-# Switch to non-root for all agent operations
+# Switch to non-root for all agent operations -- everything from here on, including
+# the entrypoint script below, runs as agentuser, never root.
 USER agentuser
+
+COPY --chown=agentuser:agentuser docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chown=agentuser:agentuser git-askpass.sh /usr/local/bin/git-askpass.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/git-askpass.sh
 
 # ─── Auth note ─────────────────────────────────────────────────────────────────
 # Pass one of:
@@ -48,7 +59,20 @@ USER agentuser
 #
 # The CLI reads CLAUDE_CODE_OAUTH_TOKEN before checking the credentials file,
 # so no file mounts are needed when using this env var.
+#
+# ─── Server / clone-on-start mode ──────────────────────────────────────────────
+# Local/dev usage (bind-mount a host checkout at /workspace) needs nothing extra --
+# the entrypoint sees /workspace already has content and runs agentos directly, same
+# as always. For a server with no pre-existing checkout, mount an empty volume at
+# /workspace and additionally set:
+#   GIT_CLONE_URL=https://x-access-token@github.com/OWNER/REPO.git
+#   GIT_CLONE_BRANCH=main                 (defaults to main)
+#   GITHUB_TOKEN=<token>  +  GIT_ASKPASS=/usr/local/bin/git-askpass.sh
+#     (a one-line script that echoes $GITHUB_TOKEN -- keeps the token out of
+#     .git/config entirely; git invokes it for the password prompt only, since
+#     the username is already in the URL as x-access-token@)
+# The entrypoint then clones before handing off to agentos.
 # ──────────────────────────────────────────────────────────────────────────────
 
-ENTRYPOINT ["agentos"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--help"]

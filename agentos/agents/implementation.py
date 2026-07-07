@@ -4,12 +4,27 @@ Owns the implement -> test -> fix -> retry loop for a single feature. Runs
 inside one long agent turn so it can self-correct against its own test runs
 before handing off to the independent Testing Agent for final QA.
 
-Must commit to the app's configured local branch, not just "whatever is
-currently checked out" — Deployment Agent's pre-prod step merges from
-local_branch specifically (see agents/deployment.py), so a commit landing
-anywhere else is silently invisible to pre-prod and gets deployed over.
+Each call gets its own dedicated feature_branch (see environments.py's
+feature_branch_name), forked fresh from the remote pre-prod branch's tip --
+never reused across runs and never just "whatever HEAD happened to be." Two
+features built in separate cycles must not pile onto one shared branch (they
+could conflict, or one could silently carry the other's incomplete work), and
+branching from pre-prod's tip (not main, not local stale state) means the
+feature starts from everything already shipped-but-not-yet-promoted, so
+Deployment Agent's later merge into pre-prod (see agents/deployment.py) is a
+clean fast-forward/merge instead of fighting drift.
+
+Checkout and the end-of-turn commit are both handled here in plain Python,
+not left as instructions in the agent's own system prompt -- observed twice
+in practice (two separate dogfood runs against a real repo) that an LLM
+agent given "checkout branch X first, commit at the end" as prose does not
+reliably do either: both times it just edited files directly on whatever was
+already checked out and left the result uncommitted. Deterministic git
+plumbing around the agent turn removes that failure mode entirely rather
+than hoping a better-worded prompt fixes it.
 """
 
+import subprocess
 from pathlib import Path
 
 from agentos.agents.base import AgentResult, run_agent
@@ -17,19 +32,16 @@ from agentos.environments import EnvironmentConfig
 
 SYSTEM_PROMPT = """You are the Implementation Agent in an autonomous product \
 engineering system. You are given a codebase summary and a specific feature \
-to build. Work in a tight loop:
+to build. You are already checked out on your dedicated branch, {feature_branch} \
+— stay on it; never switch to {pre_prod_branch}, {prod_branch}, or any other \
+branch. Work in a tight loop:
 
-0. Before anything else, make sure you are on the local branch: \
-   `git checkout {local_branch}` if it exists, otherwise \
-   `git checkout -B {local_branch}` to create it from the current HEAD. All \
-   work this run happens on {local_branch} — never main/{prod_branch} or any \
-   other branch.
 1. Implement the smallest coherent version of the feature.
 2. Run the project's existing test/build commands yourself via Bash.
 3. If anything fails, fix it and re-run. Repeat until green or you are \
    confident further attempts won't help.
-4. Make a git commit of your change on {local_branch} once it's working. Do \
-   not push, do not open a PR, do not touch git history beyond one commit.
+4. Make a git commit of your change once it's working. Do not push, do not \
+   open a PR, do not touch git history beyond one commit.
 
 Constraints:
 - Prefer minimal, targeted changes over refactors.
@@ -47,7 +59,57 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-async def run(repo: Path, objective: str, feature: str, codebase_summary: str, env: EnvironmentConfig) -> AgentResult:
+def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: str) -> None:
+    # Explicit refspec, not just `fetch origin <branch>` -- a single-branch clone (the
+    # server/clone-on-start path, see docker-entrypoint.sh) has its fetch refspec
+    # restricted to whatever branch it cloned, so fetching a different branch by name
+    # alone can succeed without ever creating refs/remotes/origin/<branch> locally,
+    # and the checkout below then fails with "origin/<branch> is not a commit".
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "origin", f"+{pre_prod_branch}:refs/remotes/origin/{pre_prod_branch}"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{pre_prod_branch}"],
+        check=True, capture_output=True, text=True,
+    )
+
+
+def _commit_if_dirty(repo: Path, feature: str) -> bool:
+    """Safety net for the agent finishing its turn without committing (observed in
+    practice, see module docstring). Returns True if a commit was made here."""
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        return False
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", f"{feature}\n\nAuto-committed by agentos: agent turn ended without committing."],
+        check=True, capture_output=True, text=True,
+    )
+    return True
+
+
+async def run(
+    repo: Path,
+    objective: str,
+    feature: str,
+    codebase_summary: str,
+    env: EnvironmentConfig,
+    feature_branch: str,
+) -> AgentResult:
+    try:
+        _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        return AgentResult(
+            ok=False,
+            text=f"Could not create feature branch {feature_branch!r} from {env.pre_prod_branch!r}: {stderr}",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+
     prompt = f"""Business objective: {objective}
 
 Feature to implement: {feature}
@@ -56,12 +118,31 @@ Codebase summary:
 {codebase_summary}
 
 Implement this feature now, following the loop in your system prompt."""
-    system_prompt = SYSTEM_PROMPT.format(local_branch=env.local_branch, prod_branch=env.prod_branch)
-    return await run_agent(
+    system_prompt = SYSTEM_PROMPT.format(
+        feature_branch=feature_branch,
+        pre_prod_branch=env.pre_prod_branch,
+        prod_branch=env.prod_branch,
+    )
+    result = await run_agent(
         prompt=prompt,
         system_prompt=system_prompt,
         cwd=repo,
         allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
         permission_mode="bypassPermissions",
         max_turns=60,
+        # This agent commits real changes; a blind from-scratch retry on the
+        # self-contradictory CLI result (see base.py's _CONTRADICTORY_RESULT_SUFFIX)
+        # could re-attempt on top of a first pass that already committed. Let it
+        # surface as a normal failure instead -- _commit_if_dirty below still saves
+        # any uncommitted work either way.
+        retry_on_contradictory_result=False,
     )
+
+    try:
+        if _commit_if_dirty(repo, feature):
+            result.text += "\n\n[agentos] Uncommitted changes were present after the agent turn ended; auto-committed them."
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        result.text += f"\n\n[agentos] Safety-net commit failed: {stderr}"
+
+    return result

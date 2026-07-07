@@ -34,7 +34,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_s
 
 from agentos.agents import codebase, deployment, discovery, feedback, implementation, testing
 from agentos.agents.base import single_prompt_stream
-from agentos.environments import EnvironmentConfig
+from agentos.environments import EnvironmentConfig, feature_branch_name, slug
 from agentos.memory import Memory
 from agentos.ranking import rank
 
@@ -52,6 +52,11 @@ class OrchestratorSession:
     pre_prod_url: str | None = None
     pre_prod_verified: bool = False
     current_feature: str | None = None
+    # Set on the first implement_feature call and reused for every later call in this
+    # same session -- this run's whole line of work (possibly several implement_feature
+    # calls before one deploy_pre_prod) belongs on one branch, not a fresh one each call,
+    # or earlier commits would get orphaned on branches deploy_pre_prod never merges.
+    feature_branch: str | None = None
     cost_usd: float = 0.0
     skip_deploy: bool = False
     actions: list[str] = field(default_factory=list)
@@ -130,10 +135,14 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         brief = args["feature_brief"]
-        impl = await implementation.run(session.repo, session.objective, brief, session.cb_summary, session.env)
+        if session.feature_branch is None:
+            session.feature_branch = feature_branch_name(session.env, session.run_id, brief)
+        impl = await implementation.run(
+            session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch
+        )
         session.cost_usd += impl.cost_usd
         feature_name = (impl.json_data or {}).get("feature") or brief.split(":")[0].strip()
-        session.mem.write("features", f"{session.run_id}-{_slug(feature_name)}", impl.text)
+        session.mem.write("features", f"{session.run_id}-{slug(feature_name)}", impl.text)
         session.tests_passed = False  # any new change invalidates the last test result
         session.pre_prod_verified = False  # ...and any prior live verification too
         session.note(f"implement_feature: ok={impl.ok} feature={feature_name!r}")
@@ -189,7 +198,13 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Refused: run_local_tests must pass before deploying to pre-prod."}],
                 "is_error": True,
             }
-        deploy = await deployment.deploy_pre_prod(session.repo, session.env)
+        if session.feature_branch is None:
+            session.note("deploy_pre_prod: refused, no feature branch (implement_feature never called)")
+            return {
+                "content": [{"type": "text", "text": "Refused: nothing to deploy -- call implement_feature first."}],
+                "is_error": True,
+            }
+        deploy = await deployment.deploy_pre_prod(session.repo, session.env, session.feature_branch)
         session.cost_usd += deploy.cost_usd
         ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         session.pre_prod_url = (deploy.json_data or {}).get("preview_url") if ok else None
@@ -236,7 +251,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         feature = session.current_feature or "unknown feature"
         fb = await feedback.run(session.repo, session.objective, feature)
         session.cost_usd += fb.cost_usd
-        session.mem.write("metrics", f"{session.run_id}-{_slug(feature)}", fb.text)
+        session.mem.write("metrics", f"{session.run_id}-{slug(feature)}", fb.text)
         session.note("assess_feedback")
         return {"content": [{"type": "text", "text": fb.text[:2000]}]}
 
@@ -335,10 +350,19 @@ async def run_autonomous_cycle(
     )
 
     final_text = ""
-    async for message in query(prompt=single_prompt_stream(prompt), options=options):
-        if isinstance(message, ResultMessage):
-            final_text = message.result or ""
-            session.cost_usd += message.total_cost_usd or 0.0
+    try:
+        async for message in query(prompt=single_prompt_stream(prompt), options=options):
+            if isinstance(message, ResultMessage):
+                final_text = message.result or ""
+                session.cost_usd += message.total_cost_usd or 0.0
+    except Exception as exc:
+        # Same rationale as agents/base.py's run_agent: an SDK/CLI-subprocess-level
+        # exception here has nothing to do with the actual orchestration work, and
+        # should be recorded as a failed run rather than crash the whole process with
+        # an unhandled traceback.
+        final_text = f"autonomous cycle raised: {exc}"
+        session.note(f"autonomous cycle crashed: {exc}")
+        mem.write("failures", f"{run_id}-autonomous", final_text)
 
     mem.write(
         "decisions",
@@ -352,7 +376,3 @@ async def run_autonomous_cycle(
     return AutonomousCycleReport(
         run_id=run_id, actions=session.actions, final_message=final_text, cost_usd=session.cost_usd
     )
-
-
-def _slug(text: str) -> str:
-    return "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")[:60]

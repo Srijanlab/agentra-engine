@@ -78,7 +78,7 @@ def _prompt_bool(label: str, default: bool) -> bool:
 
 def _interactive_env_init(detected: environments.EnvironmentConfig) -> environments.EnvironmentConfig:
     print("Configuring the local -> pre-prod -> prod pipeline. Press enter to accept each detected default.\n")
-    local_branch = _prompt("Local branch", detected.local_branch)
+    local_branch = _prompt("Feature branch prefix (each feature gets its own {prefix}/run-id-slug branch)", detected.local_branch)
     pre_prod_branch = _prompt("Pre-prod branch", detected.pre_prod_branch)
     prod_branch = _prompt("Prod branch", detected.prod_branch)
     vercel = _prompt_bool("Vercel configured for this app?", detected.vercel)
@@ -90,6 +90,12 @@ def _interactive_env_init(detected: environments.EnvironmentConfig) -> environme
             "Firebase PRE-PROD project alias (in .firebaserc)", detected.firebase_pre_prod_alias
         )
         firebase_prod_alias = _prompt("Firebase PROD project alias (in .firebaserc)", detected.firebase_prod_alias)
+    ci_cd_on_push = _prompt_bool(
+        "Does this app already have CI/CD that deploys on push to the pre-prod/prod "
+        "branches (GitHub Actions, Vercel git integration, etc.)? If yes, Deployment "
+        "Agent will only merge+push and verify the resulting CI run, not also deploy directly.",
+        detected.ci_cd_on_push,
+    )
     print(
         "\nBy default, production is only ever touched via `agentos promote` "
         "(a human runs it deliberately). The option below lets the Production "
@@ -107,6 +113,7 @@ def _interactive_env_init(detected: environments.EnvironmentConfig) -> environme
         firebase=firebase,
         firebase_pre_prod_alias=firebase_pre_prod_alias,
         firebase_prod_alias=firebase_prod_alias,
+        ci_cd_on_push=ci_cd_on_push,
         auto_remediate_prod=auto_remediate_prod,
     )
 

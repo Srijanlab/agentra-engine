@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentos.agents import codebase, deployment, discovery, feedback, implementation, prod_debug, testing
-from agentos.environments import EnvironmentConfig
+from agentos.environments import EnvironmentConfig, feature_branch_name, slug
 from agentos import environments
 from agentos.memory import Memory
 from agentos.ranking import rank
@@ -96,9 +96,10 @@ async def run_cycle(
         feature_brief = f"{top['feature']}: {top.get('description', '')} (reason: {top.get('reason', '')})"
         mem.log(run_id, f"discovery agent: selected {feature!r} from {len(opportunities)} candidates")
 
-    mem.log(run_id, "implementation agent: starting")
-    impl = await implementation.run(repo, objective, feature_brief, cb.text, env)
-    mem.write("features", f"{run_id}-{_slug(feature)}", impl.text)
+    feature_branch = feature_branch_name(env, run_id, feature)
+    mem.log(run_id, f"implementation agent: starting on dedicated branch {feature_branch!r}")
+    impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch)
+    mem.write("features", f"{run_id}-{slug(feature)}", impl.text)
     mem.log(run_id, f"implementation agent: ok={impl.ok} turns={impl.turns} cost=${impl.cost_usd:.4f}")
     if not impl.ok:
         mem.write("failures", f"{run_id}-implementation", impl.text)
@@ -116,7 +117,7 @@ async def run_cycle(
     pre_prod_verified = None
     if not skip_deploy and test_passed:
         mem.log(run_id, "deployment agent: deploying to pre-prod")
-        deploy = await deployment.deploy_pre_prod(repo, env)
+        deploy = await deployment.deploy_pre_prod(repo, env, feature_branch)
         mem.log(run_id, f"deployment agent: ok={deploy.ok} turns={deploy.turns} cost=${deploy.cost_usd:.4f}")
         deploy_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         if not deploy_ok:
@@ -144,7 +145,7 @@ async def run_cycle(
     if feedback_ready:
         mem.log(run_id, "feedback agent: starting")
         fb = await feedback.run(repo, objective, feature)
-        mem.write("metrics", f"{run_id}-{_slug(feature)}", fb.text)
+        mem.write("metrics", f"{run_id}-{slug(feature)}", fb.text)
         mem.log(run_id, f"feedback agent: ok={fb.ok} turns={fb.turns} cost=${fb.cost_usd:.4f}")
 
     mem.write(
@@ -220,7 +221,8 @@ async def run_prod_debug_cycle(
 
     mem.log(run_id, "prod-debug: auto_remediate_prod is on; building fix")
     cb = await codebase.run(repo)
-    impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env)
+    feature_branch = feature_branch_name(env, run_id, f"hotfix-{severity}")
+    impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch)
     mem.write("features", f"{run_id}-hotfix", impl.text)
     mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
     if not impl.ok:
@@ -228,7 +230,7 @@ async def run_prod_debug_cycle(
         return ProdDebugReport(run_id, True, severity, False, False, diag.text)
 
     mem.log(run_id, "prod-debug: deploying hotfix to pre-prod for verification")
-    deploy = await deployment.deploy_pre_prod(repo, env)
+    deploy = await deployment.deploy_pre_prod(repo, env, feature_branch)
     pre_prod_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
     if not pre_prod_ok:
         mem.write("failures", f"{run_id}-hotfix-pre-prod-deploy", deploy.text)
@@ -272,7 +274,3 @@ async def run_prod_debug_cycle(
     )
 
     return ProdDebugReport(run_id, True, severity, True, promoted_ok, diag.text)
-
-
-def _slug(text: str) -> str:
-    return "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")[:60]
