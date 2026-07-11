@@ -85,6 +85,14 @@ class Memory:
         if category not in CATEGORIES:
             raise ValueError(f"unknown memory category: {category}")
         path = self.memory_root / category / f"{name}.md"
+        # The category directory can vanish between __init__ and this call -- e.g.
+        # implementation.py's _checkout_feature_branch does `git clean -fd .agentos/`
+        # then `git checkout -B <feature_branch>`, and git doesn't track empty
+        # directories, so a category with no committed file in it (e.g. a repo's
+        # first-ever feature under memory/features/) simply doesn't come back after
+        # that checkout. Recreate it defensively rather than assume __init__'s mkdir
+        # still holds.
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         return path
 
@@ -94,6 +102,7 @@ class Memory:
 
     def log(self, run_id: str, content: str) -> Path:
         path = self.log_root / f"{run_id}.log"
+        self.log_root.mkdir(parents=True, exist_ok=True)
         with path.open("a") as f:
             timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
             f.write(f"[{timestamp}] {content}\n")

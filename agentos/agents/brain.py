@@ -38,6 +38,16 @@ from agentos.environments import EnvironmentConfig, feature_branch_name, slug
 from agentos.memory import Memory
 from agentos.ranking import rank
 
+# Circuit breaker thresholds. Retrying a failing tool is only useful when the failure
+# is about *what* was tried (a bad brief, a flaky test) -- an infrastructure error (a
+# missing directory, a broken subprocess call) looks identical to the orchestrator LLM
+# turn over turn, and prose telling it "don't retry forever" isn't reliable (see
+# implementation.py's module docstring on why this codebase does control flow in Python,
+# not prompts). So: cap consecutive failures of the *same* tool, and cap total spend,
+# both enforced deterministically rather than left to the model's judgment.
+MAX_CONSECUTIVE_TOOL_FAILURES = 2
+MAX_CYCLE_COST_USD = 3.0
+
 
 @dataclass
 class OrchestratorSession:
@@ -60,10 +70,43 @@ class OrchestratorSession:
     cost_usd: float = 0.0
     skip_deploy: bool = False
     actions: list[str] = field(default_factory=list)
+    tool_failure_counts: dict[str, int] = field(default_factory=dict)
+    hard_stop_reason: str | None = None
 
     def note(self, action: str) -> None:
         self.actions.append(action)
         self.mem.log(self.run_id, action)
+        print(f"[agentos] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
+
+    def check_hard_stop(self) -> dict | None:
+        """Call at the top of every tool. Returns an error tool_result once this run has
+        tripped a breaker, so every subsequent call refuses instead of retrying -- forcing
+        the orchestrator LLM to wrap up rather than hoping it remembers to stop on its own."""
+        if self.cost_usd >= MAX_CYCLE_COST_USD:
+            self.hard_stop_reason = (
+                f"Cycle cost cap (${MAX_CYCLE_COST_USD:.2f}) reached. Stop calling tools -- "
+                "summarize what happened and end your turn."
+            )
+        if self.hard_stop_reason:
+            return {"content": [{"type": "text", "text": self.hard_stop_reason}], "is_error": True}
+        return None
+
+    def record_failure(self, tool_name: str) -> None:
+        """Track consecutive failures of one tool. On the Nth in a row, trip the breaker --
+        this is deliberately per-tool-name, not global, so a run that e.g. fails
+        run_local_tests twice then succeeds at everything else isn't punished for a
+        problem that already resolved."""
+        self.tool_failure_counts[tool_name] = self.tool_failure_counts.get(tool_name, 0) + 1
+        if self.tool_failure_counts[tool_name] >= MAX_CONSECUTIVE_TOOL_FAILURES:
+            self.hard_stop_reason = (
+                f"{tool_name} has now failed {self.tool_failure_counts[tool_name]} times in a "
+                "row this run. That's almost certainly an infrastructure problem, not something "
+                "a different brief/approach will fix -- stop calling it, summarize what happened "
+                "and end your turn."
+            )
+
+    def record_success(self, tool_name: str) -> None:
+        self.tool_failure_counts[tool_name] = 0
 
 
 def _tools_for(session: OrchestratorSession) -> list:
@@ -74,11 +117,16 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def understand_codebase(_args):
+        if stop := session.check_hard_stop():
+            return stop
         cb = await codebase.run(session.repo)
         session.cost_usd += cb.cost_usd
         session.mem.write("architecture", "codebase", cb.text)
         if cb.ok:
             session.cb_summary = cb.text
+            session.record_success("understand_codebase")
+        else:
+            session.record_failure("understand_codebase")
         session.note(f"understand_codebase: ok={cb.ok}")
         return {
             "content": [{"type": "text", "text": f"[{'ok' if cb.ok else 'failed'}] {cb.text[:4000]}"}],
@@ -93,6 +141,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def check_backlog(_args):
+        if stop := session.check_hard_stop():
+            return stop
         shipped = session.mem.shipped_features()
         bugs = session.mem.known_bugs()
         queue = session.mem.feature_queue()
@@ -111,6 +161,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def discover_opportunities(_args):
+        if stop := session.check_hard_stop():
+            return stop
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         disc = await discovery.run(
@@ -127,7 +179,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         opportunities = rank((disc.json_data or {}).get("opportunities", []))
         session.note(f"discover_opportunities: {len(opportunities)} candidates")
         if not disc.ok or not opportunities:
+            session.record_failure("discover_opportunities")
             return {"content": [{"type": "text", "text": "Discovery failed to produce opportunities."}], "is_error": True}
+        session.record_success("discover_opportunities")
         return {"content": [{"type": "text", "text": json.dumps(opportunities, indent=2)}]}
 
     @tool(
@@ -136,14 +190,26 @@ def _tools_for(session: OrchestratorSession) -> list:
         {"feature_brief": str},
     )
     async def implement_feature(args):
+        if stop := session.check_hard_stop():
+            return stop
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         brief = args["feature_brief"]
         if session.feature_branch is None:
             session.feature_branch = feature_branch_name(session.env, session.run_id, brief)
-        impl = await implementation.run(
-            session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch
-        )
+        try:
+            impl = await implementation.run(
+                session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch
+            )
+        except Exception as exc:
+            # A raised exception here (as opposed to AgentResult(ok=False, ...)) means
+            # something broke below the agent turn itself -- e.g. Memory.write() hitting a
+            # directory git checkout deleted out from under it. That's exactly the class of
+            # infra failure a different brief can't fix, so count it the same as an ok=False
+            # result rather than letting it bubble up and silently end the whole cycle.
+            session.record_failure("implement_feature")
+            session.note(f"implement_feature: raised {exc!r}")
+            return {"content": [{"type": "text", "text": f"implement_feature raised: {exc}"}], "is_error": True}
         session.cost_usd += impl.cost_usd
         feature_name = (impl.json_data or {}).get("feature") or brief.split(":")[0].strip()
         session.mem.write("features", f"{session.run_id}-{slug(feature_name)}", impl.text)
@@ -152,7 +218,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.note(f"implement_feature: ok={impl.ok} feature={feature_name!r}")
         if not impl.ok:
             session.mem.write("failures", f"{session.run_id}-implementation", impl.text)
+            session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
+        session.record_success("implement_feature")
         session.mem.record_shipped(feature_name)
         session.current_feature = feature_name
         return {
@@ -173,6 +241,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def run_local_tests(_args):
+        if stop := session.check_hard_stop():
+            return stop
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         test = await testing.run_local(session.repo, session.cb_summary)
@@ -182,6 +252,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.note(f"run_local_tests: passed={passed}")
         if not passed:
             session.mem.write("failures", f"{session.run_id}-testing", test.text)
+            session.record_failure("run_local_tests")
+        else:
+            session.record_success("run_local_tests")
         return {
             "content": [{"type": "text", "text": f"Local tests {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],
             "is_error": not passed,
@@ -193,6 +266,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def deploy_pre_prod(_args):
+        if stop := session.check_hard_stop():
+            return stop
         if session.skip_deploy:
             session.note("deploy_pre_prod: skipped (skip_deploy set for this run)")
             return {"content": [{"type": "text", "text": "Skipped: this run was started with deploy disabled."}]}
@@ -216,6 +291,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.note(f"deploy_pre_prod: ok={ok} preview_url={session.pre_prod_url!r}")
         if not ok:
             session.mem.write("failures", f"{session.run_id}-deployment", deploy.text)
+            session.record_failure("deploy_pre_prod")
+        else:
+            session.record_success("deploy_pre_prod")
         return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": not ok}
 
     @tool(
@@ -227,6 +305,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def verify_pre_prod(_args):
+        if stop := session.check_hard_stop():
+            return stop
         if not session.pre_prod_url:
             return {
                 "content": [{"type": "text", "text": "Call deploy_pre_prod first — no live URL to verify yet."}],
@@ -239,6 +319,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.note(f"verify_pre_prod: passed={passed}")
         if not passed:
             session.mem.write("failures", f"{session.run_id}-pre-prod-verification", test.text)
+            session.record_failure("verify_pre_prod")
+        else:
+            session.record_success("verify_pre_prod")
         return {
             "content": [{"type": "text", "text": f"Live verification {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],
             "is_error": not passed,
@@ -252,6 +335,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         {},
     )
     async def assess_feedback(_args):
+        if stop := session.check_hard_stop():
+            return stop
         feature = session.current_feature or "unknown feature"
         fb = await feedback.run(session.repo, session.objective, feature)
         session.cost_usd += fb.cost_usd
@@ -353,6 +438,7 @@ async def run_autonomous_cycle(
         max_turns=max_turns,
     )
 
+    print(f"[agentos] run {run_id} starting | objective={objective!r}", flush=True)
     final_text = ""
     try:
         async for message in query(prompt=single_prompt_stream(prompt), options=options):
@@ -376,6 +462,7 @@ async def run_autonomous_cycle(
         + f"\n\nFinal message:\n{final_text}\n",
     )
     session.note("autonomous cycle complete")
+    print(f"[agentos] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
 
     return AutonomousCycleReport(
         run_id=run_id, actions=session.actions, final_message=final_text, cost_usd=session.cost_usd
