@@ -183,6 +183,37 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
     return None
 
 
+def persist_audit_trail(repo: Path, branch: str) -> str | None:
+    """Commit and push any dirty .agentos/ bookkeeping (shipped.json, known_bugs.json,
+    feature_queue.json, memory/*) onto `branch`, which the caller must already have merged
+    and pushed to (i.e. call this right after a successful deploy_pre_prod/promote_prod).
+
+    Without this, Memory.record_shipped/write calls only ever land in the working copy --
+    nothing ever committed them, so a fresh checkout (the next scheduled CI run) starts with
+    an empty shipped/known_bugs/feature_queue every time, and check_backlog has nothing to
+    report regardless of what was actually built. Confirmed live: shipped.json existed
+    locally after a real, successful cycle but was never present on origin/beta at all.
+
+    Scoped to .agentos/ only -- same "always safe to clear/commit" reasoning as
+    implementation.py's _checkout_feature_branch applies here to committing, not just
+    cleaning. Returns an error message on failure, None on success or if nothing was dirty.
+    """
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", ".agentos/"],
+        capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        return None
+    try:
+        _run(repo, "add", ".agentos/")
+        _run(repo, "commit", "-m", "agentos: persist audit trail (shipped/backlog/memory)")
+        _run(repo, "push", "origin", branch)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        return f"Failed to persist audit trail to {branch!r}: {stderr}"
+    return None
+
+
 async def deploy_pre_prod(repo: Path, env: EnvironmentConfig, feature_branch: str) -> AgentResult:
     _sync_branch_to_remote(repo, env.pre_prod_branch)
     error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)

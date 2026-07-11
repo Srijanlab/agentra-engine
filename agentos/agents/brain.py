@@ -60,6 +60,10 @@ class OrchestratorSession:
     cb_summary: str | None = None
     tests_passed: bool = False
     pre_prod_url: str | None = None
+    # Deliberately separate from pre_prod_url (which a later failed redeploy attempt in
+    # this same session resets to None) -- once true, a merge+push to pre-prod already
+    # durably happened and should be persisted regardless of what happens afterward.
+    deployed_to_pre_prod: bool = False
     pre_prod_verified: bool = False
     current_feature: str | None = None
     # Set on the first implement_feature call and reused for every later call in this
@@ -288,6 +292,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         session.pre_prod_url = (deploy.json_data or {}).get("preview_url") if ok else None
         session.pre_prod_verified = False
+        if ok:
+            session.deployed_to_pre_prod = True
         session.note(f"deploy_pre_prod: ok={ok} preview_url={session.pre_prod_url!r}")
         if not ok:
             session.mem.write("failures", f"{session.run_id}-deployment", deploy.text)
@@ -461,6 +467,15 @@ async def run_autonomous_cycle(
         + "\n".join(f"- {a}" for a in session.actions)
         + f"\n\nFinal message:\n{final_text}\n",
     )
+
+    if session.deployed_to_pre_prod:
+        # Only meaningful once merged onto a durable, shared branch (pre-prod) -- must come
+        # after every mem.write above so feedback/decisions ride along too, not just
+        # shipped.json. See deployment.persist_audit_trail's docstring for why this exists.
+        persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
+        if persist_error:
+            session.note(f"persist_audit_trail: failed: {persist_error}")
+
     session.note("autonomous cycle complete")
     print(f"[agentos] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
 

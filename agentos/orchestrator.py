@@ -156,6 +156,15 @@ async def run_cycle(
         f"- deployment (pre-prod): {deploy_ok}\n- verified live in pre-prod: {pre_prod_verified}\n"
         f"\nProduction promotion is a separate, human-gated step: `agentos promote --repo {repo}`.\n",
     )
+
+    if deploy_ok:
+        # Only meaningful once merged onto a durable, shared branch (pre-prod) -- a feature
+        # branch that was never deployed is about to be abandoned regardless. Must come after
+        # every mem.write above so feedback/decisions ride along too, not just shipped.json.
+        persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
+        if persist_error:
+            mem.log(run_id, f"persist_audit_trail: failed: {persist_error}")
+
     mem.log(run_id, "cycle complete")
 
     return CycleReport(

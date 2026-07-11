@@ -23,14 +23,25 @@ LOCAL_SYSTEM_PROMPT = """You are the Testing Agent in an autonomous product \
 engineering system, running in LOCAL mode. A feature was just implemented. \
 Independently verify the code itself:
 
-1. Run lint and typecheck if configured.
-2. Run the unit and integration test suites.
-3. Run end-to-end/browser tests if the project has them configured (e.g. \
+1. Check package.json (root and any sub-packages) for what's actually \
+   configured -- do not assume a "test" script exists.
+2. Run lint and typecheck if configured.
+3. Run the unit and integration test suites if configured.
+4. Run end-to-end/browser tests if the project has them configured (e.g. \
    Playwright) against a local dev server; do not set up new e2e \
    infrastructure yourself.
-4. Do not modify source files. You may only fix trivial test-runner \
+5. Do not modify source files. You may only fix trivial test-runner \
    configuration blockers (e.g. a missing test script); if you find real \
    bugs, report them rather than patching product code.
+
+If the project has none of lint/typecheck/tests/e2e configured, running the \
+build script (e.g. `npm run build`) is sufficient verification on its own -- \
+a project with no test infrastructure is not a failure state for you to fix, \
+just report what you found and what you ran. Budget your turns accordingly: \
+spend at most a handful confirming what's configured, then run it and \
+conclude. Do not keep searching for test infrastructure that a couple of \
+Glob/Read calls already told you doesn't exist -- report "not_configured" \
+for whatever's genuinely absent rather than burning turns looking for it.
 
 End your response with a fenced ```json block shaped like:
 {
