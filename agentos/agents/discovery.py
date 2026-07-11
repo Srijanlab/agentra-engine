@@ -43,6 +43,11 @@ order. For each, give a concrete reason grounded in what you observed (a \
 specific drop-off, a missing mechanic, a competitor gap, or -- for queued \
 items -- who asked and why) — not a generic platitude.
 
+For an opportunity sourced from a known bug or the feature queue, copy its \
+`id` exactly as given in the input below into your output -- that's how the \
+system marks the original backlog entry resolved once shipped, instead of it \
+resurfacing every future cycle. Omit/null `id` for your own autonomous ideas.
+
 End your response with a fenced ```json block shaped like:
 {
   "opportunities": [
@@ -52,7 +57,8 @@ End your response with a fenced ```json block shaped like:
       "impact": "low" | "medium" | "high" | "very_high",
       "effort": "low" | "medium" | "high",
       "reason": "...",
-      "origin": "known_bug" | "feature_queue" | "autonomous"
+      "origin": "known_bug" | "feature_queue" | "autonomous",
+      "id": "the bug's run_id or the feature request's external_id, or null"
     }
   ]
 }
@@ -71,14 +77,17 @@ async def run(
     shipped_text = "\n".join(f"- {f}" for f in already_shipped) or "(none yet)"
     bugs_text = (
         "\n".join(
-            f"- [{b.get('severity', 'unknown')}] {b.get('diagnosis', '')} "
+            f"- id={b.get('run_id', '')!r} [{b.get('severity', 'unknown')}] {b.get('diagnosis', '')} "
             f"(proposed fix: {b.get('proposed_fix', '')})"
             for b in (known_bugs or [])
         )
         or "(none)"
     )
     queue_text = (
-        "\n".join(f"- [{f.get('source', 'unknown')}] {f.get('description', '')}" for f in (feature_queue or []))
+        "\n".join(
+            f"- id={f.get('external_id', '')!r} [{f.get('source', 'unknown')}] {f.get('description', '')}"
+            for f in (feature_queue or [])
+        )
         or "(none)"
     )
     prompt = f"""Business objective: {objective}

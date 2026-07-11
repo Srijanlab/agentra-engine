@@ -190,8 +190,12 @@ def _tools_for(session: OrchestratorSession) -> list:
 
     @tool(
         "implement_feature",
-        "Build a specific feature. Pass a concrete, self-contained brief, not just a name.",
-        {"feature_brief": str},
+        "Build a specific feature. Pass a concrete, self-contained brief, not just a name. "
+        "If this brief comes from check_backlog's known bugs or feature queue (not your own "
+        "idea), pass its id in resolves_id with the matching resolves_origin -- otherwise it "
+        "never gets cleared and will keep resurfacing every future cycle. Leave both empty "
+        "strings for your own autonomous ideas.",
+        {"feature_brief": str, "resolves_origin": str, "resolves_id": str},
     )
     async def implement_feature(args):
         if stop := session.check_hard_stop():
@@ -226,6 +230,13 @@ def _tools_for(session: OrchestratorSession) -> list:
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
         session.record_success("implement_feature")
         session.mem.record_shipped(feature_name)
+        resolves_origin = args.get("resolves_origin") or ""
+        resolves_id = args.get("resolves_id") or ""
+        if resolves_id:
+            if resolves_origin == "known_bug":
+                session.mem.clear_known_bug(resolves_id)
+            elif resolves_origin == "feature_queue":
+                session.mem.clear_feature_request(resolves_id)
         session.current_feature = feature_name
         return {
             "content": [
@@ -375,7 +386,9 @@ any circumstance.
 Use judgment, not a rigid script, but this is generally sound:
 1. Understand the codebase before deciding anything.
 2. Check the backlog — a known production bug always outranks a \
-   nice-to-have feature.
+   nice-to-have feature. If you implement something straight from check_backlog's \
+   output, pass its id/run_id through implement_feature's resolves_origin+resolves_id \
+   so it gets cleared — otherwise it resurfaces every future cycle even after you fix it.
 3. If no feature was suggested to you, discover opportunities and pick one.
 4. Implement it, then run_local_tests. deploy_pre_prod refuses if local \
    tests haven't passed since the last implementation — if that happens, \
