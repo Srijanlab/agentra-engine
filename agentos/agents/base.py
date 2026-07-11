@@ -9,7 +9,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
-from agentos.agents.safety import make_can_use_tool
+from agentos.agents.safety import make_hooks
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 
@@ -84,7 +84,7 @@ async def run_agent(
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
-        can_use_tool=make_can_use_tool(allow_prod=allow_prod),
+        hooks=make_hooks(allow_prod=allow_prod),
         max_turns=max_turns,
     )
 

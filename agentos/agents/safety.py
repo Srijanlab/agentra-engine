@@ -22,11 +22,26 @@ Production Debugging Agent's opt-in auto-remediate path (orchestrator.py),
 which passes allow_prod=True for the single promote-to-prod call it makes —
 and only for apps that set auto_remediate_prod: true in their environment
 config. Every other agent, and every other call, keeps prod blocked.
+
+IMPLEMENTATION NOTE — can_use_tool vs. a PreToolUse hook
+---------------------------------------------------------
+This used to be a `can_use_tool` callback. That was silently never invoked:
+every agent call uses permission_mode="bypassPermissions" (base.py), and the
+SDK auto-approves every tool call under that mode *before* can_use_tool is
+ever consulted — confirmed via claude_agent_sdk's own
+CanUseToolShadowedWarning, which fires exactly in this configuration and
+says so explicitly ("can_use_tool will not be invoked... use a PreToolUse
+hook instead"). The whole regex gate below was dead code in every real run
+this entire session; a callback-level unit test that calls the function
+directly can't catch this, since it never exercises the SDK's actual
+tool-dispatch path -- only a live query() integration test can (see
+tests/test_safety_integration.py). Rebuilt on `hooks={"PreToolUse": [...]}`,
+which the SDK does invoke under bypassPermissions.
 """
 
 import re
 
-from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny, ToolPermissionContext
+from claude_agent_sdk import HookMatcher
 
 FORBIDDEN_BASH_PATTERNS = [
     r"rm\s+-rf\s+/(?:\s|$)",
@@ -54,44 +69,53 @@ FORBIDDEN_EDIT_PATH_PATTERNS = [
 ]
 
 
-def make_can_use_tool(allow_prod: bool = False):
-    """Build a can_use_tool callback. allow_prod must only be True for the
+def _deny(reason: str) -> dict:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def make_pre_tool_use_hook(allow_prod: bool = False):
+    """Build a PreToolUse hook callback. allow_prod must only be True for the
     single, explicitly-approved prod-promotion call — never as a default."""
 
-    async def guarded_can_use_tool(tool_name, tool_input, context: ToolPermissionContext):
+    async def guarded_pre_tool_use(input_data, tool_use_id, context) -> dict:
+        tool_name = input_data.get("tool_name")
+        tool_input = input_data.get("tool_input") or {}
+
         if tool_name == "Bash":
             command = tool_input.get("command", "")
             for pattern in FORBIDDEN_BASH_PATTERNS:
                 if re.search(pattern, command, re.IGNORECASE):
-                    return PermissionResultDeny(
-                        message=(
-                            f"Blocked by safety policy: command matches forbidden "
-                            f"pattern for autonomous execution ({pattern!r}). "
-                            "Destructive data ops and secrets/billing access are "
-                            "never allowed autonomously."
-                        )
+                    return _deny(
+                        f"Blocked by safety policy: command matches forbidden "
+                        f"pattern for autonomous execution ({pattern!r}). "
+                        "Destructive data ops and secrets/billing access are "
+                        "never allowed autonomously."
                     )
             if not allow_prod:
                 for pattern in PROD_ONLY_BASH_PATTERNS:
                     if re.search(pattern, command, re.IGNORECASE):
-                        return PermissionResultDeny(
-                            message=(
-                                f"Blocked by safety policy: command touches production "
-                                f"({pattern!r}). Production changes require the explicit, "
-                                "opted-in promote/auto-remediate path, not this agent."
-                            )
+                        return _deny(
+                            f"Blocked by safety policy: command touches production "
+                            f"({pattern!r}). Production changes require the explicit, "
+                            "opted-in promote/auto-remediate path, not this agent."
                         )
         if tool_name in ("Write", "Edit"):
             path = str(tool_input.get("file_path", ""))
             for pattern in FORBIDDEN_EDIT_PATH_PATTERNS:
                 if re.search(pattern, path, re.IGNORECASE):
-                    return PermissionResultDeny(
-                        message=f"Blocked by safety policy: refusing to edit {path!r} autonomously."
-                    )
-        return PermissionResultAllow()
+                    return _deny(f"Blocked by safety policy: refusing to edit {path!r} autonomously.")
+        return {}
 
-    return guarded_can_use_tool
+    return guarded_pre_tool_use
 
 
-# Default policy used by every agent unless it explicitly opts into allow_prod.
-guarded_can_use_tool = make_can_use_tool(allow_prod=False)
+def make_hooks(allow_prod: bool = False) -> dict[str, list[HookMatcher]]:
+    """The hooks= dict to pass into ClaudeAgentOptions. matcher=None applies to
+    every tool call, not just a named subset."""
+    return {"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(allow_prod=allow_prod)])]}
