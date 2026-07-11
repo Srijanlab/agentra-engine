@@ -27,7 +27,13 @@ from pathlib import Path
 
 from agentos.memory import Memory
 
-AGENTOS_HOME = Path(os.environ.get("AGENTOS_HOME", "")) or Path.home() / ".agentos"
+# NOTE: not `Path(os.environ.get(...)) or Path.home() / ".agentos"` -- Path objects
+# have no __bool__/__len__, so Path("") is truthy and that pattern silently never
+# falls through to the default (resolves to the cwd instead, wherever that happens
+# to be for a given invocation). Caught this live: it made the registry appear to
+# lose all state between container runs, since each run's cwd differed.
+_env_value = os.environ.get("AGENTOS_HOME")
+AGENTOS_HOME = Path(_env_value) if _env_value else Path.home() / ".agentos"
 APPS_PATH = AGENTOS_HOME / "apps.json"
 INBOX_ROOT = AGENTOS_HOME / "inbox"
 

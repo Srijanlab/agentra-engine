@@ -52,6 +52,7 @@ echo ""
 docker run --rm -it \
   --volume "$REPO_PATH:/workspace" \
   --volume "agentos-claude-home:/home/agentuser/.claude" \
+  --volume "agentos-home:/home/agentuser/.agentos" \
   --tmpfs /tmp:size=256m,mode=1777 \
   --read-only \
   --cap-drop ALL \

@@ -15,6 +15,12 @@ services:
       # have to re-auth on every run.
       - claude-home:/home/agentuser/.claude
 
+      # Named volume for agentos's own multi-app registry + durable inbox
+      # (agentos/registry.py). Without this, every --rm container run starts
+      # with a blank registry -- registered apps and any not-yet-dispatched
+      # inbox requests would silently vanish between runs.
+      - agentos-home:/home/agentuser/.agentos
+
     # ── Auth (pick one) ────────────────────────────────────────────────────────
     environment:
       # OPTION A — OAuth access token (recommended for containers).
@@ -44,10 +50,12 @@ services:
     cap_drop:
       - ALL
     # Read-only root filesystem except for explicitly-writable paths.
-    # /workspace and /home/agentuser/.claude are writable via volumes.
+    # /workspace, /home/agentuser/.claude, and /home/agentuser/.agentos are
+    # writable via volumes.
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777   # npm, pip, claude CLI temp files
 
 volumes:
   claude-home:
+  agentos-home:

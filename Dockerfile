@@ -35,17 +35,22 @@ COPY --from=builder /install /usr/local
 # root-created WORKDIR. This means cloning, committing, and everything else this image
 # does never needs --user root / chown / su anywhere, in local or server use.
 #
-# Same reasoning applies to /home/agentuser/.claude below: `useradd --create-home` only
-# creates /home/agentuser itself, never the nested .claude subdirectory the CLI expects
-# (CLAUDE_CONFIG_DIR) -- so a fresh named volume mounted there (agentos-claude-home in
-# docker-compose.yml / run-agent.sh) got Docker's default root:root mount-point
-# ownership instead. Confirmed live: the CLI's own session-env setup failed with
-# `EACCES: permission denied, mkdir '/home/agentuser/.claude/session-env'` on every
-# write/process-execution tool (Bash, Write) while read-only tools kept working --
-# consistent with agentuser being unable to write under a root-owned .claude.
+# Same reasoning applies to /home/agentuser/.claude and /home/agentuser/.agentos below:
+# `useradd --create-home` only creates /home/agentuser itself, never nested
+# subdirectories -- so a fresh named volume mounted at one (agentos-claude-home,
+# agentos-home in docker-compose.yml / run-agent.sh) got Docker's default root:root
+# mount-point ownership instead. Confirmed live for .claude: the CLI's own
+# session-env setup failed with `EACCES: permission denied, mkdir
+# '/home/agentuser/.claude/session-env'` on every write/process-execution tool
+# (Bash, Write) while read-only tools kept working -- consistent with agentuser
+# being unable to write under a root-owned .claude. /home/agentuser/.agentos (the
+# multi-app registry + inbox, agentos/registry.py) needs the same treatment: without
+# a persistent, agentuser-writable volume there, every --rm container run would
+# start with a blank registry, silently losing all registered apps and any inbox
+# state a scheduled `agentos dispatch` hadn't yet processed.
 RUN useradd --create-home --shell /bin/bash agentuser \
-    && mkdir -p /workspace /home/agentuser/.claude \
-    && chown agentuser:agentuser /workspace /home/agentuser/.claude
+    && mkdir -p /workspace /home/agentuser/.claude /home/agentuser/.agentos \
+    && chown agentuser:agentuser /workspace /home/agentuser/.claude /home/agentuser/.agentos
 
 # Claude CLI stores its config here; a named volume is mounted at runtime
 # so OAuth tokens / session state persist across container restarts.
