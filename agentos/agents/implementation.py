@@ -69,6 +69,25 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
         ["git", "-C", str(repo), "fetch", "origin", f"+{pre_prod_branch}:refs/remotes/origin/{pre_prod_branch}"],
         check=True, capture_output=True, text=True,
     )
+    # codebase.py's understand_codebase step (run just before this, in both
+    # orchestrator.py and brain.py) writes .agentos/memory/... as plain files.
+    # Whether those paths are tracked differs by branch -- e.g. committed on
+    # pre_prod_branch from an earlier cycle, untracked on whatever branch this
+    # process happened to start checked out on. An untracked file that the
+    # target branch's tree wants to place there makes checkout refuse to
+    # proceed rather than silently clobber it. Confirmed live in the first
+    # real scheduled GitHub Actions run: "untracked working tree file
+    # .agentos/memory/architecture/codebase.md would be overwritten by
+    # checkout" -- three identical failures, correctly recognized as
+    # non-transient by the Orchestrator Agent, which stopped and explained
+    # rather than retrying blindly or faking success.
+    # .agentos/ is entirely agentos's own regenerable bookkeeping (logs,
+    # memory, ledgers) -- never a human's uncommitted work -- so clearing
+    # untracked content there before checkout is always safe.
+    subprocess.run(
+        ["git", "-C", str(repo), "clean", "-fd", ".agentos/"],
+        check=True, capture_output=True, text=True,
+    )
     subprocess.run(
         ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{pre_prod_branch}"],
         check=True, capture_output=True, text=True,
