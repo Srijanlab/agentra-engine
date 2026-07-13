@@ -153,8 +153,14 @@ class Memory:
         )
         self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
 
-    def clear_known_bug(self, run_id: str) -> None:
-        bugs = [b for b in self.known_bugs() if b.get("run_id") != run_id]
+    def clear_known_bug(self, id_: str) -> None:
+        # Match on either run_id or external_id -- a bug entry can carry both (this repo's
+        # own known_bugs.json has both for a human-sourced entry), and an LLM resolving it
+        # from check_backlog's raw JSON dump has no way to know which one is "the" id without
+        # this being lenient. Confirmed live: an autonomous cycle passed external_id while
+        # this only matched run_id, so the clear silently no-op'd and the bug never left the
+        # backlog despite the agent believing it had resolved it.
+        bugs = [b for b in self.known_bugs() if b.get("run_id") != id_ and b.get("external_id") != id_]
         self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
 
     # ── Queue: feature requests, from customers or added by an admin. Considered
