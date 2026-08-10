@@ -62,21 +62,33 @@ class GitOpError(Exception):
     contradictory-result retry)."""
 
 
+def fetch_ref(repo: Path, branch: str) -> None:
+    """Fetch `branch` into refs/remotes/origin/<branch> without touching
+    the working tree/current checkout -- for a caller that just needs
+    origin/<branch> to exist locally (e.g. as a merge source) while
+    staying on whatever branch it's currently on. Explicit refspec, not
+    `fetch origin <branch>` -- see implementation.py's
+    _checkout_feature_branch for why a single-branch clone needs this to
+    create refs/remotes/origin/<branch> at all. Raises GitOpError with the
+    real git stderr on failure."""
+    try:
+        auth = _extra_auth_args(_origin_url(repo))
+        subprocess.run(
+            ["git", "-C", str(repo), *auth, "fetch", "origin", f"+{branch}:refs/remotes/origin/{branch}"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        raise GitOpError(f"fetch_ref({branch!r}) failed: {stderr}") from exc
+
+
 def pull_latest(repo: Path, branch: str) -> None:
     """Fetch and hard-reset the local `branch` to match origin/`branch`,
     creating/checking it out if it doesn't exist locally yet. Raises
     GitOpError with the real git stderr on failure -- never silently leaves
     the working tree on stale or partially-updated state."""
+    fetch_ref(repo, branch)
     try:
-        auth = _extra_auth_args(_origin_url(repo))
-        # Explicit refspec, not `fetch origin <branch>` -- see
-        # implementation.py's _checkout_feature_branch for why a
-        # single-branch clone needs this to create
-        # refs/remotes/origin/<branch> at all.
-        subprocess.run(
-            ["git", "-C", str(repo), *auth, "fetch", "origin", f"+{branch}:refs/remotes/origin/{branch}"],
-            check=True, capture_output=True, text=True,
-        )
         checkout = subprocess.run(
             ["git", "-C", str(repo), "checkout", branch], capture_output=True, text=True,
         )
@@ -118,6 +130,32 @@ def clone_repo(url: str, dest: Path, branch: str = "main") -> None:
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
         raise GitOpError(f"clone_repo({url!r}) failed: {stderr}") from exc
+
+
+def commit_and_push(repo: Path, branch: str, message: str, paths: list[str] | None = None) -> bool:
+    """git add (`paths`, default the whole tree) -> commit -> push, reusing
+    push_branch's GitHub-App-then-static-token auth (see its docstring) --
+    unlike a hand-rolled `_run`-based commit+push, this works for repos
+    only the App connector can reach, not just the ones the static
+    GITHUB_TOKEN happens to be scoped to. Returns False (no-op, not an
+    error) if there was nothing dirty under `paths` to commit -- e.g.
+    calling this after a registration that set no objective/env
+    overrides/notes. Raises GitOpError on a real add/commit/push failure."""
+    paths = paths or ["."]
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", *paths],
+        capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        return False
+    try:
+        subprocess.run(["git", "-C", str(repo), "add", *paths], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", message], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        raise GitOpError(f"commit_and_push: add/commit failed: {stderr}") from exc
+    push_branch(repo, branch)
+    return True
 
 
 def push_branch(repo: Path, branch: str) -> None:

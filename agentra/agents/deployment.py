@@ -149,27 +149,30 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
-
-
 def _sync_branch_to_remote(repo: Path, branch: str) -> None:
-    """Make local `branch` exist and exactly match origin/`branch`."""
-    # Explicit refspec -- see implementation.py's _checkout_feature_branch for why a
-    # plain `fetch origin <branch>` isn't reliable on a single-branch clone.
-    _run(repo, "fetch", "origin", f"+{branch}:refs/remotes/origin/{branch}")
-    checkout = subprocess.run(
-        ["git", "-C", str(repo), "checkout", branch], capture_output=True, text=True,
-    )
-    if checkout.returncode == 0:
-        _run(repo, "reset", "--hard", f"origin/{branch}")
-    else:
-        _run(repo, "checkout", "-B", branch, f"origin/{branch}")
+    """Make local `branch` exist and exactly match origin/`branch`. This
+    used to be its own hand-rolled fetch+checkout+reset (byte-for-byte the
+    same shape as git_ops.pull_latest) with a plain, un-authed `_run` --
+    meaning the fetch would 403 on any repo only reachable via the GitHub
+    App connector, same bug class as the two pushes above. Delegates to
+    the one already-fixed implementation instead of carrying a second,
+    driftable copy of it."""
+    from agentra.agents.git_ops import pull_latest
+
+    pull_latest(repo, branch)
 
 
 def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | None:
     """Merge source_ref into target_branch (already synced to its remote tip) and push.
-    Returns an error message on failure (merge left aborted, nothing pushed), None on success."""
+    Returns an error message on failure (merge left aborted, nothing pushed), None on success.
+
+    The push goes through git_ops.push_branch, not a raw `_run`, for the
+    same GitHub-App-then-static-token auth fallback reason as
+    persist_audit_trail above -- a raw push here would 403 on any repo
+    only reachable via the App connector.
+    """
+    from agentra.agents.git_ops import GitOpError, push_branch
+
     merge = subprocess.run(
         ["git", "-C", str(repo), "merge", "--no-edit", source_ref], capture_output=True, text=True,
     )
@@ -177,9 +180,9 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
         subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True, text=True)
         return f"Merge of {source_ref!r} into {target_branch!r} failed, aborted: {merge.stderr}"
     try:
-        _run(repo, "push", "origin", target_branch)
-    except subprocess.CalledProcessError as exc:
-        return f"Push of {target_branch!r} failed: {exc.stderr}"
+        push_branch(repo, target_branch)
+    except GitOpError as exc:
+        return f"Push of {target_branch!r} failed: {exc}"
     return None
 
 
@@ -197,20 +200,20 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
     Scoped to .agentra/ only -- same "always safe to clear/commit" reasoning as
     implementation.py's _checkout_feature_branch applies here to committing, not just
     cleaning. Returns an error message on failure, None on success or if nothing was dirty.
+
+    Delegates to git_ops.commit_and_push rather than a hand-rolled add/
+    commit/push here, so this benefits from the same GitHub-App-then-
+    static-token auth fallback clone_repo/push_branch already have --
+    otherwise this would 403 on any repo only reachable via the App
+    connector, same bug TASK-016's registration hit before that fallback
+    existed.
     """
-    status = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "--", ".agentra/"],
-        capture_output=True, text=True,
-    )
-    if not status.stdout.strip():
-        return None
+    from agentra.agents.git_ops import GitOpError, commit_and_push
+
     try:
-        _run(repo, "add", ".agentra/")
-        _run(repo, "commit", "-m", "agentra: persist audit trail (shipped/backlog/memory)")
-        _run(repo, "push", "origin", branch)
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
-        return f"Failed to persist audit trail to {branch!r}: {stderr}"
+        commit_and_push(repo, branch, "agentra: persist audit trail (shipped/backlog/memory)", [".agentra/"])
+    except GitOpError as exc:
+        return f"Failed to persist audit trail to {branch!r}: {exc}"
     return None
 
 
@@ -245,8 +248,16 @@ async def deploy_pre_prod(repo: Path, env: EnvironmentConfig, feature_branch: st
 
 
 async def promote_prod(repo: Path, env: EnvironmentConfig) -> AgentResult:
+    from agentra.agents.git_ops import GitOpError, fetch_ref
+
     _sync_branch_to_remote(repo, env.prod_branch)
-    _run(repo, "fetch", "origin", f"+{env.pre_prod_branch}:refs/remotes/origin/{env.pre_prod_branch}")
+    try:
+        # fetch_ref, not pull_latest: we need to stay on prod_branch (just
+        # synced above) with pre_prod_branch merely fetched as a merge
+        # source -- pull_latest would check out pre_prod_branch instead.
+        fetch_ref(repo, env.pre_prod_branch)
+    except GitOpError as exc:
+        return AgentResult(ok=False, text=str(exc), json_data=None, cost_usd=0.0, turns=0)
     error = _merge_and_push(repo, f"origin/{env.pre_prod_branch}", env.prod_branch)
     if error:
         return AgentResult(ok=False, text=error, json_data=None, cost_usd=0.0, turns=0)

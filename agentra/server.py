@@ -319,8 +319,28 @@ async def register_app(payload: RegisterAppRequest) -> dict:
     if payload.testing_notes:
         mem.write("architecture", "testing-notes", payload.testing_notes)
 
+    # Without this, everything just written above (objective.yaml,
+    # environments.yaml, the notes) only ever lands in this container's
+    # local checkout -- which is NOT durable (TASK-018: only the registry
+    # entry survives a restart; the checkout itself re-clones from
+    # repo_url on demand, restoring whatever's on the remote, not whatever
+    # was written here). Confirmed: without this push, a redeploy before
+    # any cycle happened to run persist_audit_trail would silently lose
+    # all of it.
+    from agentra.agents.git_ops import GitOpError, commit_and_push
+
+    push_warning = None
+    try:
+        commit_and_push(dest, payload.branch, "agentra: register app (objective/environment/notes)", [".agentra/"])
+    except GitOpError as exc:
+        push_warning = str(exc)
+        _server_log("register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {exc}")
+
     _server_log("register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}")
-    return {"registered": True, "name": payload.name, "repo_path": str(dest)}
+    result = {"registered": True, "name": payload.name, "repo_path": str(dest)}
+    if push_warning:
+        result["warning"] = f"registered, but could not push .agentra/ to the remote: {push_warning}"
+    return result
 
 
 # ── Standups: TASK-019. Cheap enough (no tools, one short LLM call) to run
