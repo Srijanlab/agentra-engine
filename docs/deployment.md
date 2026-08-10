@@ -21,13 +21,22 @@ auth for that UI is still future work (not part of this repo yet); today
 anyone who can reach the URL can register/run apps, same trust boundary as
 every other trigger endpoint.
 
-The multi-app registry (`~/.agentra/apps.json`, `agentra/registry.py`) and
-every registered app's own repo checkout live on a GCS FUSE volume mount
-(TASK-018, `deploy/gcp/terraform/storage.tf`/`cloudrun.tf`) at `/data` inside
-the container, not the ephemeral local disk — both survive an instance
-restart/redeploy. `AGENTRA_HOME=/data/home` and `AGENTRA_REPOS_ROOT=/data/repos`
-are the two env vars that make this durable in the deployed environment;
-locally (no such mount) both default to paths under `~/.agentra`.
+The multi-app registry (`~/.agentra/apps.json`, `agentra/registry.py`) lives
+on a GCS FUSE volume mount (TASK-018, `deploy/gcp/terraform/storage.tf`/
+`cloudrun.tf`) at `/data` inside the container, not the ephemeral local
+disk — `AGENTRA_HOME=/data/home` survives an instance restart/redeploy.
+Repo checkouts deliberately do **not** live on that mount:  gcsfuse doesn't
+support `chmod`, which `git clone` needs, confirmed live (cloning failed
+with `chmod on .git/config.lock: Operation not permitted` the one time
+this was tried). Checkouts live on the container's own local disk instead
+(`AGENTRA_REPOS_ROOT=/home/agentuser/repos`, agentuser's home — nothing at
+the container root is writable by the non-root user this runs as) and are
+**not** expected to survive a restart. `registry.get_app_repo()`
+transparently re-clones from the app's stored `repo_url` if its checkout
+is missing, so this is self-healing rather than durable: the actual
+durable copy of a project's history is whatever it has pushed to its own
+git remote. Locally (no GCS mount) both env vars default to paths under
+`~/.agentra`.
 
 ## One-time setup
 

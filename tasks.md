@@ -133,18 +133,26 @@ reason as TASK-013's last point (no app registered there to run a real
 task against yet).
 
 ### TASK-018: Dedicated persistent context ("team") per registered project
-**Commit:** 8f626c0
+**Commit:** 8f626c0, 2b955b1
 
-The multi-app registry and repo checkouts previously lived on Cloud Run's
-ephemeral local disk. Mounted a GCS bucket at `/data` via a Cloud Run v2
-GCS FUSE volume (`deploy/gcp/terraform/storage.tf`, requires the gen2
-execution environment) and pointed `AGENTRA_HOME`/`AGENTRA_REPOS_ROOT` at
-it in `cloudrun.tf`. `registry.py`'s `REPOS_ROOT` is env-overridable like
-`AGENTRA_HOME` already was, defaulting to `AGENTRA_HOME/repos` for
-local/dev use, so nothing about local `agentra apps add` changed. Each
-app's own `.agentra/` memory lives inside its repo checkout, so it inherits
-durability automatically once the checkout itself is on the mount — no
-separate change needed there.
+The multi-app registry previously lived on Cloud Run's ephemeral local
+disk. Mounted a GCS bucket at `/data` via a Cloud Run v2 GCS FUSE volume
+(`deploy/gcp/terraform/storage.tf`, requires the gen2 execution
+environment) and pointed `AGENTRA_HOME` at it — `apps.json` and the pause
+marker now survive a restart. Repo checkouts deliberately do **not** live
+on that mount: live testing against the real deployed service caught
+gcsfuse rejecting `git clone`'s `chmod` calls outright. Checkouts stay on
+the container's local disk (`AGENTRA_REPOS_ROOT=/home/agentuser/repos`,
+not durable) and self-heal instead — `registry.register_app()` now stores
+`repo_url`/`branch`, and `registry.get_app_repo()` (the one function every
+existing call site already goes through) transparently re-clones from
+`repo_url` if the checkout is missing, so a project's own git remote is
+the real durable copy of its history, same as it always was. Verified
+against the live deployed service, not just locally: registered a real
+repo (the original design 500'd here), confirmed the registry entry
+landed as a real GCS object, forced a new revision (fresh container,
+empty local disk), and confirmed both the registration and the
+auto-reclone survived and worked correctly.
 
 ### TASK-016: Register any GitHub repo from the dashboard and start an autonomous cycle
 **Commit:** 10b565f
