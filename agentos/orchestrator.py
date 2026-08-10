@@ -2,11 +2,16 @@
 
 Two entry points:
 
-run_cycle() — the regular loop: understand codebase -> discover (or accept)
-a feature -> implement -> test -> deploy to PRE-PROD -> assess measurability ->
-repeat. Never touches production. If no feature is given, the Product
-Discovery Agent (5.3) picks one, prioritizing any known bugs filed by the
-Production Debugging Agent above ordinary feature work.
+run_cycle() — the fixed-pipeline loop (CLI: `agentos run --fixed-pipeline`):
+understand codebase -> discover (or accept) a feature -> implement -> test ->
+deploy to PRE-PROD -> assess measurability -> repeat, in that hardcoded
+order. Not the default anymore — agents/brain.py::run_autonomous_cycle() is,
+letting the Orchestrator Agent itself decide which specialized agent to call
+and when, rather than following this fixed script. This function still
+exists for a deterministic, always-the-same-order path when that's what's
+wanted. Never touches production either way. If no feature is given, the
+Product Discovery Agent (5.3) picks one, prioritizing any known bugs filed
+by the Production Debugging Agent above ordinary feature work.
 
 run_prod_debug_cycle() — on-demand: diagnose a production issue. If the
 app's EnvironmentConfig.auto_remediate_prod is off (the default), it stops

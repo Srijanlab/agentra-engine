@@ -52,12 +52,13 @@ def _add_common_run_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--skip-deploy", action="store_true", help="Skip the pre-prod deployment step")
     parser.add_argument(
-        "--autonomous",
+        "--fixed-pipeline",
         action="store_true",
         help=(
-            "Let the Orchestrator Agent decide which specialized agent to call, in what "
-            "order (agents/brain.py), instead of the fixed understand->discover->implement->"
-            "test->deploy sequence. Production is never reachable from this mode either way."
+            "Use the old hardcoded understand->discover->implement->test->deploy sequence "
+            "(orchestrator.py::run_cycle) instead of the default: the Orchestrator Agent "
+            "deciding which specialized agent to call, in what order (agents/brain.py). "
+            "Production is never reachable from either mode."
         ),
     )
 
@@ -206,7 +207,19 @@ def main() -> None:
         analytics_summary = _read_analytics(args.analytics)
         repo = args.repo.resolve()
         objective = _resolve_objective(repo, args.objective)
-        if args.autonomous:
+        if args.fixed_pipeline:
+            report = asyncio.run(
+                run_cycle(
+                    repo,
+                    objective,
+                    feature=args.feature,
+                    analytics_summary=analytics_summary,
+                    skip_deploy=args.skip_deploy,
+                )
+            )
+            _print_report(report)
+            print(f"\nDetails written to <repo>/.agentos/memory/ and <repo>/.agentos/logs/{report.run_id}.log")
+        else:
             env = environments.load(repo) or environments.EnvironmentConfig()
             report = asyncio.run(
                 run_autonomous_cycle(
@@ -219,54 +232,42 @@ def main() -> None:
                 )
             )
             _print_autonomous_report(report)
-        else:
-            report = asyncio.run(
-                run_cycle(
-                    repo,
-                    objective,
-                    feature=args.feature,
-                    analytics_summary=analytics_summary,
-                    skip_deploy=args.skip_deploy,
-                )
-            )
-            _print_report(report)
-            print(f"\nDetails written to <repo>/.agentos/memory/ and <repo>/.agentos/logs/{report.run_id}.log")
         print("Ready for production? Run: agentos promote --repo <repo>")
 
     elif args.command == "loop":
         analytics_summary = _read_analytics(args.analytics)
         repo = args.repo.resolve()
         objective = _resolve_objective(repo, args.objective)
-        env = environments.load(repo) or environments.EnvironmentConfig() if args.autonomous else None
+        env = None if args.fixed_pipeline else (environments.load(repo) or environments.EnvironmentConfig())
         for i in range(1, args.cycles + 1):
             print(f"\n{'=' * 60}\nCycle {i}/{args.cycles}\n{'=' * 60}")
             feature = args.feature if i == 1 else None
-            if args.autonomous:
+            if args.fixed_pipeline:
                 report = asyncio.run(
-                    run_autonomous_cycle(
+                    run_cycle(
                         repo,
                         objective,
-                        env,
-                        analytics_summary=analytics_summary,
                         feature=feature,
+                        analytics_summary=analytics_summary,
                         skip_deploy=args.skip_deploy,
                     )
                 )
-                _print_autonomous_report(report)
+                _print_report(report)
+                if args.stop_on_failure and not (report.implementation_ok and report.testing_ok):
+                    print("\nStopping loop: cycle failed and --stop-on-failure was set.")
+                    break
                 continue
             report = asyncio.run(
-                run_cycle(
+                run_autonomous_cycle(
                     repo,
                     objective,
-                    feature=feature,
+                    env,
                     analytics_summary=analytics_summary,
+                    feature=feature,
                     skip_deploy=args.skip_deploy,
                 )
             )
-            _print_report(report)
-            if args.stop_on_failure and not (report.implementation_ok and report.testing_ok):
-                print("\nStopping loop: cycle failed and --stop-on-failure was set.")
-                break
+            _print_autonomous_report(report)
 
     elif args.command == "env" and args.env_command == "init":
         repo = args.repo.resolve()
