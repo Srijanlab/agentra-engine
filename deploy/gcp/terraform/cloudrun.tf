@@ -22,12 +22,14 @@
 # a stronger isolation boundary than those docker-run flags approximate
 # locally. Not attempting to replicate flag-for-flag here for that reason.
 #
-# TASK-018: /home/agentuser/.agentra (the multi-app registry + inbox) and
-# every registered app's repo checkout now live on a GCS FUSE volume mount
-# (storage.tf's agentra_data bucket, mounted at /data below) instead of the
-# container's ephemeral local disk -- both survive an instance restart.
-# AGENTRA_HOME points registry.py at the mount; server.py's clone-on-register
-# path (TASK-016) checks repos out under the same mount for the same reason.
+# TASK-018 originally put the multi-app registry + inbox on a GCS FUSE
+# volume mount to survive restarts. That worked for plain read/write but
+# gcsfuse's limited POSIX semantics kept causing real bugs (chmod failures
+# cloning repos onto the same mount, forcing repo checkouts off it anyway);
+# replaced with Firestore (firestore.tf, registry.py) -- a real database,
+# proper atomic claims for the inbox, no filesystem quirks. AGENTRA_HOME's
+# file-based paths (registry.py) are now dead code in this deployment,
+# unused whenever AGENTRA_FIRESTORE_PROJECT is set, which it always is here.
 
 resource "google_cloud_run_v2_service" "agentra" {
   name     = "agentra-orchestrator"
@@ -37,17 +39,6 @@ resource "google_cloud_run_v2_service" "agentra" {
   deletion_protection = false
 
   template {
-    # GCS FUSE volume mounts require the gen2 execution environment.
-    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
-
-    volumes {
-      name = "agentra-data"
-      gcs {
-        bucket    = google_storage_bucket.agentra_data.name
-        read_only = false
-      }
-    }
-
     containers {
       name  = "agentra"
       image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.agentra.repository_id}/agentra:${var.image_tag}"
@@ -57,30 +48,19 @@ resource "google_cloud_run_v2_service" "agentra" {
         container_port = 8080
       }
 
-      volume_mounts {
-        name       = "agentra-data"
-        mount_path = "/data"
-      }
-
       env {
-        name  = "AGENTRA_HOME"
-        value = "/data/home"
+        name  = "AGENTRA_FIRESTORE_PROJECT"
+        value = var.project_id
       }
       env {
-        # Deliberately NOT under /data (the GCS FUSE mount): gcsfuse doesn't
-        # support chmod, which `git clone` needs (it sets core.filemode on
-        # every checkout) -- confirmed live, clone_repo failed with "chmod
-        # on .git/config.lock: Operation not permitted" the first time this
-        # pointed at the mount. Repo checkouts live on the container's own
-        # local disk instead and are NOT expected to survive a restart --
-        # registry.get_app_repo() re-clones automatically from repo_url
-        # when a checkout is missing (TASK-018), so the actually-durable
-        # copy of a project's history is whatever it has pushed to its own
-        # git remote, same as it always was. Under agentuser's own home
-        # (not e.g. /repos at the container root), same reasoning as
-        # Dockerfile's /home/agentuser/.agentra -- agentuser can create
-        # subdirectories under its own home freely; it owns nothing at
-        # container root, confirmed live (PermissionError: '/repos').
+        # Under agentuser's own home, not e.g. /repos at the container
+        # root -- same reasoning as Dockerfile's /home/agentuser/.agentra:
+        # agentuser can create subdirectories under its own home freely; it
+        # owns nothing at container root, confirmed live (PermissionError:
+        # '/repos'). Local disk, not durable -- registry.get_app_repo()
+        # re-clones automatically from repo_url when a checkout is missing
+        # (TASK-018), so the actually-durable copy of a project's history
+        # is whatever it has pushed to its own git remote.
         name  = "AGENTRA_REPOS_ROOT"
         value = "/home/agentuser/repos"
       }
@@ -223,6 +203,8 @@ resource "google_cloud_run_v2_service" "agentra" {
       max_instance_count = 1
     }
   }
+
+  depends_on = [google_firestore_database.agentra]
 }
 
 # Publicly reachable so Cloud Scheduler / Pub/Sub push / a Monitoring

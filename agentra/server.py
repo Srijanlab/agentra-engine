@@ -98,12 +98,18 @@ def _server_log(source: str, message: str) -> None:
     """Top-level trigger log, independent of any one app's own Memory -- a
     trigger can name an app that isn't registered, or arrive before any repo
     context is resolved at all, so it can't always be filed under an app's
-    own .agentra/logs/."""
-    registry.AGENTRA_HOME.mkdir(parents=True, exist_ok=True)
-    path = registry.AGENTRA_HOME / "server.log"
+    own .agentra/logs/. Firestore-backed when configured (agentra's own
+    durable operational state, same as registry.py's apps/pause/inbox);
+    falls back to a local append-only file otherwise."""
     timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
-    with path.open("a") as f:
-        f.write(f"[{timestamp}] source={source} {message}\n")
+    db = registry.firestore_client()
+    if db is not None:
+        db.collection("signals").add({"ts": timestamp, "source": source, "message": message})
+    else:
+        registry.AGENTRA_HOME.mkdir(parents=True, exist_ok=True)
+        path = registry.AGENTRA_HOME / "server.log"
+        with path.open("a") as f:
+            f.write(f"[{timestamp}] source={source} {message}\n")
     logger.info("source=%s %s", source, message)
 
 
@@ -180,6 +186,18 @@ async def list_signals(limit: int = 50) -> dict:
     """TASK-015: dashboard feed of every trigger this instance has logged
     (server.py's own _server_log ledger -- schedule/alarm/queue/register/
     system events), newest first."""
+    db = registry.firestore_client()
+    if db is not None:
+        from google.cloud import firestore
+
+        docs = (
+            db.collection("signals")
+            .order_by("ts", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        return {"signals": [{"ts": d.get("ts"), "source": d.get("source"), "message": d.get("message")} for d in docs]}
+
     log_path = registry.AGENTRA_HOME / "server.log"
     if not log_path.exists():
         return {"signals": []}

@@ -2,20 +2,32 @@
 agentra" layer (vision.md's system operating across many apps, not tied to
 one project).
 
-Lives at ~/.agentra/ (AGENTRA_HOME), separate from each app's own
-<repo>/.agentra/ memory -- this is agentra's own state about *which* apps
-it manages and *what's waiting to be absorbed* into them, not any single
-app's own audit trail.
+This is agentra's own operational state about *which* apps it manages and
+*what's waiting to be absorbed* into them -- distinct from any single app's
+own audit trail, which lives inside that app's own repo (agentra/memory.py,
+git-committed, travels with the project). That split is deliberate: project
+knowledge belongs with the project (portable, human-readable, versioned);
+agentra's own bookkeeping belongs in agentra's own durable storage.
 
-Durability is the whole point here, not an afterthought: a submitted
-request is written to disk (pending/) before this function ever returns
-success to the caller. Processing claims a request by an atomic filesystem
-rename (pending/ -> processing/), and only removes it (processing/ -> done/)
-once it's been merged into the target app's own ledgers. If the process
-crashes between those two steps, the request is still sitting in
-processing/ on disk -- dispatch_once() checks for exactly that on every
-run and resumes it, so nothing is ever silently lost to an in-memory queue
-that a crash would wipe out.
+Backed by Firestore when AGENTRA_FIRESTORE_PROJECT is set (the deployed
+environment); falls back to local JSON files under AGENTRA_HOME otherwise,
+so local dev needs no GCP credentials at all. Firestore replaced an earlier
+GCS-FUSE-mounted-JSON-files design -- that worked for plain read/write but
+gcsfuse's limited POSIX semantics kept surfacing real bugs elsewhere
+(chmod failures cloning repos onto the same mount), and a real database
+gives proper atomic claims for the inbox instead of relying on filesystem
+rename semantics on a network filesystem.
+
+Durability is the whole point of the inbox, not an afterthought: a
+submitted request is durably stored (Firestore write, or the pending/
+file-write-then-atomic-rename fallback) before this function ever returns
+success to the caller. Processing claims a request atomically (a Firestore
+transaction, or a filesystem rename in the fallback), and only marks it
+done once it's been merged into the target app's own ledgers. If the
+process crashes between those two steps, the request is still sitting in
+"processing" state -- dispatch_once() checks for exactly that on every run
+and resumes it, so nothing is ever silently lost to an in-memory queue a
+crash would wipe out.
 """
 
 import json
@@ -36,95 +48,107 @@ _env_value = os.environ.get("AGENTRA_HOME")
 AGENTRA_HOME = Path(_env_value) if _env_value else Path.home() / ".agentra"
 APPS_PATH = AGENTRA_HOME / "apps.json"
 INBOX_ROOT = AGENTRA_HOME / "inbox"
+PAUSE_PATH = AGENTRA_HOME / "paused.json"
 
 # TASK-016/018: where server.py's clone-on-register path checks a newly
-# registered GitHub repo out to. Separate from AGENTRA_HOME (not
-# AGENTRA_HOME/repos) so a deployment can put registry bookkeeping and repo
-# checkouts on different volumes if it ever needs to -- deploy/gcp sets both
-# to paths under the same GCS FUSE mount (storage.tf/cloudrun.tf), but
-# nothing here assumes that.
+# registered GitHub repo out to. This is genuinely local-disk-only (not
+# Firestore-backed, obviously -- a repo checkout isn't a document) and not
+# expected to survive a restart; registry.get_app_repo() re-clones from
+# repo_url on demand when it's missing, so the checkout is self-healing
+# rather than durable -- the actual durable copy of a project's history is
+# whatever it has pushed to its own git remote.
 _repos_env_value = os.environ.get("AGENTRA_REPOS_ROOT")
 REPOS_ROOT = Path(_repos_env_value) if _repos_env_value else AGENTRA_HOME / "repos"
 
-# A request left in processing/ longer than this is assumed to be from a crashed
-# dispatch run, not one that's genuinely still in flight (processing itself is a
-# fast, in-process JSON merge -- see dispatch_once -- so a real in-progress case
-# never gets anywhere near this long).
+# A request left in "processing" longer than this is assumed to be from a
+# crashed prior dispatch run, not one that's genuinely still in flight
+# (processing itself is a fast, in-process JSON merge -- see dispatch_once
+# -- so a real in-progress case never gets anywhere near this long).
 STALE_PROCESSING_SECONDS = 10 * 60
 
 REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 
 
-def _apps() -> dict[str, dict]:
+def _init_firestore():
+    """None if Firestore isn't configured/available -- explicit opt-in via
+    AGENTRA_FIRESTORE_PROJECT (not just any ambient GOOGLE_CLOUD_PROJECT a
+    shell happens to have set, which could otherwise surprise local dev
+    into trying to reach a real project) or the SDK isn't installed."""
+    project = os.environ.get("AGENTRA_FIRESTORE_PROJECT")
+    if not project:
+        return None
+    try:
+        from google.cloud import firestore
+    except ImportError:
+        return None
+    return firestore.Client(project=project)
+
+
+_db = _init_firestore()
+
+
+def firestore_client():
+    """None if Firestore isn't configured -- server.py's signal log uses
+    this rather than reaching into the module-private _db directly."""
+    return _db
+
+
+# ── Apps registry ───────────────────────────────────────────────────────────
+
+
+def _local_apps() -> dict[str, dict]:
     if not APPS_PATH.exists():
         return {}
     return json.loads(APPS_PATH.read_text())
 
 
-def _save_apps(apps: dict[str, dict]) -> None:
+def _local_save_apps(apps: dict[str, dict]) -> None:
     APPS_PATH.parent.mkdir(parents=True, exist_ok=True)
     APPS_PATH.write_text(json.dumps(apps, indent=2))
 
 
-# TASK-017: a durable, global kill switch every trigger path in server.py
-# checks before dispatching new agent work. A plain marker file under
-# AGENTRA_HOME rather than in-memory state -- must survive a restart (it
-# lives on the same durable mount as apps.json once TASK-018's volume is in
-# play), and a human hitting "pause" needs that to actually stick even if
-# the instance recycles a minute later.
-PAUSE_PATH = AGENTRA_HOME / "paused.json"
-
-
-def is_paused() -> dict | None:
-    """None if not paused; otherwise the pause record (who/when/why, for
-    display -- the dashboard shows this so "who paused it and why" isn't
-    lost the moment the button is clicked)."""
-    if not PAUSE_PATH.exists():
-        return None
-    return json.loads(PAUSE_PATH.read_text())
-
-
-def pause(reason: str | None = None) -> None:
-    PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PAUSE_PATH.write_text(json.dumps({"paused_at": time.time(), "reason": reason}, indent=2))
-
-
-def resume() -> None:
-    PAUSE_PATH.unlink(missing_ok=True)
+def list_apps() -> dict[str, dict]:
+    if _db is not None:
+        return {doc.id: doc.to_dict() for doc in _db.collection("apps").stream()}
+    return _local_apps()
 
 
 def register_app(name: str, repo_path: str, repo_url: str | None = None, branch: str | None = None) -> None:
     """repo_url/branch are optional (a local `agentra apps add` registration
     has neither) -- when present, get_app_repo() below uses them to
-    re-clone automatically if repo_path ever goes missing (e.g. an
-    ephemeral checkout on a restarted Cloud Run instance, TASK-018: GCS
-    FUSE can't hold a real git checkout -- see its comment -- so the
-    checkout itself is deliberately NOT on durable storage; the actual
-    durable copy of a project's history is whatever it has pushed to this
-    URL, which re-cloning simply restores)."""
-    apps = _apps()
+    re-clone automatically if repo_path ever goes missing (see REPOS_ROOT's
+    comment on why the checkout itself isn't durable)."""
     entry: dict = {"repo_path": str(Path(repo_path).resolve())}
     if repo_url:
         entry["repo_url"] = repo_url
     if branch:
         entry["branch"] = branch
+
+    if _db is not None:
+        _db.collection("apps").document(name).set(entry)
+        return
+
+    apps = _local_apps()
     apps[name] = entry
-    _save_apps(apps)
+    _local_save_apps(apps)
     for sub in ("pending", "processing", "done"):
         (INBOX_ROOT / name / sub).mkdir(parents=True, exist_ok=True)
 
 
 def remove_app(name: str) -> bool:
-    apps = _apps()
+    if _db is not None:
+        doc_ref = _db.collection("apps").document(name)
+        if not doc_ref.get().exists:
+            return False
+        doc_ref.delete()
+        return True
+
+    apps = _local_apps()
     if name not in apps:
         return False
     del apps[name]
-    _save_apps(apps)
+    _local_save_apps(apps)
     return True
-
-
-def list_apps() -> dict[str, dict]:
-    return _apps()
 
 
 def get_app_repo(name: str) -> Path | None:
@@ -133,7 +157,7 @@ def get_app_repo(name: str) -> Path | None:
     function, so the re-clone-if-missing recovery (TASK-018) needs no
     changes anywhere else: a restarted instance transparently re-clones a
     registered app's repo the next time anything asks for it."""
-    app = _apps().get(name)
+    app = list_apps().get(name)
     if app is None:
         return None
     repo = Path(app["repo_path"])
@@ -147,6 +171,45 @@ def get_app_repo(name: str) -> Path | None:
     return repo if repo.exists() else None
 
 
+# ── Kill switch (TASK-017) ──────────────────────────────────────────────────
+# A durable, global marker every trigger path in server.py checks before
+# dispatching new agent work -- must survive a restart, and a human hitting
+# "pause" needs that to actually stick even if the instance recycles a
+# minute later.
+
+
+def is_paused() -> dict | None:
+    """None if not paused; otherwise the pause record (who/when/why, for
+    display -- the dashboard shows this so "who paused it and why" isn't
+    lost the moment the button is clicked)."""
+    if _db is not None:
+        doc = _db.collection("system").document("pause").get()
+        return doc.to_dict() if doc.exists else None
+
+    if not PAUSE_PATH.exists():
+        return None
+    return json.loads(PAUSE_PATH.read_text())
+
+
+def pause(reason: str | None = None) -> None:
+    record = {"paused_at": time.time(), "reason": reason}
+    if _db is not None:
+        _db.collection("system").document("pause").set(record)
+        return
+    PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PAUSE_PATH.write_text(json.dumps(record, indent=2))
+
+
+def resume() -> None:
+    if _db is not None:
+        _db.collection("system").document("pause").delete()
+        return
+    PAUSE_PATH.unlink(missing_ok=True)
+
+
+# ── Inbox: durable requests submitted for an app, drained by dispatch_once ──
+
+
 def submit_request(
     app: str,
     request_type: str,
@@ -158,16 +221,32 @@ def submit_request(
 
     This is the one function anything outside agentra should call to get a
     signal/feature-request/objective-change into the system -- a filesystem-
-    based adapter script, or later, an HTTP handler. Either way, by the time
-    this returns, the request is on disk in pending/, not held anywhere in
-    memory only.
+    based adapter script, or an HTTP handler (server.py's /trigger/queue).
+    Either way, by the time this returns, the request is durably stored,
+    not held anywhere in memory only.
     """
     if request_type not in REQUEST_TYPES:
         raise ValueError(f"unknown request type: {request_type!r}, must be one of {REQUEST_TYPES}")
-    if app not in _apps():
+    if app not in list_apps():
         raise ValueError(f"unknown app {app!r} -- register it first with `agentra apps add`")
 
     request_id = uuid.uuid4().hex[:12]
+
+    if _db is not None:
+        _db.collection("apps").document(app).collection("requests").document(request_id).set(
+            {
+                "id": request_id,
+                "app": app,
+                "type": request_type,
+                "description": description,
+                "severity": severity,
+                "screenshot_url": screenshot_url,
+                "received_at": time.time(),
+                "status": "pending",
+            }
+        )
+        return request_id
+
     pending_dir = INBOX_ROOT / app / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -195,26 +274,6 @@ class DispatchSummary:
     errors: list[str]
 
 
-def _resume_stale_processing(app: str) -> int:
-    """Requests left in processing/ from a crashed prior dispatch run get moved
-    back to pending/ so this run picks them up fresh. Safe to do unconditionally
-    for anything old enough -- merges are idempotent (external_id dedup in
-    memory.py), so reprocessing a request that actually did finish last time is
-    a harmless no-op, not a duplicate."""
-    resumed = 0
-    processing_dir = INBOX_ROOT / app / "processing"
-    if not processing_dir.is_dir():
-        return 0
-    now = time.time()
-    for path in processing_dir.glob("*.json"):
-        if now - path.stat().st_mtime < STALE_PROCESSING_SECONDS:
-            continue  # plausibly still genuinely in flight; leave it alone
-        target = INBOX_ROOT / app / "pending" / path.name
-        os.rename(path, target)
-        resumed += 1
-    return resumed
-
-
 def _apply_request(repo: Path, request: dict) -> None:
     mem = Memory(repo)
     request_type = request["type"]
@@ -239,19 +298,37 @@ def _apply_request(repo: Path, request: dict) -> None:
         raise ValueError(f"unknown request type: {request_type!r}")
 
 
-def dispatch_once() -> DispatchSummary:
-    """Absorb everything currently sitting in the inbox into each app's own
-    ledgers. Cheap and fast (pure file/JSON work, no LLM calls) -- meant to run
-    frequently (e.g. every few minutes via cron), separate from the actual
-    (expensive, slower) `agentra run` cycles that act on the resulting backlog.
-    """
+# ── Local (file-based) fallback implementation ──────────────────────────────
+
+
+def _local_resume_stale_processing(app: str) -> int:
+    """Requests left in processing/ from a crashed prior dispatch run get moved
+    back to pending/ so this run picks them up fresh. Safe to do unconditionally
+    for anything old enough -- merges are idempotent (external_id dedup in
+    memory.py), so reprocessing a request that actually did finish last time is
+    a harmless no-op, not a duplicate."""
+    resumed = 0
+    processing_dir = INBOX_ROOT / app / "processing"
+    if not processing_dir.is_dir():
+        return 0
+    now = time.time()
+    for path in processing_dir.glob("*.json"):
+        if now - path.stat().st_mtime < STALE_PROCESSING_SECONDS:
+            continue  # plausibly still genuinely in flight; leave it alone
+        target = INBOX_ROOT / app / "pending" / path.name
+        os.rename(path, target)
+        resumed += 1
+    return resumed
+
+
+def _local_dispatch_once() -> DispatchSummary:
     resumed_total = 0
     processed = 0
     errors: list[str] = []
 
-    for app, info in _apps().items():
+    for app, info in _local_apps().items():
         repo = Path(info["repo_path"])
-        resumed_total += _resume_stale_processing(app)
+        resumed_total += _local_resume_stale_processing(app)
 
         pending_dir = INBOX_ROOT / app / "pending"
         processing_dir = INBOX_ROOT / app / "processing"
@@ -281,3 +358,70 @@ def dispatch_once() -> DispatchSummary:
             processed += 1
 
     return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
+
+
+# ── Firestore implementation ────────────────────────────────────────────────
+
+
+def _firestore_try_claim(doc_ref) -> bool:
+    """Atomically move one request from pending -> processing. False if it
+    was already claimed (or gone) by the time this transaction runs --
+    dispatch_once() just skips it, matching the local backend's
+    os.rename-fails-if-already-moved behavior."""
+    from google.cloud import firestore
+
+    transaction = _db.transaction()
+
+    @firestore.transactional
+    def _claim(transaction):
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists or snapshot.get("status") != "pending":
+            return False
+        transaction.update(doc_ref, {"status": "processing", "claimed_at": time.time()})
+        return True
+
+    return _claim(transaction)
+
+
+def _firestore_dispatch_once() -> DispatchSummary:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
+    resumed_total = 0
+    processed = 0
+    errors: list[str] = []
+    now = time.time()
+
+    for app, info in list_apps().items():
+        repo = Path(info["repo_path"])
+        requests_ref = _db.collection("apps").document(app).collection("requests")
+
+        for doc in requests_ref.where(filter=FieldFilter("status", "==", "processing")).stream():
+            claimed_at = doc.get("claimed_at") or 0
+            if now - claimed_at < STALE_PROCESSING_SECONDS:
+                continue  # plausibly still genuinely in flight
+            doc.reference.update({"status": "pending"})
+            resumed_total += 1
+
+        for doc in requests_ref.where(filter=FieldFilter("status", "==", "pending")).stream():
+            if not _firestore_try_claim(doc.reference):
+                continue
+            try:
+                _apply_request(repo, doc.to_dict())
+            except Exception as exc:
+                errors.append(f"{app}/{doc.id}: {exc}")
+                continue  # left in "processing" -- resumed and retried next run
+            doc.reference.update({"status": "done"})
+            processed += 1
+
+    return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
+
+
+def dispatch_once() -> DispatchSummary:
+    """Absorb everything currently sitting in the inbox into each app's own
+    ledgers. Cheap and fast (no LLM calls) -- meant to run frequently (e.g.
+    every few minutes via cron), separate from the actual (expensive,
+    slower) `agentra run` cycles that act on the resulting backlog.
+    """
+    if _db is not None:
+        return _firestore_dispatch_once()
+    return _local_dispatch_once()
