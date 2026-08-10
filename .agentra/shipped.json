@@ -1,0 +1,3 @@
+[
+  "Add tests/test_safety_hook.py (fast deterministic pytest coverage for make_pre_tool_use_hook) and fix the DELETE FROM end-of-string-anchoring bypass"
+]
