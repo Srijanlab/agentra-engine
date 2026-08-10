@@ -30,6 +30,7 @@ code; verify_pre_prod independently verifies the live deployment afterward
 (agents/testing.py has the full reasoning on why these are distinct passes).
 """
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -53,6 +54,24 @@ from agentra.ranking import rank
 # both enforced deterministically rather than left to the model's judgment.
 MAX_CONSECUTIVE_TOOL_FAILURES = 2
 MAX_CYCLE_COST_USD = 3.0
+
+# Stagnation breaker threshold -- deliberately distinct from MAX_CONSECUTIVE_TOOL_FAILURES
+# above. That one catches a tool erroring the same way over and over; this one catches the
+# opposite failure mode, which is just as capable of running the clock (and the cost meter)
+# out to max_turns: the orchestrator LLM calling tools that each individually report success
+# (or a *different* failure each time, so record_failure never trips) while the run itself
+# never actually moves -- e.g. re-running check_backlog or discover_opportunities every turn
+# without ever acting on the answer, or calling implement_feature with the exact same brief
+# repeatedly. See OrchestratorSession.record_tool_call / progress_snapshot below.
+STAGNATION_WINDOW = 5
+
+
+def _tool_call_hash(tool_name: str, args: dict) -> str:
+    """Stable hash of (tool_name, args) -- stable meaning deterministic across processes
+    and Python runs (unlike the builtin hash() of a str/tuple, which is salted per
+    process), so it can be logged and compared run to run, not just within one call."""
+    payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -82,6 +101,10 @@ class OrchestratorSession:
     actions: list[str] = field(default_factory=list)
     tool_failure_counts: dict[str, int] = field(default_factory=dict)
     hard_stop_reason: str | None = None
+    # Sliding window of the last STAGNATION_WINDOW tool calls this run has made, each
+    # entry (call_hash, state_changed) -- see record_tool_call.
+    recent_tool_calls: list[tuple[str, bool]] = field(default_factory=list)
+    stagnation_detected: bool = False
 
     @property
     def app_name(self) -> str:
@@ -141,6 +164,50 @@ class OrchestratorSession:
 
     def record_success(self, tool_name: str) -> None:
         self.tool_failure_counts[tool_name] = 0
+
+    def progress_snapshot(self) -> tuple:
+        """A cheap, comparable snapshot of the fields that represent this run actually
+        having moved forward. Deliberately excludes cost_usd and len(actions) -- both
+        change on nearly every call (an LLM call always costs something; note() is
+        called from nearly every handler) and so would make the state-change signal
+        below meaningless -- everything would look like "progress"."""
+        return (
+            self.cb_summary is not None,
+            self.tests_passed,
+            self.pre_prod_url,
+            self.deployed_to_pre_prod,
+            self.pre_prod_verified,
+            self.current_feature,
+            self.feature_branch,
+        )
+
+    def record_tool_call(self, tool_name: str, args: dict, state_changed: bool) -> None:
+        """Stagnation breaker, distinct from record_failure's per-tool-name
+        consecutive-*failure* breaker above. Tracks a sliding window of the last
+        STAGNATION_WINDOW tool calls this run made (as (hash-of-tool-and-args,
+        did-state-change) pairs); if the window fills up with the same call
+        producing no observable change every single time, the run isn't going
+        anywhere -- stop it, same as the failure breaker does, rather than let it
+        burn turns/cost until max_turns.
+        """
+        if self.hard_stop_reason:
+            return  # already tripped (this breaker or the other) -- nothing new to track
+        call_hash = _tool_call_hash(tool_name, args)
+        self.recent_tool_calls.append((call_hash, state_changed))
+        if len(self.recent_tool_calls) > STAGNATION_WINDOW:
+            self.recent_tool_calls.pop(0)
+        if len(self.recent_tool_calls) < STAGNATION_WINDOW:
+            return
+        hashes = {h for h, _ in self.recent_tool_calls}
+        any_progress = any(changed for _, changed in self.recent_tool_calls)
+        if len(hashes) == 1 and not any_progress:
+            self.stagnation_detected = True
+            self.hard_stop_reason = (
+                f"No progress in the last {STAGNATION_WINDOW} tool calls -- {tool_name!r} was "
+                "called with the same arguments repeatedly and nothing about the run's state "
+                "changed. Stop calling tools -- summarize what happened and end your turn."
+            )
+            print(f"[agentra] stagnation breaker tripped: {self.hard_stop_reason}", flush=True)
 
 
 def _tools_for(session: OrchestratorSession) -> list:
@@ -454,7 +521,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.record_success("spawn_custom_agent")
         return {"content": [{"type": "text", "text": result.text[:2000]}]}
 
-    return [
+    tools = [
         understand_codebase,
         check_backlog,
         discover_opportunities,
@@ -465,6 +532,28 @@ def _tools_for(session: OrchestratorSession) -> list:
         assess_feedback,
         spawn_custom_agent,
     ]
+    # Feed every tool call into the stagnation breaker uniformly, rather than
+    # threading a before/after snapshot + record_tool_call call through each of the
+    # nine handlers above individually (easy to forget on the next tool added here).
+    for t in tools:
+        t.handler = _stagnation_tracked(session, t.name, t.handler)
+    return tools
+
+
+def _stagnation_tracked(session: "OrchestratorSession", tool_name: str, handler):
+    """Wrap a tool handler so the stagnation breaker (OrchestratorSession.
+    record_tool_call) observes every call this session makes, regardless of which
+    tool -- the state-change signal is a before/after diff of session.progress_snapshot()
+    taken around the handler's own work."""
+
+    async def wrapped(args):
+        before = session.progress_snapshot()
+        result = await handler(args)
+        after = session.progress_snapshot()
+        session.record_tool_call(tool_name, args, state_changed=before != after)
+        return result
+
+    return wrapped
 
 
 SYSTEM_PROMPT = """You are the Orchestrator Agent in an autonomous product \
@@ -576,6 +665,16 @@ async def run_autonomous_cycle(
         final_text = f"autonomous cycle raised: {exc}"
         session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
         mem.write("failures", f"{run_id}-autonomous", final_text)
+
+    if session.stagnation_detected:
+        # Don't rely solely on the model having actually followed the "summarize and end
+        # your turn" instruction in hard_stop_reason -- make the reason this cycle ended
+        # early explicit in the durable record regardless of what final_text says.
+        stagnation_note = (
+            f"Cycle terminated early: no progress detected. {session.hard_stop_reason}"
+        )
+        final_text = f"{final_text}\n\n{stagnation_note}" if final_text else stagnation_note
+        session.note("stagnation breaker: cycle terminated early, no progress", agent="cycle", ok=False)
 
     mem.write(
         "decisions",
