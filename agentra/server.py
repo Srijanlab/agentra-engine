@@ -29,14 +29,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+import hmac
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from agentra import environments, registry
@@ -197,7 +199,38 @@ class AlarmTrigger(BaseModel):
     objective: str | None = None
 
 
-@app.post("/trigger/alarm")
+def _verify_alarm_webhook_auth(authorization: str | None = Header(default=None)) -> None:
+    """Cloud Scheduler and Pub/Sub push both authenticate to this service via
+    OIDC tokens, verified by Cloud Run's own IAM invoker check before the
+    request ever reaches this process (see cloudrun.tf's roles/run.invoker
+    grants) -- but GCP Monitoring's Webhook notification channel has no OIDC
+    support at all; it authenticates with plain HTTP Basic Auth configured
+    on the channel. That means this is the one trigger path IAM-invoker
+    can't protect on its own, so it gets its own check here.
+
+    A no-op (open) when ALARM_WEBHOOK_PASSWORD isn't set, so local/manual
+    testing (this repo's own live verification, tests/) needs no
+    credentials. Deployed with it set (deploy/gcp/terraform/secrets.tf),
+    every request must present it, since making this endpoint reachable at
+    all from Monitoring's webhook mechanism requires the Cloud Run service
+    to allow unauthenticated (allUsers) invocations -- see cloudrun.tf's
+    comment on why that grant isn't made by default today.
+    """
+    expected = os.environ.get("ALARM_WEBHOOK_PASSWORD")
+    if not expected:
+        return
+    if authorization is None or not authorization.startswith("Basic "):
+        raise HTTPException(status_code=401, detail="missing Basic auth")
+    try:
+        decoded = base64.b64decode(authorization.removeprefix("Basic ")).decode("utf-8")
+        _username, _, password = decoded.partition(":")
+    except Exception:
+        raise HTTPException(status_code=401, detail="malformed Basic auth")
+    if not hmac.compare_digest(password, expected):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+
+
+@app.post("/trigger/alarm", dependencies=[Depends(_verify_alarm_webhook_auth)])
 async def trigger_alarm(payload: dict) -> dict:
     incident = payload.get("incident")
     if incident is not None:
