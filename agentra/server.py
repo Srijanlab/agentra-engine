@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from agentra import environments, registry
@@ -185,12 +185,27 @@ async def list_signals(limit: int = 50) -> dict:
 @app.get("/connectors/github")
 async def github_connector_status() -> dict:
     if not github_app.is_configured():
-        return {"configured": False, "installations": [], "error": None}
+        return {"configured": False, "installations": [], "error": None, "install_url": None}
     try:
         installations = github_app.list_installations()
-        return {"configured": True, "installations": installations, "error": None}
+        return {
+            "configured": True,
+            "installations": installations,
+            "error": None,
+            "install_url": github_app.install_url(),
+        }
     except github_app.GitHubAppError as exc:
-        return {"configured": True, "installations": [], "error": str(exc)}
+        return {"configured": True, "installations": [], "error": str(exc), "install_url": github_app.install_url()}
+
+
+@app.get("/connectors/github/callback")
+async def github_connector_callback() -> RedirectResponse:
+    """GitHub redirects here after an install/update if the App's 'Setup
+    URL' (Advanced settings) is pointed at this path -- purely a UX nicety
+    (lands back on the dashboard instead of GitHub's blank confirmation
+    page); list_installations() already reflects new installs immediately
+    without this, since nothing here needs to persist an installation_id."""
+    return RedirectResponse(url="/")
 
 
 # ── App registration: TASK-016, register any GitHub repo from the dashboard

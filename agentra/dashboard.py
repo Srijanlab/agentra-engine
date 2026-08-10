@@ -240,21 +240,24 @@ async function refreshApps() {
 async function refreshGithubConnector() {
   const data = await jsonFetch("/connectors/github");
   const el = $("#github-connector");
+  const connectLink = data.install_url
+    ? `<a href="${esc(data.install_url)}" target="_blank" rel="noopener"><button class="ghost" type="button">+ Connect a GitHub account/org</button></a>`
+    : "";
   if (!data.configured) {
     el.innerHTML = `<div class="empty">Not configured -- no GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY set. Repo registration falls back to the static GITHUB_TOKEN (limited to whatever repos that token was scoped to).</div>`;
     return;
   }
   if (data.error) {
-    el.innerHTML = `<div class="empty">Configured, but the GitHub API call failed: ${esc(data.error)}</div>`;
+    el.innerHTML = `<div class="empty">Configured, but the GitHub API call failed: ${esc(data.error)}</div>${connectLink}`;
     return;
   }
   if (!data.installations.length) {
-    el.innerHTML = `<div class="empty">Configured, but not installed anywhere yet -- install the App on an org/account at github.com/settings/apps.</div>`;
+    el.innerHTML = `<div class="empty">Configured, but not installed anywhere yet.</div>${connectLink}`;
     return;
   }
   el.innerHTML = `<table><thead><tr><th>Account</th><th>Type</th><th>Repos</th></tr></thead><tbody>` +
     data.installations.map((i) => `<tr><td>${esc(i.account)}</td><td>${esc(i.type)}</td><td>${esc(i.repository_selection)}</td></tr>`).join("") +
-    `</tbody></table>`;
+    `</tbody></table><div style="margin-top:10px;">${connectLink}</div>`;
 }
 
 async function refreshStandups() {

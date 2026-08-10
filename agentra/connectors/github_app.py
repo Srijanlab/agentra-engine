@@ -32,6 +32,7 @@ GITHUB_API = "https://api.github.com"
 # so staleness here is cheap to recover from, not a correctness risk.
 _installation_id_cache: dict[str, int] = {}
 _token_cache: dict[int, tuple[str, float]] = {}
+_slug_cache: str | None = None
 
 
 class GitHubAppNotConfigured(Exception):
@@ -139,6 +140,31 @@ def list_installations() -> list[dict]:
         }
         for inst in resp.json()
     ]
+
+
+def install_url() -> str | None:
+    """Public 'install this App' page -- the dashboard links here so
+    connecting a new org/account is a click from agentra's own UI instead
+    of hunting through GitHub's App settings pages. Only works for
+    accounts other than the App's own owner if the App's "Where can this
+    GitHub App be installed?" setting is "Any account" -- still "Only on
+    this account" leaves this link functional only for the owner's own
+    orgs, a GitHub-side setting this code can't change for you. None if
+    the App isn't configured at all, or the slug lookup fails (e.g. a bad
+    key) -- not worth raising over, the rest of the status payload still
+    reports the real problem."""
+    global _slug_cache
+    if _slug_cache is not None:
+        return f"https://github.com/apps/{_slug_cache}/installations/new"
+    if not is_configured():
+        return None
+    try:
+        resp = _github_get("/app")
+        resp.raise_for_status()
+        _slug_cache = resp.json()["slug"]
+    except (httpx.HTTPError, GitHubAppError, KeyError):
+        return None
+    return f"https://github.com/apps/{_slug_cache}/installations/new"
 
 
 def is_configured() -> bool:
