@@ -129,6 +129,11 @@ DASHBOARD_HTML = """\
 <main>
 
   <div class="panel">
+    <h2>GitHub connector</h2>
+    <div id="github-connector"></div>
+  </div>
+
+  <div class="panel">
     <h2>Register a repo</h2>
     <form class="register-form" id="register-form">
       <div>
@@ -232,6 +237,26 @@ async function refreshApps() {
   `).join("");
 }
 
+async function refreshGithubConnector() {
+  const data = await jsonFetch("/connectors/github");
+  const el = $("#github-connector");
+  if (!data.configured) {
+    el.innerHTML = `<div class="empty">Not configured -- no GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY set. Repo registration falls back to the static GITHUB_TOKEN (limited to whatever repos that token was scoped to).</div>`;
+    return;
+  }
+  if (data.error) {
+    el.innerHTML = `<div class="empty">Configured, but the GitHub API call failed: ${esc(data.error)}</div>`;
+    return;
+  }
+  if (!data.installations.length) {
+    el.innerHTML = `<div class="empty">Configured, but not installed anywhere yet -- install the App on an org/account at github.com/settings/apps.</div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr><th>Account</th><th>Type</th><th>Repos</th></tr></thead><tbody>` +
+    data.installations.map((i) => `<tr><td>${esc(i.account)}</td><td>${esc(i.type)}</td><td>${esc(i.repository_selection)}</td></tr>`).join("") +
+    `</tbody></table>`;
+}
+
 async function refreshStandups() {
   const appsData = await jsonFetch("/apps");
   const names = Object.keys(appsData.apps);
@@ -281,7 +306,7 @@ async function refreshSignals() {
 }
 
 async function refreshAll() {
-  await Promise.all([refreshStatus(), refreshApps(), refreshStandups(), refreshRuns(), refreshSignals()]).catch(() => {});
+  await Promise.all([refreshStatus(), refreshGithubConnector(), refreshApps(), refreshStandups(), refreshRuns(), refreshSignals()]).catch(() => {});
 }
 
 $("#pause-btn").addEventListener("click", async () => {

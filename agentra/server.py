@@ -45,6 +45,7 @@ from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.agents.brain import run_autonomous_cycle
+from agentra.connectors import github_app
 from agentra.dashboard import DASHBOARD_HTML
 from agentra.memory import Memory
 from agentra.orchestrator import run_prod_debug_cycle
@@ -174,6 +175,22 @@ async def list_signals(limit: int = 50) -> dict:
         else:
             signals.append({"ts": None, "source": None, "message": line})
     return {"signals": signals}
+
+
+# ── Connectors: TASK-016 follow-up. GitHub App status, so "is agentra
+# actually able to reach this org's repos" is answerable from the
+# dashboard instead of discovered by a 403 mid-registration. ──────────────
+
+
+@app.get("/connectors/github")
+async def github_connector_status() -> dict:
+    if not github_app.is_configured():
+        return {"configured": False, "installations": [], "error": None}
+    try:
+        installations = github_app.list_installations()
+        return {"configured": True, "installations": installations, "error": None}
+    except github_app.GitHubAppError as exc:
+        return {"configured": True, "installations": [], "error": str(exc)}
 
 
 # ── App registration: TASK-016, register any GitHub repo from the dashboard
