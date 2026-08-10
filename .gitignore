@@ -11,3 +11,10 @@ deploy/gcp/terraform/terraform.tfstate
 deploy/gcp/terraform/terraform.tfstate.backup
 deploy/gcp/terraform/*.tfplan
 deploy/gcp/terraform/tfplan_*
+deploy/cloudflare/.env
+deploy/cloudflare/terraform/.terraform/
+deploy/cloudflare/terraform/terraform.tfstate
+deploy/cloudflare/terraform/terraform.tfstate.backup
+deploy/cloudflare/terraform/terraform.tfvars
+deploy/cloudflare/terraform/*.tfplan
+deploy/cloudflare/terraform/tfplan_*

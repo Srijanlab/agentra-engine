@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+
+cloudflare_account_id = "find in dashboard sidebar for srijanlab.com, or `wrangler whoami`"
+cloudflare_zone_id    = "GET https://api.cloudflare.com/client/v4/zones?name=srijanlab.com"
+protected_domain      = "agentra.srijanlab.com"
+allowed_emails         = ["rossharma1@gmail.com"]
+session_duration       = "24h"
