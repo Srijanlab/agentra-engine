@@ -104,9 +104,33 @@ resource "google_cloud_run_v2_service" "agentra" {
       }
       env {
         # git-askpass.sh echoes this for git's password prompt (TASK-014) --
-        # keeps the token out of .git/config entirely.
+        # keeps the token out of .git/config entirely. Falls back to this
+        # whenever the GitHub App connector below isn't configured or
+        # isn't installed on a given repo -- see git_ops.py's
+        # _extra_auth_args.
         name  = "GIT_ASKPASS"
         value = "/usr/local/bin/git-askpass.sh"
+      }
+      env {
+        # agentra/connectors/github_app.py -- mints installation tokens for
+        # whatever org/repo the App is installed on, instead of relying on
+        # GITHUB_TOKEN's fixed scope from creation time.
+        name = "GITHUB_APP_ID"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.github_app_id.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "GITHUB_APP_PRIVATE_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.github_app_private_key.secret_id
+            version = "latest"
+          }
+        }
       }
       env {
         # server.py's _verify_alarm_webhook_auth -- see secrets.tf's

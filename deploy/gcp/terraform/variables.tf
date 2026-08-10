@@ -53,6 +53,18 @@ variable "cloudflare_tunnel_token" {
   sensitive   = true
 }
 
+variable "github_app_id" {
+  description = "GitHub App ID for agentra's GitHub connector (agentra/connectors/github_app.py)."
+  type        = string
+  sensitive   = true
+}
+
+variable "github_app_private_key" {
+  description = "PEM private key for the GitHub App above, from its settings page's 'Generate a private key' button."
+  type        = string
+  sensitive   = true
+}
+
 variable "git_author_name" {
   type    = string
   default = "agentra-bot"

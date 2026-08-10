@@ -113,3 +113,54 @@ resource "google_secret_manager_secret_iam_member" "cloudflare_tunnel_token_acce
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
+
+# GitHub App connector (agentra/connectors/github_app.py) -- replaces the
+# fine-grained PAT's fixed repo scope with installation tokens minted on
+# demand for whatever org/repo the App gets installed on. GITHUB_APP_ID
+# isn't secret by itself, but it's meaningless without the private key, so
+# both live together here for a single rotation story.
+resource "google_secret_manager_secret" "github_app_id" {
+  project   = var.project_id
+  secret_id = "agentra-github-app-id"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "github_app_id" {
+  secret      = google_secret_manager_secret.github_app_id.id
+  secret_data = var.github_app_id
+}
+
+resource "google_secret_manager_secret_iam_member" "github_app_id_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.github_app_id.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_secret_manager_secret" "github_app_private_key" {
+  project   = var.project_id
+  secret_id = "agentra-github-app-private-key"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "github_app_private_key" {
+  secret      = google_secret_manager_secret.github_app_private_key.id
+  secret_data = var.github_app_private_key
+}
+
+resource "google_secret_manager_secret_iam_member" "github_app_private_key_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.github_app_private_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
