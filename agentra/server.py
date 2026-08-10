@@ -212,6 +212,16 @@ async def list_signals(limit: int = 50) -> dict:
     return {"signals": signals}
 
 
+@app.get("/agent-steps")
+async def list_agent_steps(app_name: str | None = None, limit: int = 100) -> dict:
+    """Per-agent trace for the dashboard's Agent Activity view -- which of
+    the nine tools/agents ran, for which app/run, ok or not, cost, turns,
+    and a short summary of what it worked on (agents/brain.py's
+    OrchestratorSession.note(), made structured and durable -- see
+    registry.record_agent_step)."""
+    return {"steps": registry.list_agent_steps(app=app_name, limit=limit)}
+
+
 # ── Connectors: TASK-016 follow-up. GitHub App status, so "is agentra
 # actually able to reach this org's repos" is answerable from the
 # dashboard instead of discovered by a 403 mid-registration. ──────────────

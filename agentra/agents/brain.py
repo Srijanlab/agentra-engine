@@ -83,10 +83,34 @@ class OrchestratorSession:
     tool_failure_counts: dict[str, int] = field(default_factory=dict)
     hard_stop_reason: str | None = None
 
-    def note(self, action: str) -> None:
+    @property
+    def app_name(self) -> str:
+        return self.repo.name
+
+    def note(
+        self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None
+    ) -> None:
+        """ok/cost_usd/turns describe THIS call specifically (not
+        self.cost_usd, which is the running cycle total) -- every call site
+        already has the AgentResult these come from right where it calls
+        note(), so passing them through costs nothing and turns the
+        dashboard's "what did each agent do" view from parsing this same
+        plain-text action string into real structured data (registry.py's
+        agent_steps, durable -- unlike this action string, which only ever
+        lands in mem.log()'s gitignored, non-durable local file).
+
+        agent defaults to the leading "tool_name:" token in `action` (every
+        tool-handler call site follows that convention) -- pass it
+        explicitly for the handful of cycle-lifecycle notes (start/crashed/
+        complete) that don't, so a long "objective=...' " message doesn't
+        become the displayed agent name on the dashboard."""
         self.actions.append(action)
         self.mem.log(self.run_id, action)
         print(f"[agentra] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
+        from agentra import registry
+
+        resolved_agent = agent or action.split(":", 1)[0].split("[", 1)[0].strip()
+        registry.record_agent_step(self.app_name, self.run_id, resolved_agent, ok, cost_usd, turns, action)
 
     def check_hard_stop(self) -> dict | None:
         """Call at the top of every tool. Returns an error tool_result once this run has
@@ -137,7 +161,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_success("understand_codebase")
         else:
             session.record_failure("understand_codebase")
-        session.note(f"understand_codebase: ok={cb.ok}")
+        session.note(f"understand_codebase: ok={cb.ok}", ok=cb.ok, cost_usd=cb.cost_usd, turns=cb.turns)
         return {
             "content": [{"type": "text", "text": f"[{'ok' if cb.ok else 'failed'}] {cb.text[:4000]}"}],
             "is_error": not cb.ok,
@@ -161,7 +185,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
             f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}"
         )
-        session.note("check_backlog")
+        session.note("check_backlog", ok=True)
         return {"content": [{"type": "text", "text": text}]}
 
     @tool(
@@ -187,7 +211,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.cost_usd += disc.cost_usd
         session.mem.write("decisions", f"{session.run_id}-discovery", disc.text)
         opportunities = rank((disc.json_data or {}).get("opportunities", []))
-        session.note(f"discover_opportunities: {len(opportunities)} candidates")
+        session.note(
+            f"discover_opportunities: {len(opportunities)} candidates",
+            ok=disc.ok and bool(opportunities),
+            cost_usd=disc.cost_usd,
+            turns=disc.turns,
+        )
         if not disc.ok or not opportunities:
             session.record_failure("discover_opportunities")
             return {"content": [{"type": "text", "text": "Discovery failed to produce opportunities."}], "is_error": True}
@@ -222,14 +251,19 @@ def _tools_for(session: OrchestratorSession) -> list:
             # infra failure a different brief can't fix, so count it the same as an ok=False
             # result rather than letting it bubble up and silently end the whole cycle.
             session.record_failure("implement_feature")
-            session.note(f"implement_feature: raised {exc!r}")
+            session.note(f"implement_feature: raised {exc!r}", ok=False)
             return {"content": [{"type": "text", "text": f"implement_feature raised: {exc}"}], "is_error": True}
         session.cost_usd += impl.cost_usd
         feature_name = (impl.json_data or {}).get("feature") or brief.split(":")[0].strip()
         session.mem.write("features", f"{session.run_id}-{slug(feature_name)}", impl.text)
         session.tests_passed = False  # any new change invalidates the last test result
         session.pre_prod_verified = False  # ...and any prior live verification too
-        session.note(f"implement_feature: ok={impl.ok} feature={feature_name!r}")
+        session.note(
+            f"implement_feature: ok={impl.ok} feature={feature_name!r}",
+            ok=impl.ok,
+            cost_usd=impl.cost_usd,
+            turns=impl.turns,
+        )
         if not impl.ok:
             session.mem.write("failures", f"{session.run_id}-implementation", impl.text)
             session.record_failure("implement_feature")
@@ -270,7 +304,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.cost_usd += test.cost_usd
         passed = test.ok and (test.json_data or {}).get("status") != "fail"
         session.tests_passed = passed
-        session.note(f"run_local_tests: passed={passed}")
+        session.note(f"run_local_tests: passed={passed}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
             session.mem.write("failures", f"{session.run_id}-testing", test.text)
             session.record_failure("run_local_tests")
@@ -290,16 +324,16 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := session.check_hard_stop():
             return stop
         if session.skip_deploy:
-            session.note("deploy_pre_prod: skipped (skip_deploy set for this run)")
+            session.note("deploy_pre_prod: skipped (skip_deploy set for this run)", ok=None)
             return {"content": [{"type": "text", "text": "Skipped: this run was started with deploy disabled."}]}
         if not session.tests_passed:
-            session.note("deploy_pre_prod: refused, tests not passed")
+            session.note("deploy_pre_prod: refused, tests not passed", ok=False)
             return {
                 "content": [{"type": "text", "text": "Refused: run_local_tests must pass before deploying to pre-prod."}],
                 "is_error": True,
             }
         if session.feature_branch is None:
-            session.note("deploy_pre_prod: refused, no feature branch (implement_feature never called)")
+            session.note("deploy_pre_prod: refused, no feature branch (implement_feature never called)", ok=False)
             return {
                 "content": [{"type": "text", "text": "Refused: nothing to deploy -- call implement_feature first."}],
                 "is_error": True,
@@ -311,7 +345,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.pre_prod_verified = False
         if ok:
             session.deployed_to_pre_prod = True
-        session.note(f"deploy_pre_prod: ok={ok} preview_url={session.pre_prod_url!r}")
+        session.note(
+            f"deploy_pre_prod: ok={ok} preview_url={session.pre_prod_url!r}",
+            ok=ok,
+            cost_usd=deploy.cost_usd,
+            turns=deploy.turns,
+        )
         if not ok:
             session.mem.write("failures", f"{session.run_id}-deployment", deploy.text)
             session.record_failure("deploy_pre_prod")
@@ -339,7 +378,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.cost_usd += test.cost_usd
         passed = test.ok and (test.json_data or {}).get("status") != "fail"
         session.pre_prod_verified = passed
-        session.note(f"verify_pre_prod: passed={passed}")
+        session.note(f"verify_pre_prod: passed={passed}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
             session.mem.write("failures", f"{session.run_id}-pre-prod-verification", test.text)
             session.record_failure("verify_pre_prod")
@@ -364,7 +403,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         fb = await feedback.run(session.repo, session.objective, feature)
         session.cost_usd += fb.cost_usd
         session.mem.write("metrics", f"{session.run_id}-{slug(feature)}", fb.text)
-        session.note("assess_feedback")
+        session.note("assess_feedback", ok=fb.ok, cost_usd=fb.cost_usd, turns=fb.turns)
         return {"content": [{"type": "text", "text": fb.text[:2000]}]}
 
     _SPAWNABLE_TOOLS = {"Read", "Write", "Edit", "Glob", "Grep", "Bash"}
@@ -403,7 +442,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         )
         result = await spawn_generic(session.repo, spec, mem=session.mem, run_id=session.run_id)
         session.cost_usd += result.cost_usd
-        session.note(f"spawn_custom_agent[{args['task_name']}]: ok={result.ok}")
+        session.note(
+            f"spawn_custom_agent[{args['task_name']}]: ok={result.ok}",
+            ok=result.ok,
+            cost_usd=result.cost_usd,
+            turns=result.turns,
+        )
         if not result.ok:
             session.record_failure("spawn_custom_agent")
             return {"content": [{"type": "text", "text": f"Sub-agent failed: {result.text[:2000]}"}], "is_error": True}
@@ -492,7 +536,10 @@ async def run_autonomous_cycle(
         analytics_summary=analytics_summary,
         skip_deploy=skip_deploy,
     )
-    session.note(f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}")
+    session.note(
+        f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}",
+        agent="cycle",
+    )
 
     tools = _tools_for(session)
     server = create_sdk_mcp_server(name="agentra_brain", tools=tools)
@@ -527,7 +574,7 @@ async def run_autonomous_cycle(
         # should be recorded as a failed run rather than crash the whole process with
         # an unhandled traceback.
         final_text = f"autonomous cycle raised: {exc}"
-        session.note(f"autonomous cycle crashed: {exc}")
+        session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
         mem.write("failures", f"{run_id}-autonomous", final_text)
 
     mem.write(
@@ -546,7 +593,7 @@ async def run_autonomous_cycle(
         if persist_error:
             session.note(f"persist_audit_trail: failed: {persist_error}")
 
-    session.note("autonomous cycle complete")
+    session.note("autonomous cycle complete", agent="cycle", ok=True)
     print(f"[agentra] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
 
     return AutonomousCycleReport(

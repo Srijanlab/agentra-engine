@@ -30,6 +30,7 @@ and resumes it, so nothing is ever silently lost to an in-memory queue a
 crash would wipe out.
 """
 
+import datetime as dt
 import json
 import os
 import time
@@ -425,3 +426,74 @@ def dispatch_once() -> DispatchSummary:
     if _db is not None:
         return _firestore_dispatch_once()
     return _local_dispatch_once()
+
+
+# ── Agent activity: which agent did what, per run, for the dashboard ───────
+# agents/brain.py::OrchestratorSession.note() is already called after every
+# one of the nine tool calls a cycle makes, with the AgentResult (ok/
+# cost_usd/turns) each one produced right there -- this is that same trace
+# made structured and durable instead of only a plain-text line in a
+# gitignored, non-durable local .agentra/logs/<run_id>.log file.
+_AGENT_STEPS_PATH = AGENTRA_HOME / "agent_steps.jsonl"
+
+
+def record_agent_step(
+    app: str,
+    run_id: str,
+    agent: str,
+    ok: bool | None,
+    cost_usd: float,
+    turns: int | None,
+    summary: str,
+) -> None:
+    record = {
+        "app": app,
+        "run_id": run_id,
+        "agent": agent,
+        "ok": ok,
+        "cost_usd": cost_usd,
+        "turns": turns,
+        "summary": summary,
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    if _db is not None:
+        _db.collection("agent_steps").add(record)
+        return
+    _AGENT_STEPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _AGENT_STEPS_PATH.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:
+    """Newest first. Deliberately does not filter by `app` inside the
+    Firestore query itself -- combining an equality filter on one field
+    with order_by on another needs a composite index Firestore won't
+    auto-create, and at this scale (a handful of apps, modest step volume)
+    fetching `limit` globally-recent steps and filtering in Python is
+    simpler than provisioning one. Revisit if step volume ever makes that
+    genuinely wasteful."""
+    # Fetching more than `limit` globally when filtering by app -- otherwise
+    # a burst of steps from other apps could crowd out an app's own recent
+    # history before the Python-side filter ever sees it.
+    fetch_limit = limit * 5 if app is not None else limit
+
+    if _db is not None:
+        from google.cloud import firestore
+
+        docs = (
+            _db.collection("agent_steps")
+            .order_by("ts", direction=firestore.Query.DESCENDING)
+            .limit(fetch_limit)
+            .stream()
+        )
+        steps = [d.to_dict() for d in docs]
+    else:
+        if not _AGENT_STEPS_PATH.exists():
+            return []
+        steps = [json.loads(line) for line in _AGENT_STEPS_PATH.read_text().splitlines()]
+        steps.sort(key=lambda s: s["ts"], reverse=True)
+        steps = steps[:fetch_limit]
+
+    if app is not None:
+        steps = [s for s in steps if s.get("app") == app]
+    return steps[:limit]
