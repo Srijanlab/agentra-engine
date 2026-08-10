@@ -33,22 +33,30 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.agents.brain import run_autonomous_cycle
+from agentra.dashboard import DASHBOARD_HTML
 from agentra.memory import Memory
 from agentra.orchestrator import run_prod_debug_cycle
 
 logger = logging.getLogger("agentra.server")
 
 app = FastAPI(title="agentra orchestrator")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard() -> str:
+    return DASHBOARD_HTML
 
 # In-memory record of background runs this process has kicked off -- lets a
 # duplicate trigger for an app already mid-cycle be told so instead of
@@ -129,6 +137,42 @@ async def get_run(run_key: str) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run_key")
     return run
+
+
+@app.get("/runs")
+async def list_runs(limit: int = 50) -> dict:
+    """TASK-015: dashboard feed of active + recently completed runs.
+    _active_runs is process-local (see its own docstring on why that's
+    fine -- the durable record is each app's own Memory), so this only
+    reflects runs since the current instance started, newest first."""
+    runs = sorted(
+        ({"run_key": key, **info} for key, info in _active_runs.items()),
+        key=lambda r: r["started_at"],
+        reverse=True,
+    )
+    return {"runs": runs[:limit]}
+
+
+_SIGNAL_LINE_RE = re.compile(r"^\[(?P<ts>[^\]]+)\] source=(?P<source>\S+) (?P<message>.*)$")
+
+
+@app.get("/signals")
+async def list_signals(limit: int = 50) -> dict:
+    """TASK-015: dashboard feed of every trigger this instance has logged
+    (server.py's own _server_log ledger -- schedule/alarm/queue/register/
+    system events), newest first."""
+    log_path = registry.AGENTRA_HOME / "server.log"
+    if not log_path.exists():
+        return {"signals": []}
+    lines = log_path.read_text().splitlines()[-limit:]
+    signals = []
+    for line in reversed(lines):
+        m = _SIGNAL_LINE_RE.match(line)
+        if m:
+            signals.append(m.groupdict())
+        else:
+            signals.append({"ts": None, "source": None, "message": line})
+    return {"signals": signals}
 
 
 # ── App registration: TASK-016, register any GitHub repo from the dashboard
