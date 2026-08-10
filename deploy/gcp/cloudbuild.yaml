@@ -1,0 +1,20 @@
+steps:
+  # Pull the previously pushed image first so the build below can reuse its
+  # layers (best-effort -- `|| exit 0` so the first-ever build, with no
+  # prior image, doesn't fail here).
+  - name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - -c
+      - "docker pull ${_IMAGE} || exit 0"
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - --cache-from
+      - "${_IMAGE}"
+      - -t
+      - "${_IMAGE}"
+      - .
+images:
+  - "${_IMAGE}"

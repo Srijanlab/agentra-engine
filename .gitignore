@@ -5,3 +5,9 @@ __pycache__/
 .agentra/
 .claude_oauth_token
 .github_pat
+.claude/
+deploy/gcp/terraform/.terraform/
+deploy/gcp/terraform/terraform.tfstate
+deploy/gcp/terraform/terraform.tfstate.backup
+deploy/gcp/terraform/*.tfplan
+deploy/gcp/terraform/tfplan_*
