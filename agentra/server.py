@@ -85,6 +85,44 @@ async def health() -> dict:
     return {"status": "ok", "apps_registered": len(registry.list_apps())}
 
 
+# ── TASK-017: global kill switch. Checked at the top of every trigger path
+# below -- scheduled/alarm/queue/on-demand all no-op (not error) while
+# paused, same "log why, return 200" shape the not-registered/no-objective
+# no-ops already use, so a paused system doesn't look like a broken one to
+# whatever's calling it (Cloud Scheduler, Pub/Sub -- retrying a paused
+# no-op achieves nothing and would just be noise). ─────────────────────────
+
+
+class PauseRequest(BaseModel):
+    reason: str | None = None
+
+
+def _paused_response(source: str) -> dict:
+    _server_log(source, "system is paused -- no-op")
+    return {"triggered": False, "reason": "system is paused"}
+
+
+@app.get("/system/status")
+async def system_status() -> dict:
+    pause_record = registry.is_paused()
+    return {"paused": pause_record is not None, "pause_record": pause_record}
+
+
+@app.post("/system/pause")
+async def system_pause(payload: PauseRequest | None = None) -> dict:
+    reason = payload.reason if payload else None
+    registry.pause(reason)
+    _server_log("system", f"paused -- reason={reason!r}")
+    return {"paused": True, "reason": reason}
+
+
+@app.post("/system/resume")
+async def system_resume() -> dict:
+    registry.resume()
+    _server_log("system", "resumed")
+    return {"paused": False}
+
+
 @app.get("/runs/{run_key}")
 async def get_run(run_key: str) -> dict:
     run = _active_runs.get(run_key)
@@ -218,6 +256,9 @@ class ScheduledTrigger(BaseModel):
 
 @app.post("/trigger/scheduled")
 async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
+    if registry.is_paused():
+        return _paused_response("scheduled")
+
     repo = registry.get_app_repo(payload.app)
     if repo is None:
         _server_log("scheduled", f"app={payload.app!r} not registered -- no-op")
@@ -293,6 +334,9 @@ def _verify_alarm_webhook_auth(authorization: str | None = Header(default=None))
 
 @app.post("/trigger/alarm", dependencies=[Depends(_verify_alarm_webhook_auth)])
 async def trigger_alarm(payload: dict) -> dict:
+    if registry.is_paused():
+        return _paused_response("alarm")
+
     incident = payload.get("incident")
     if incident is not None:
         # GCP Monitoring's webhook schema: https://cloud.google.com/monitoring/support/notification-options#webhooks
@@ -344,6 +388,14 @@ async def trigger_alarm(payload: dict) -> dict:
 
 @app.post("/trigger/queue")
 async def trigger_queue(envelope: dict) -> dict:
+    if registry.is_paused():
+        # Still ack (200) -- Pub/Sub retries a non-2xx, and a paused system
+        # staying paused doesn't make this message any more processable on
+        # redelivery. The request itself isn't durably lost: whoever
+        # published it can resubmit once resumed.
+        _server_log("queue", "system is paused -- acking without processing")
+        return {"processed": False, "reason": "system is paused"}
+
     message = envelope.get("message")
     if not message or "data" not in message:
         # Pub/Sub retries on non-2xx, and a malformed envelope will never become

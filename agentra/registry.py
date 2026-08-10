@@ -66,6 +66,33 @@ def _save_apps(apps: dict[str, dict]) -> None:
     APPS_PATH.write_text(json.dumps(apps, indent=2))
 
 
+# TASK-017: a durable, global kill switch every trigger path in server.py
+# checks before dispatching new agent work. A plain marker file under
+# AGENTRA_HOME rather than in-memory state -- must survive a restart (it
+# lives on the same durable mount as apps.json once TASK-018's volume is in
+# play), and a human hitting "pause" needs that to actually stick even if
+# the instance recycles a minute later.
+PAUSE_PATH = AGENTRA_HOME / "paused.json"
+
+
+def is_paused() -> dict | None:
+    """None if not paused; otherwise the pause record (who/when/why, for
+    display -- the dashboard shows this so "who paused it and why" isn't
+    lost the moment the button is clicked)."""
+    if not PAUSE_PATH.exists():
+        return None
+    return json.loads(PAUSE_PATH.read_text())
+
+
+def pause(reason: str | None = None) -> None:
+    PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PAUSE_PATH.write_text(json.dumps({"paused_at": time.time(), "reason": reason}, indent=2))
+
+
+def resume() -> None:
+    PAUSE_PATH.unlink(missing_ok=True)
+
+
 def register_app(name: str, repo_path: str) -> None:
     apps = _apps()
     apps[name] = {"repo_path": str(Path(repo_path).resolve())}
