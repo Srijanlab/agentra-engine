@@ -3,18 +3,23 @@
 orchestrator.run_cycle() hardcodes the sequence (codebase -> discovery ->
 implementation -> testing -> deploy -> feedback) in plain Python. This
 module is the alternative vision.md actually describes: an agent that
-"decides next best action" — it sees a fixed menu of eight tools, one per
-specialized agent (or agent mode), and chooses which to call, in what order,
-and when this run is done. There is no hardcoded script here; the sequence
-you see in a given run is a real decision the model made, not a lookup.
+"decides next best action" — it sees a fixed menu of nine tools, eight tied
+to a specific specialized agent (or agent mode) plus one generic escape
+hatch (spawn_custom_agent, agents/generic.py) for task types that don't
+warrant a dedicated Python module — and chooses which to call, in what
+order, and when this run is done. There is no hardcoded script here; the
+sequence you see in a given run is a real decision the model made, not a
+lookup.
 
 Safety boundary, unchanged from the rest of the system: this "brain" is
-never given Read/Write/Edit/Bash directly, only the eight tools below.
+never given Read/Write/Edit/Bash directly, only the nine tools below.
 Each tool delegates to one of the existing, narrowly-scoped agents
-(agents/codebase.py, discovery.py, etc.) — that's where actual filesystem
-and shell access lives, gated exactly as it was before this module existed.
-Production is deliberately not one of the eight tools; promote_prod() stays
-reachable only via `agentos promote` (human) or the debug-prod
+(agents/codebase.py, discovery.py, etc., or agents/generic.py for
+spawn_custom_agent) — that's where actual filesystem and shell access
+lives, gated exactly as it was before this module existed. Production is
+deliberately not one of the nine tools (spawn_custom_agent included —
+agents/generic.py::TaskSpec has no allow_prod field at all); promote_prod()
+stays reachable only via `agentos promote` (human) or the debug-prod
 auto-remediate path, never from an autonomous sequencing decision. And the
 one invariant that must hold no matter what the model decides — never
 deploy before local tests pass — is enforced in deploy_pre_prod's handler
@@ -34,6 +39,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_s
 
 from agentos.agents import codebase, deployment, discovery, feedback, implementation, testing
 from agentos.agents.base import single_prompt_stream
+from agentos.agents.generic import TaskSpec, spawn as spawn_generic
 from agentos.environments import EnvironmentConfig, feature_branch_name, slug
 from agentos.memory import Memory
 from agentos.ranking import rank
@@ -361,6 +367,49 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.note("assess_feedback")
         return {"content": [{"type": "text", "text": fb.text[:2000]}]}
 
+    _SPAWNABLE_TOOLS = {"Read", "Write", "Edit", "Glob", "Grep", "Bash"}
+
+    @tool(
+        "spawn_custom_agent",
+        "Spawn a one-off sub-agent for a task that doesn't fit any tool above -- e.g. a "
+        "one-time audit, a research question, a cleanup pass that isn't 'implement a "
+        "feature'. Give it a short task_name (for logs), a complete prompt, a system_prompt "
+        "describing its role and constraints, and allowed_tools as a comma-separated list "
+        "chosen from Read, Write, Edit, Glob, Grep, Bash -- grant only what the task needs. "
+        "This never has production access no matter what tools you grant.",
+        {"task_name": str, "prompt": str, "system_prompt": str, "allowed_tools": str},
+    )
+    async def spawn_custom_agent(args):
+        if stop := session.check_hard_stop():
+            return stop
+        requested = [t.strip() for t in args["allowed_tools"].split(",") if t.strip()]
+        invalid = [t for t in requested if t not in _SPAWNABLE_TOOLS]
+        if invalid or not requested:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"allowed_tools must be a non-empty comma-separated list from "
+                        f"{sorted(_SPAWNABLE_TOOLS)}; got {args['allowed_tools']!r}.",
+                    }
+                ],
+                "is_error": True,
+            }
+        spec = TaskSpec(
+            name=args["task_name"],
+            prompt=args["prompt"],
+            system_prompt=args["system_prompt"],
+            allowed_tools=requested,
+        )
+        result = await spawn_generic(session.repo, spec, mem=session.mem, run_id=session.run_id)
+        session.cost_usd += result.cost_usd
+        session.note(f"spawn_custom_agent[{args['task_name']}]: ok={result.ok}")
+        if not result.ok:
+            session.record_failure("spawn_custom_agent")
+            return {"content": [{"type": "text", "text": f"Sub-agent failed: {result.text[:2000]}"}], "is_error": True}
+        session.record_success("spawn_custom_agent")
+        return {"content": [{"type": "text", "text": result.text[:2000]}]}
+
     return [
         understand_codebase,
         check_backlog,
@@ -370,18 +419,23 @@ def _tools_for(session: OrchestratorSession) -> list:
         deploy_pre_prod,
         verify_pre_prod,
         assess_feedback,
+        spawn_custom_agent,
     ]
 
 
 SYSTEM_PROMPT = """You are the Orchestrator Agent in an autonomous product \
 engineering system (vision.md 5.1). You decide which specialized agent to \
 invoke next, in what order, and when this run is complete — there is no \
-fixed script to follow. You have exactly eight tools, each delegating to a \
+fixed script to follow. You have exactly nine tools, eight delegating to a \
 specialized agent: understand_codebase, check_backlog, \
 discover_opportunities, implement_feature, run_local_tests, deploy_pre_prod, \
-verify_pre_prod, assess_feedback. You do not have Read/Write/Edit/Bash \
-yourself. Production is deliberately not reachable from this session under \
-any circumstance.
+verify_pre_prod, assess_feedback — plus spawn_custom_agent, a generic \
+sub-agent for a one-off task that doesn't fit any of the other eight (an \
+audit, a research question, a cleanup pass that isn't "implement a \
+feature"). You do not have Read/Write/Edit/Bash yourself; spawn_custom_agent \
+grants only what you explicitly ask for, to that one sub-agent, for that \
+one task. Production is deliberately not reachable from this session under \
+any circumstance, including via spawn_custom_agent.
 
 Use judgment, not a rigid script, but this is generally sound:
 1. Understand the codebase before deciding anything.
@@ -398,7 +452,10 @@ Use judgment, not a rigid script, but this is generally sound:
    local tests pass." A deploy that returns 200 on the homepage but whose \
    feature doesn't actually work is a failure verify_pre_prod exists to catch.
 6. Once verified live, assess feedback so impact is actually measurable later.
-7. Stop once you've completed one meaningful unit of work for this run, or \
+7. Reach for spawn_custom_agent only for work that genuinely isn't one of \
+   the other eight steps — don't use it to reimplement implement_feature or \
+   deploy_pre_prod with a custom prompt.
+8. Stop once you've completed one meaningful unit of work for this run, or \
    explain plainly why you stopped short (e.g. tests kept failing, or the \
    live deployment didn't check out).
 
