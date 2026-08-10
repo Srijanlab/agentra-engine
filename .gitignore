@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 *.egg-info/
+agentra/web/node_modules/
+agentra/web/dist/
+agentra/web/*.tsbuildinfo
 .agentra/
 .claude_oauth_token
 .github_pat

@@ -198,10 +198,22 @@ default QUIC/UDP transport fails outright on Cloud Run's networking
 
 ## Dashboard and app registration (TASK-015/016)
 
-`GET /` serves a self-contained dashboard: system status (with pause/resume,
-see below), a form to register any GitHub repo by URL, the registered-apps
+The dashboard is a real React app (`agentra/web/`, Vite + TypeScript +
+Tailwind) built at Docker build time (a dedicated `web-builder` stage in
+`Dockerfile`) and served as static files from `GET /` (`server.py` mounts
+`agentra/web/dist/assets` and serves `index.html`) -- not a hand-maintained
+HTML string. For local dev: `cd agentra/web && npm install && npm run
+build` before `agentra serve`, or point `AGENTRA_WEB_DIST` at wherever a
+build landed; without a build present, `GET /` returns a JSON hint instead
+of a blank page.
+
+The UI gates itself behind the GitHub connector (below): with nothing
+connected, it shows a single "Connect GitHub" screen, not an empty
+dashboard. Once connected, it shows system status (with pause/resume, see
+below), a form to register any GitHub repo by URL, the registered-apps
 list with a "Run now" button, the standup panel (see below), recent runs,
-and recent signals. Backed by JSON APIs that are just as usable directly:
+and recent signals -- organized as tabs (Apps / Activity / Standups), not
+one long scroll. Backed by JSON APIs that are just as usable directly:
 
 - `POST /apps` — `{"name", "repo_url", "branch": "main", "objective": null}`.
   Clones server-side (same `GIT_ASKPASS`/`GITHUB_TOKEN` credential as
@@ -209,6 +221,35 @@ and recent signals. Backed by JSON APIs that are just as usable directly:
 - `GET /apps` — registry, plus each app's objective/shipped/known-bug counts.
 - `POST /apps/{name}/run` — on-demand equivalent of `/trigger/scheduled`.
 - `GET /runs`, `GET /signals` — feed the dashboard's activity tables.
+
+### GitHub connector
+
+`POST /apps`'s clone step (and TASK-014's pull/push) tries a GitHub App
+installation token first, via `agentra/connectors/github_app.py`, falling
+back to the static `GITHUB_TOKEN`/`GIT_ASKPASS` credential whenever the App
+isn't configured or isn't installed on a given repo. This replaced the
+static token as the primary path because that token is a fine-grained PAT
+scoped to a handful of repos at creation time -- confirmed live,
+registering an org-owned repo the token was never scoped to 403'd outright.
+A GitHub App scales to any org/repo it gets installed on instead.
+
+Two env vars configure it: `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`
+(the App's PEM key, from its settings page's "Generate a private key"),
+both Secret-Manager-sourced (`agentra-github-app-id`,
+`agentra-github-app-private-key`). `GET /connectors/github` reports
+configuration status and which accounts/orgs the App can currently reach;
+the dashboard's "Connect a GitHub account/org" link opens the App's public
+install page (`github.com/apps/<slug>/installations/new`) so adding a new
+org doesn't require finding GitHub's own settings pages by hand.
+
+**"Where can this GitHub App be installed?"** (a setting on the App itself,
+not something this repo controls) matters here: "Only on this account"
+means literally only orgs the App-creating account already administers can
+install it -- no request/approval flow, no partial allowlist. "Any account"
+lets anyone install it on their *own* account/repos, which grants them
+zero access to this agentra deployment or its data (it only lets *them*
+manage *their own* repos through the App) -- the real tradeoff is just
+broader install-ability, not a data exposure.
 
 No auth on any of this yet beyond Cloud Run's IAM invoker check on the
 service as a whole — anyone who can reach the URL can register/run apps.

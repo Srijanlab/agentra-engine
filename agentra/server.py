@@ -40,13 +40,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.agents.brain import run_autonomous_cycle
 from agentra.connectors import github_app
-from agentra.dashboard import DASHBOARD_HTML
 from agentra.memory import Memory
 from agentra.orchestrator import run_prod_debug_cycle
 from agentra.standup import run_daily_standup, run_standup
@@ -55,10 +55,27 @@ logger = logging.getLogger("agentra.server")
 
 app = FastAPI(title="agentra orchestrator")
 
+# The React dashboard (agentra/web/) is built separately (`npm run build`)
+# and served as static files, not embedded in Python source -- a real
+# frontend toolchain, not a hand-maintained HTML string. AGENTRA_WEB_DIST
+# lets the Dockerfile point this at wherever it copied `dist/` in the
+# image; local dev defaults to the dist/ this same repo's web/ produces.
+WEB_DIST = Path(os.environ.get("AGENTRA_WEB_DIST") or (Path(__file__).resolve().parent / "web" / "dist"))
 
-@app.get("/", response_class=HTMLResponse)
-async def dashboard() -> str:
-    return DASHBOARD_HTML
+if (WEB_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="web-assets")
+
+
+@app.get("/", response_model=None)
+async def dashboard() -> FileResponse | dict:
+    index = WEB_DIST / "index.html"
+    if not index.exists():
+        return {
+            "error": "dashboard not built",
+            "hint": "run `npm install && npm run build` in agentra/web/, or set AGENTRA_WEB_DIST",
+        }
+    return FileResponse(index)
+
 
 # In-memory record of background runs this process has kicked off -- lets a
 # duplicate trigger for an app already mid-cycle be told so instead of
