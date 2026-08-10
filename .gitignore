@@ -5,7 +5,15 @@ __pycache__/
 agentra/web/node_modules/
 agentra/web/dist/
 agentra/web/*.tsbuildinfo
-.agentra/
+# Only per-run logs are meant to be ignored here -- everything else under
+# .agentra/ (memory/, shipped.json, known_bugs.json, feature_queue.json,
+# objective.yaml, environments.yaml, standups/) is deliberately git-tracked
+# audit trail per agentra/memory.py's own design. A blanket `.agentra/`
+# rule here silently swallowed all of it -- git never even sees inside an
+# ignored directory, so registry.commit_and_push() found "nothing dirty"
+# to push every time, discovered live once agentra was registered against
+# its own repo.
+.agentra/logs/
 .claude_oauth_token
 .github_pat
 .claude/
