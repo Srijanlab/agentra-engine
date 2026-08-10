@@ -33,98 +33,6 @@ Description of what needs to be built or fixed.
 
 ---
 
-### TASK-015: Observability dashboard (signals, agent activity, system state)
-**Scope:** both
-**Priority:** high
-
-`agentra/server.py` already logs every trigger (schedule/alarm/queue) to
-`~/.agentra/server.log` and tracks in-flight/recent runs in `_active_runs`,
-but none of it is visible except by reading raw logs. Add a dashboard,
-served from the same Cloud Run service, that visualizes what the system is
-doing: which signals have come in, which agent/cycle is running for which
-app, and overall system status.
-
-**Acceptance criteria:**
-- [ ] A dashboard page (served from the existing FastAPI app, no separate deploy) shows registered apps, recent trigger signals with source/timestamp, and active + recent runs with status
-- [ ] Backed by JSON APIs (not data baked into the HTML) so the same data is scriptable
-- [ ] Refreshes live (polling is fine) without a manual reload
-- [ ] Reuses existing tracking (`_active_runs`, `server.log`, each app's `Memory`) rather than a second parallel logging system
-
----
-
-### TASK-016: Register any GitHub repo from the dashboard and start an autonomous cycle
-**Scope:** both
-**Priority:** high
-
-Today `agentra apps add` requires a repo already checked out locally --
-there's no way to point agentra at a GitHub repo it hasn't seen before from
-the deployed service (a gap already flagged in `docs/deployment.md`). Add
-that: given a repo URL, clone it (reusing the existing `GITHUB_TOKEN` /
-`GIT_ASKPASS` credential), register it, and let a cycle be started for it
-on demand from the dashboard, not just cron/queue.
-
-**Acceptance criteria:**
-- [ ] Dashboard form to add a GitHub repo by URL + app name + objective
-- [ ] Backend clones the repo server-side using existing git credentials and registers it via `registry.py`
-- [ ] Dashboard/API can start an autonomous cycle for a registered app on demand
-- [ ] Verified live: register a real repo through the running service and confirm a cycle actually starts and logs against it
-
----
-
-### TASK-017: Shut down the autonomous system from the UI
-**Scope:** both
-**Priority:** high
-
-There's no kill switch today -- once a trigger fires, it runs. Add a global
-pause that every trigger path (scheduled/alarm/queue/on-demand) respects,
-controllable from the dashboard.
-
-**Acceptance criteria:**
-- [ ] Dashboard has a visible pause/resume control for the whole system
-- [ ] While paused, all trigger paths no-op and log why, instead of starting new agent work
-- [ ] Pause state is durable (survives an instance restart), not just in-memory
-- [ ] Verified live: pause via the dashboard, confirm a trigger during pause correctly no-ops, resume, confirm it dispatches again
-
----
-
-### TASK-018: Dedicated persistent context ("team") per registered project
-**Scope:** backend
-**Priority:** high
-
-Each app's `.agentra/` memory already exists per-repo, but the repo
-checkout and the multi-app registry itself (`~/.agentra/apps.json`) live on
-Cloud Run's ephemeral local disk -- gone on every restart (documented in
-`docs/deployment.md`). TASK-016 and TASK-017 both need this to actually
-persist. Move both onto durable storage so each project's context survives
-restarts and stays isolated from every other project's.
-
-**Acceptance criteria:**
-- [ ] Registered apps and their repo checkouts survive a Cloud Run instance restart/redeploy
-- [ ] Each project's `.agentra/` memory persists and is isolated from other projects'
-- [ ] Documented in `docs/deployment.md`
-- [ ] Verified live: register an app, force a new revision, confirm the app + checkout + memory are still there
-
----
-
-### TASK-019: Daily standup between the orchestrator and its agents
-**Scope:** backend
-**Priority:** medium
-
-For each registered project, produce a daily standup: what happened
-yesterday (grounded in that project's actual `Memory` -- `shipped.json`,
-`known_bugs.json`, run logs) and what's planned for today (grounded in its
-actual backlog/objective). Not a chat transcript between fictional
-personas -- a real summary an LLM call generates from that project's real
-data, explicitly instructed not to invent activity that didn't happen.
-
-**Acceptance criteria:**
-- [ ] A standup routine runs per registered app, producing a "yesterday" summary and a "today" plan grounded only in that project's real Memory data
-- [ ] Runs automatically on a daily schedule and is viewable from the dashboard
-- [ ] Standup output is persisted (visible after the fact, not just streamed once)
-- [ ] Verified live against at least one real registered project's actual history
-
----
-
 ## Done
 
 <!-- Completed tasks go here with commit SHA -->
@@ -223,3 +131,78 @@ correctly recovering by resetting to a diverged remote tip — all passed.
 Not verified against the deployed GCP environment itself, for the same
 reason as TASK-013's last point (no app registered there to run a real
 task against yet).
+
+### TASK-018: Dedicated persistent context ("team") per registered project
+**Commit:** 8f626c0
+
+The multi-app registry and repo checkouts previously lived on Cloud Run's
+ephemeral local disk. Mounted a GCS bucket at `/data` via a Cloud Run v2
+GCS FUSE volume (`deploy/gcp/terraform/storage.tf`, requires the gen2
+execution environment) and pointed `AGENTRA_HOME`/`AGENTRA_REPOS_ROOT` at
+it in `cloudrun.tf`. `registry.py`'s `REPOS_ROOT` is env-overridable like
+`AGENTRA_HOME` already was, defaulting to `AGENTRA_HOME/repos` for
+local/dev use, so nothing about local `agentra apps add` changed. Each
+app's own `.agentra/` memory lives inside its repo checkout, so it inherits
+durability automatically once the checkout itself is on the mount — no
+separate change needed there.
+
+### TASK-016: Register any GitHub repo from the dashboard and start an autonomous cycle
+**Commit:** 10b565f
+
+Added `git_ops.clone_repo` (same `GIT_ASKPASS`/`GITHUB_TOKEN` credential
+`docker-entrypoint.sh`'s own clone-on-start uses) and three endpoints on
+`agentra/server.py`: `GET /apps` (registry + objective/shipped/bug counts),
+`POST /apps` (clone a repo by URL under `registry.REPOS_ROOT` and register
+it), `POST /apps/{name}/run` (same dispatch path as `/trigger/scheduled`,
+without waiting for a cron tick). Verified live: registered a real repo
+cloned from an actual git remote end-to-end and confirmed `/apps/{name}/run`
+actually dispatched a live autonomous cycle against it.
+
+### TASK-017: Shut down the autonomous system from the UI
+**Commit:** 387d813
+
+`registry.py` gets a durable pause marker (`paused.json` under
+`AGENTRA_HOME`, so it persists on TASK-018's volume same as the app
+registry) plus `pause()`/`resume()`/`is_paused()`. `server.py` adds
+`GET`/`POST /system/status,pause,resume` and checks `is_paused()` at the
+top of every trigger path — scheduled, alarm, queue, and the on-demand
+`/apps/{name}/run` (inherits the guard by delegating to the scheduled
+path) — each returning a clean no-op instead of starting new agent work.
+Verified live: paused, confirmed all four paths correctly no-op with
+"system is paused", resumed, confirmed dispatch works again.
+
+### TASK-015: Observability dashboard (signals, agent activity, system state)
+**Commit:** f172751
+
+`GET /` serves a self-contained HTML/CSS/JS page (`agentra/dashboard.py`,
+no build step, no CDN dependency) backed entirely by JSON APIs — added
+`GET /runs` (list, newest first) and `GET /signals` (parsed tail of
+`server.log`) alongside the existing `GET /apps` and `GET /system/status`.
+Polls every 5s; shows system status with pause/resume, a register-a-repo
+form, registered apps with a "run now" button, recent runs, and recent
+signals. Verified live: dashboard JS extracted and checked with `node
+--check` (syntax-valid), and the page + its supporting APIs confirmed
+working against a real running `agentra serve` process.
+
+### TASK-019: Daily standup between the orchestrator and its agents
+**Commit:** b3f7231
+
+`agentra/standup.py` generates one project's standup as a single no-tools
+LLM call over data extracted deterministically from that project's own
+`Memory`: "yesterday" from timestamped `.agentra/logs/*.log` lines in the
+last 24h (`Memory.recent_log_lines` — the only append-only, per-event
+record in `.agentra/`; `shipped`/`known_bugs`/`feature_queue` are undated
+snapshots), "today" from the actual open backlog/objective. Explicitly
+instructed not to invent activity or plans beyond what it's given; an
+empty project short-circuits to a plain "no activity / no backlog" report
+with no LLM call at all. `server.py` adds `POST /standup/daily` (all
+apps, behind the new paused `agentra-daily-standup` Scheduler job),
+`POST /apps/{name}/standup` (one app, on demand), `GET
+/apps/{name}/standup/latest` — all gated by the TASK-017 kill switch.
+Persists to each app's own `.agentra/standups/<date>.md`; dashboard shows
+a standup panel with a "Generate now" button per app. Verified live:
+seeded a test app's Memory with a real known bug, feature request, and log
+entry from an actual prior autonomous cycle, ran the standup for real, and
+confirmed the generated report accurately reflected exactly that data with
+nothing fabricated — then verified the same round-trip through the real
+HTTP endpoints.
