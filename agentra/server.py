@@ -93,6 +93,58 @@ async def get_run(run_key: str) -> dict:
     return run
 
 
+# ── App registration: TASK-016, register any GitHub repo from the dashboard
+# without a pre-existing local checkout. Clones under registry.REPOS_ROOT
+# (TASK-018: durable storage in the deployed environment, so the checkout
+# survives a restart the same way the registry itself now does) and
+# registers it exactly as `agentra apps add` would. ───────────────────────
+
+
+class RegisterAppRequest(BaseModel):
+    name: str
+    repo_url: str
+    branch: str = "main"
+    objective: str | None = None
+
+
+@app.get("/apps")
+async def list_apps() -> dict:
+    apps = registry.list_apps()
+    result = {}
+    for name, info in apps.items():
+        repo = Path(info["repo_path"])
+        mem = Memory(repo) if repo.exists() else None
+        result[name] = {
+            "repo_path": info["repo_path"],
+            "objective": mem.get_objective() if mem else None,
+            "shipped_count": len(mem.shipped_features()) if mem else 0,
+            "known_bugs": len(mem.known_bugs()) if mem else 0,
+        }
+    return {"apps": result}
+
+
+@app.post("/apps")
+async def register_app(payload: RegisterAppRequest) -> dict:
+    if payload.name in registry.list_apps():
+        raise HTTPException(status_code=409, detail=f"app {payload.name!r} already registered")
+
+    dest = registry.REPOS_ROOT / payload.name
+    try:
+        from agentra.agents.git_ops import GitOpError, clone_repo
+
+        clone_repo(payload.repo_url, dest, branch=payload.branch)
+    except GitOpError as exc:
+        _server_log("register", f"app={payload.name!r} clone failed: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    registry.register_app(payload.name, str(dest))
+    if payload.objective:
+        Memory(dest).set_objective(payload.objective)
+
+    _server_log("register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}")
+    return {"registered": True, "name": payload.name, "repo_path": str(dest)}
+
+
 async def _run_autonomous_background(
     run_key: str, app_name: str, repo: Path, objective: str, feature: str | None, skip_deploy: bool
 ) -> None:
@@ -186,6 +238,15 @@ async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
         _run_autonomous_background(run_key, payload.app, repo, objective, payload.feature, payload.skip_deploy)
     )
     return {"triggered": True, "run_key": run_key}
+
+
+@app.post("/apps/{app_name}/run")
+async def run_app_now(app_name: str, payload: ScheduledTrigger | None = None) -> dict:
+    """On-demand equivalent of /trigger/scheduled, for the dashboard's "run
+    now" button -- same dispatch path, just not waiting for a cron tick."""
+    body = payload or ScheduledTrigger(app=app_name)
+    body.app = app_name
+    return await trigger_scheduled(body)
 
 
 # ── (b) Error/alarm: a GCP Monitoring alerting policy's Webhook notification

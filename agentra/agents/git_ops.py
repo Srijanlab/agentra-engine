@@ -65,6 +65,26 @@ def pull_latest(repo: Path, branch: str) -> None:
         raise GitOpError(f"pull_latest({branch!r}) failed: {stderr}") from exc
 
 
+def clone_repo(url: str, dest: Path, branch: str = "main") -> None:
+    """Clone `url` into `dest` (must not already exist), for TASK-016's
+    register-a-repo-from-the-dashboard path. Reuses the same GIT_ASKPASS/
+    GITHUB_TOKEN credential docker-entrypoint.sh's own clone-on-start step
+    relies on -- both are plain `git clone`, auth resolved the same way, so
+    nothing here needs to know the token itself. Raises GitOpError (with
+    git's real stderr) on failure, e.g. a bad URL or an expired token."""
+    if dest.exists():
+        raise GitOpError(f"clone_repo: destination {dest} already exists")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "clone", "--branch", branch, "--single-branch", url, str(dest)],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        raise GitOpError(f"clone_repo({url!r}) failed: {stderr}") from exc
+
+
 def push_branch(repo: Path, branch: str) -> None:
     """Push the local `branch` to origin. Raises GitOpError (with git's own
     message -- e.g. a rejected non-fast-forward push from a conflicting
