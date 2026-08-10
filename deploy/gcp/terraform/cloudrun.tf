@@ -66,9 +66,22 @@ resource "google_cloud_run_v2_service" "agentra" {
         value = "/data/home"
       }
       env {
-        # server.py's clone-on-register path (TASK-016) checks repos out here.
+        # Deliberately NOT under /data (the GCS FUSE mount): gcsfuse doesn't
+        # support chmod, which `git clone` needs (it sets core.filemode on
+        # every checkout) -- confirmed live, clone_repo failed with "chmod
+        # on .git/config.lock: Operation not permitted" the first time this
+        # pointed at the mount. Repo checkouts live on the container's own
+        # local disk instead and are NOT expected to survive a restart --
+        # registry.get_app_repo() re-clones automatically from repo_url
+        # when a checkout is missing (TASK-018), so the actually-durable
+        # copy of a project's history is whatever it has pushed to its own
+        # git remote, same as it always was. Under agentuser's own home
+        # (not e.g. /repos at the container root), same reasoning as
+        # Dockerfile's /home/agentuser/.agentra -- agentuser can create
+        # subdirectories under its own home freely; it owns nothing at
+        # container root, confirmed live (PermissionError: '/repos').
         name  = "AGENTRA_REPOS_ROOT"
-        value = "/data/repos"
+        value = "/home/agentuser/repos"
       }
       env {
         name = "CLAUDE_CODE_OAUTH_TOKEN"

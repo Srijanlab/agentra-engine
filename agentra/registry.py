@@ -93,9 +93,22 @@ def resume() -> None:
     PAUSE_PATH.unlink(missing_ok=True)
 
 
-def register_app(name: str, repo_path: str) -> None:
+def register_app(name: str, repo_path: str, repo_url: str | None = None, branch: str | None = None) -> None:
+    """repo_url/branch are optional (a local `agentra apps add` registration
+    has neither) -- when present, get_app_repo() below uses them to
+    re-clone automatically if repo_path ever goes missing (e.g. an
+    ephemeral checkout on a restarted Cloud Run instance, TASK-018: GCS
+    FUSE can't hold a real git checkout -- see its comment -- so the
+    checkout itself is deliberately NOT on durable storage; the actual
+    durable copy of a project's history is whatever it has pushed to this
+    URL, which re-cloning simply restores)."""
     apps = _apps()
-    apps[name] = {"repo_path": str(Path(repo_path).resolve())}
+    entry: dict = {"repo_path": str(Path(repo_path).resolve())}
+    if repo_url:
+        entry["repo_url"] = repo_url
+    if branch:
+        entry["branch"] = branch
+    apps[name] = entry
     _save_apps(apps)
     for sub in ("pending", "processing", "done"):
         (INBOX_ROOT / name / sub).mkdir(parents=True, exist_ok=True)
@@ -115,8 +128,23 @@ def list_apps() -> dict[str, dict]:
 
 
 def get_app_repo(name: str) -> Path | None:
+    """None if `name` isn't registered, or if its checkout is missing *and*
+    can't be recovered. Every existing caller already goes through this one
+    function, so the re-clone-if-missing recovery (TASK-018) needs no
+    changes anywhere else: a restarted instance transparently re-clones a
+    registered app's repo the next time anything asks for it."""
     app = _apps().get(name)
-    return Path(app["repo_path"]) if app else None
+    if app is None:
+        return None
+    repo = Path(app["repo_path"])
+    if not repo.exists() and app.get("repo_url"):
+        from agentra.agents.git_ops import GitOpError, clone_repo
+
+        try:
+            clone_repo(app["repo_url"], repo, branch=app.get("branch", "main"))
+        except GitOpError:
+            return None
+    return repo if repo.exists() else None
 
 
 def submit_request(

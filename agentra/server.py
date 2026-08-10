@@ -178,9 +178,11 @@ async def list_signals(limit: int = 50) -> dict:
 
 # ── App registration: TASK-016, register any GitHub repo from the dashboard
 # without a pre-existing local checkout. Clones under registry.REPOS_ROOT
-# (TASK-018: durable storage in the deployed environment, so the checkout
-# survives a restart the same way the registry itself now does) and
-# registers it exactly as `agentra apps add` would. ───────────────────────
+# (local disk, not durable storage -- gcsfuse can't hold a real git
+# checkout, see cloudrun.tf's comment; registry.get_app_repo() re-clones
+# from repo_url automatically if a checkout goes missing, TASK-018) and
+# registers it exactly as `agentra apps add` would, plus repo_url/branch
+# so that auto-reclone has something to work with. ────────────────────────
 
 
 class RegisterAppRequest(BaseModel):
@@ -220,7 +222,7 @@ async def register_app(payload: RegisterAppRequest) -> dict:
         _server_log("register", f"app={payload.name!r} clone failed: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    registry.register_app(payload.name, str(dest))
+    registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
     if payload.objective:
         Memory(dest).set_objective(payload.objective)
 
