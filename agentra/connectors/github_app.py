@@ -97,17 +97,11 @@ def _get_installation_id(owner_repo: str) -> int:
     return installation_id
 
 
-def get_installation_token(repo_url: str) -> str:
-    """The one entry point git_ops.py needs: an installation access token
-    good for git operations against `repo_url`, minted fresh or reused
-    from cache (if valid for at least another 2 minutes). Raises
-    GitHubAppNotConfigured if the App isn't set up, or GitHubAppError if
-    it's configured but not installed on this particular repo."""
-    owner_repo = owner_repo_from_url(repo_url)
-    if owner_repo is None:
-        raise GitHubAppError(f"not a github.com HTTPS URL: {repo_url!r}")
-    installation_id = _get_installation_id(owner_repo)
-
+def _mint_token_for_installation(installation_id: int) -> str:
+    """Shared by get_installation_token (per-repo) and list_repos
+    (per-installation) -- both ultimately need the same 1h access token for
+    a given installation, minted fresh or reused from cache if still valid
+    for at least another 2 minutes."""
     cached = _token_cache.get(installation_id)
     if cached and cached[1] - time.time() > 120:
         return cached[0]
@@ -127,19 +121,62 @@ def get_installation_token(repo_url: str) -> str:
     return token
 
 
+def get_installation_token(repo_url: str) -> str:
+    """The one entry point git_ops.py needs: an installation access token
+    good for git operations against `repo_url`. Raises
+    GitHubAppNotConfigured if the App isn't set up, or GitHubAppError if
+    it's configured but not installed on this particular repo."""
+    owner_repo = owner_repo_from_url(repo_url)
+    if owner_repo is None:
+        raise GitHubAppError(f"not a github.com HTTPS URL: {repo_url!r}")
+    installation_id = _get_installation_id(owner_repo)
+    return _mint_token_for_installation(installation_id)
+
+
+def _raw_installations() -> list[dict]:
+    resp = _github_get("/app/installations")
+    resp.raise_for_status()
+    return resp.json()
+
+
 def list_installations() -> list[dict]:
     """For the dashboard's connector status panel -- every account
     (user/org) the App is installed on, and how broad that install is."""
-    resp = _github_get("/app/installations")
-    resp.raise_for_status()
     return [
         {
             "account": inst["account"]["login"],
             "type": inst["account"]["type"],
             "repository_selection": inst["repository_selection"],
         }
-        for inst in resp.json()
+        for inst in _raw_installations()
     ]
+
+
+def list_repos() -> list[dict]:
+    """Every repo reachable across every installation of the App -- for the
+    dashboard's "Register App" repo picker, so registering a repo is a
+    click instead of finding and pasting its clone URL by hand."""
+    repos: list[dict] = []
+    for inst in _raw_installations():
+        token = _mint_token_for_installation(inst["id"])
+        resp = httpx.get(
+            f"{GITHUB_API}/installation/repositories",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            params={"per_page": 100},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for repo in resp.json()["repositories"]:
+            repos.append(
+                {
+                    "full_name": repo["full_name"],
+                    "clone_url": repo["clone_url"],
+                    "default_branch": repo["default_branch"],
+                    "private": repo["private"],
+                    "account": inst["account"]["login"],
+                }
+            )
+    return repos
 
 
 def install_url() -> str | None:

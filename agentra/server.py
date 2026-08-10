@@ -239,6 +239,33 @@ class RegisterAppRequest(BaseModel):
     repo_url: str
     branch: str = "main"
     objective: str | None = None
+    # Deployment info -- overrides on top of environments.detect()'s
+    # best-effort read of the freshly-cloned repo (see environments.py).
+    # None means "leave whatever detect() found"; only an explicit True/
+    # False/string overrides it.
+    vercel: bool | None = None
+    firebase: bool | None = None
+    ci_cd_on_push: bool | None = None
+    pre_prod_branch: str | None = None
+    prod_branch: str | None = None
+    # Free-form context agents should have on hand -- saved as Memory
+    # "architecture" entries (the category meant for exactly this: standing
+    # context an agent reads at the start of a cycle, not per-run data).
+    documentation_notes: str | None = None
+    testing_notes: str | None = None
+
+
+@app.get("/connectors/github/repos")
+async def github_connector_repos() -> dict:
+    """Backs the dashboard's repo picker -- every repo the App can
+    currently reach, so registering one is a selection, not a URL to find
+    and paste by hand."""
+    if not github_app.is_configured():
+        return {"repos": []}
+    try:
+        return {"repos": github_app.list_repos()}
+    except github_app.GitHubAppError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/apps")
@@ -272,8 +299,25 @@ async def register_app(payload: RegisterAppRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
+
+    mem = Memory(dest)
     if payload.objective:
-        Memory(dest).set_objective(payload.objective)
+        mem.set_objective(payload.objective)
+
+    # Best-effort auto-detect from the repo itself, then layer any explicit
+    # answers from the form on top -- detect() alone is a good default,
+    # but shouldn't silently override something the user just told us.
+    env_config = environments.detect(dest)
+    for field in ("vercel", "firebase", "ci_cd_on_push", "pre_prod_branch", "prod_branch"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(env_config, field, value)
+    environments.save(dest, env_config)
+
+    if payload.documentation_notes:
+        mem.write("architecture", "documentation", payload.documentation_notes)
+    if payload.testing_notes:
+        mem.write("architecture", "testing-notes", payload.testing_notes)
 
     _server_log("register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}")
     return {"registered": True, "name": payload.name, "repo_path": str(dest)}
