@@ -32,13 +32,17 @@ crash would wipe out.
 
 import datetime as dt
 import json
+import logging
 import os
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from agentra.memory import Memory
+
+logger = logging.getLogger("agentra.registry")
 
 # NOTE: not `Path(os.environ.get(...)) or Path.home() / ".agentra"` -- Path objects
 # have no __bool__/__len__, so Path("") is truthy and that pattern silently never
@@ -152,12 +156,86 @@ def remove_app(name: str) -> bool:
     return True
 
 
+def _remote_head_sha(repo_url: str, branch: str) -> str | None:
+    """`git ls-remote`'s HEAD sha for `branch` on `repo_url`, or None if the
+    remote couldn't be reached (network blip, revoked credentials, branch
+    renamed, etc.). None is a "can't tell" signal, not an error -- callers
+    must treat it as "assume not stale" rather than let a trigger fail
+    because the remote happened to be briefly unreachable."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", repo_url, f"refs/heads/{branch}"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("get_app_repo: ls-remote %s failed: %s", repo_url, exc)
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        logger.warning(
+            "get_app_repo: ls-remote %s %s returned nothing (rc=%s): %s",
+            repo_url, branch, result.returncode, result.stderr.strip(),
+        )
+        return None
+    return result.stdout.split()[0]
+
+
+def _local_head_sha(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("get_app_repo: rev-parse HEAD in %s failed: %s", repo, exc)
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
+    """Refresh an EXISTING checkout to match origin/`branch` when it's fallen
+    behind -- e.g. an objective.yaml edit made via the dashboard, or a
+    manual fix pushed straight to the branch, neither of which touch this
+    on-disk checkout on their own. Compares local HEAD against the remote's
+    HEAD for the tracked branch first so the common case (already current)
+    costs one `ls-remote` and no fetch/reset.
+
+    Best-effort by design: anything that goes wrong here (remote
+    unreachable, auth failure, local checkout in a weird state) is logged
+    and swallowed so a trigger always falls back to using whatever checkout
+    is already on disk rather than crashing."""
+    try:
+        remote_sha = _remote_head_sha(repo_url, branch)
+        if remote_sha is None:
+            return  # couldn't reach the remote -- use the existing checkout as-is
+        if _local_head_sha(repo) == remote_sha:
+            return  # already up to date
+
+        logger.info("get_app_repo: %s is stale vs origin/%s, resyncing", repo, branch)
+        from agentra.agents.git_ops import pull_latest
+
+        pull_latest(repo, branch)
+    except Exception:
+        logger.exception(
+            "get_app_repo: failed to resync %s to %s@%s; falling back to existing local checkout",
+            repo, repo_url, branch,
+        )
+
+
 def get_app_repo(name: str) -> Path | None:
     """None if `name` isn't registered, or if its checkout is missing *and*
     can't be recovered. Every existing caller already goes through this one
     function, so the re-clone-if-missing recovery (TASK-018) needs no
     changes anywhere else: a restarted instance transparently re-clones a
-    registered app's repo the next time anything asks for it."""
+    registered app's repo the next time anything asks for it.
+
+    Also keeps an EXISTING checkout from silently going stale: an
+    externally-made .agentra/ change (an objective.yaml edit via the
+    dashboard, or a manual fix pushed to the branch) lands on the remote,
+    not on this on-disk checkout, so every call here checks the local HEAD
+    against the remote's before handing the path back and resyncs if
+    they've diverged (see _sync_if_stale). That check is best-effort -- a
+    remote that can't be reached just means we proceed with the existing
+    checkout, same as before this existed."""
     app = list_apps().get(name)
     if app is None:
         return None
@@ -169,6 +247,8 @@ def get_app_repo(name: str) -> Path | None:
             clone_repo(app["repo_url"], repo, branch=app.get("branch", "main"))
         except GitOpError:
             return None
+    elif repo.exists() and app.get("repo_url"):
+        _sync_if_stale(repo, app["repo_url"], app.get("branch", "main"))
     return repo if repo.exists() else None
 
 
