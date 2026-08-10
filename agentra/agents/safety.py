@@ -43,18 +43,27 @@ import re
 
 from claude_agent_sdk import HookMatcher
 
+# These are matched with re.search against the full Bash `command` string, which
+# can be an arbitrary shell one-liner (e.g. `cmd1 && cmd2`, `cmd1; cmd2`). Do NOT
+# anchor any of these to end-of-string (`$`) unless the trailing content is
+# deliberately part of what's being matched (e.g. `(?:\s|$)` below, which allows
+# either a following token or true end-of-string) -- a bare trailing `$` lets a
+# destructive command slip through the moment it's chained with something
+# harmless after it, e.g. `psql -c "DELETE FROM users" && echo done`. See
+# tests/test_safety_hook.py for the regression coverage.
 FORBIDDEN_BASH_PATTERNS = [
     r"rm\s+-rf\s+/(?:\s|$)",
     r"git\s+push\s+[^\n]*--force",
     r"git\s+reset\s+--hard\s+[^\n]*(main|master|production)",
     r"\bDROP\s+TABLE\b",
-    r"\bDELETE\s+FROM\s+\w+\s*;?\s*$",
+    r"\bDELETE\s+FROM\s+\w+\b",
     r"\.env(?:\.\w+)?\b",
     r"stripe\b",
     r"billing",
 ]
 
 # Only enforced when allow_prod=False (the default for every agent call).
+# Same no-end-anchor rule as FORBIDDEN_BASH_PATTERNS above applies here.
 PROD_ONLY_BASH_PATTERNS = [
     r"--prod\b",
     r"vercel\s+[^\n]*--prod",
