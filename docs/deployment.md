@@ -181,6 +181,21 @@ This is live and fully working today — verified end-to-end locally (see the
 commit history) — it just has nothing to route to until an app is
 registered.
 
+## Public access: https://agentra.srijanlab.com
+
+The dashboard is reachable at `https://agentra.srijanlab.com`, gated by
+Cloudflare Access (email one-time-PIN, `deploy/cloudflare/terraform/`) --
+`gcloud run services proxy` is no longer the only way in, though it still
+works for anyone with Cloud Run IAM invoker access. The Cloud Run service
+itself is still fully private (no `allUsers` invoker anywhere): a
+`cloudflared` sidecar container in the same revision (`cloudrun.tf`)
+tunnels traffic in over `localhost`, inside that revision's shared network
+namespace, never through Cloud Run's own HTTP ingress. Set
+`TUNNEL_TRANSPORT_PROTOCOL=http2` on that container -- cloudflared's
+default QUIC/UDP transport fails outright on Cloud Run's networking
+(confirmed live: "failed to dial to edge with quic: timeout"). See
+`deploy/cloudflare/terraform/README.md` for setup/rotation.
+
 ## Dashboard and app registration (TASK-015/016)
 
 `GET /` serves a self-contained dashboard: system status (with pause/resume,
