@@ -201,6 +201,14 @@ def main() -> None:
 
     sub.add_parser("dispatch", help="Absorb everything currently in the inbox into each app's ledgers")
 
+    serve_p = sub.add_parser(
+        "serve", help="Run the always-on HTTP server (agentra/server.py) for scheduled/alarm/queue triggers"
+    )
+    serve_p.add_argument("--host", default="0.0.0.0")
+    serve_p.add_argument(
+        "--port", type=int, default=None, help="Defaults to $PORT (Cloud Run convention) or 8080 if unset"
+    )
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -361,6 +369,15 @@ def main() -> None:
             print(f"Errors ({len(summary.errors)}):")
             for err in summary.errors:
                 print(f"  - {err}")
+
+    elif args.command == "serve":
+        import os
+
+        import uvicorn
+
+        port = args.port if args.port is not None else int(os.environ.get("PORT", "8080"))
+        print(f"[agentra] serving on {args.host}:{port} -- /health, /trigger/scheduled, /trigger/alarm, /trigger/queue")
+        uvicorn.run("agentra.server:app", host=args.host, port=port)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,286 @@
+"""HTTP entry points that invoke the orchestrator from outside a terminal.
+
+Until now every entry point in this codebase (agentra/cli.py) assumed a
+human running a command in a terminal. vision.md's autonomous loop assumes
+the system also reacts to (a) a schedule, (b) an error/alarm, (c) new work
+landing in a queue -- none of which involve a human typing a command. This
+module is those three trigger paths as real HTTP endpoints, meant to sit
+behind Cloud Scheduler, a GCP Monitoring alerting webhook, and a Pub/Sub
+push subscription respectively.
+
+Deployed as the always-on Cloud Run *service*; the actual agent work still
+runs as short-lived subprocesses the Claude Agent SDK spawns inside this
+same process (agents/base.py::run_agent) -- "specialized agents run on
+demand, not as standing services" was already true architecturally before
+this module existed, this just gives that architecture inbound HTTP paths
+to be triggered from instead of only a terminal.
+
+Every handler that kicks off real agent work returns fast (submits the
+cycle as a background asyncio task, returns 202 with a run_key to poll)
+rather than blocking the HTTP response on a full cycle, which can run many
+minutes -- past any reasonable request timeout. The one exception is
+/trigger/queue: registry.dispatch_once() is cheap, pure file/JSON work (see
+registry.py's own docstring), so it runs inline and Pub/Sub gets a prompt
+ack.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import datetime as dt
+import json
+import logging
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from agentra import environments, registry
+from agentra.agents.brain import run_autonomous_cycle
+from agentra.memory import Memory
+from agentra.orchestrator import run_prod_debug_cycle
+
+logger = logging.getLogger("agentra.server")
+
+app = FastAPI(title="agentra orchestrator")
+
+# In-memory record of background runs this process has kicked off -- lets a
+# duplicate trigger for an app already mid-cycle be told so instead of
+# double-starting a second, conflicting cycle, and backs GET /runs/{run_key}
+# for polling. Deliberately in-process, not persisted: a restart losing this
+# bookkeeping is fine, the durable record of what actually happened is each
+# app's own <repo>/.agentra/memory/ and .agentra/logs/, same as every other
+# entry point.
+_active_runs: dict[str, dict[str, Any]] = {}
+_app_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(app_name: str) -> asyncio.Lock:
+    if app_name not in _app_locks:
+        _app_locks[app_name] = asyncio.Lock()
+    return _app_locks[app_name]
+
+
+def _server_log(source: str, message: str) -> None:
+    """Top-level trigger log, independent of any one app's own Memory -- a
+    trigger can name an app that isn't registered, or arrive before any repo
+    context is resolved at all, so it can't always be filed under an app's
+    own .agentra/logs/."""
+    registry.AGENTRA_HOME.mkdir(parents=True, exist_ok=True)
+    path = registry.AGENTRA_HOME / "server.log"
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    with path.open("a") as f:
+        f.write(f"[{timestamp}] source={source} {message}\n")
+    logger.info("source=%s %s", source, message)
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "apps_registered": len(registry.list_apps())}
+
+
+@app.get("/runs/{run_key}")
+async def get_run(run_key: str) -> dict:
+    run = _active_runs.get(run_key)
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run_key")
+    return run
+
+
+async def _run_autonomous_background(
+    run_key: str, app_name: str, repo: Path, objective: str, feature: str | None, skip_deploy: bool
+) -> None:
+    lock = _lock_for(app_name)
+    async with lock:
+        _active_runs[run_key]["status"] = "running"
+        try:
+            env = environments.load(repo) or environments.EnvironmentConfig()
+            report = await run_autonomous_cycle(
+                repo, objective, env, feature=feature, skip_deploy=skip_deploy
+            )
+            _active_runs[run_key]["status"] = "completed"
+            _active_runs[run_key]["result"] = {
+                "run_id": report.run_id,
+                "actions": report.actions,
+                "final_message": report.final_message,
+                "cost_usd": report.cost_usd,
+            }
+            _server_log(
+                _active_runs[run_key]["source"],
+                f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} completed | cost=${report.cost_usd:.4f}",
+            )
+        except Exception as exc:
+            _active_runs[run_key]["status"] = "failed"
+            _active_runs[run_key]["error"] = str(exc)
+            _server_log(_active_runs[run_key]["source"], f"app={app_name!r} run_key={run_key} raised: {exc!r}")
+
+
+async def _run_prod_debug_background(
+    run_key: str, app_name: str, repo: Path, objective: str, symptom: str | None
+) -> None:
+    lock = _lock_for(app_name)
+    async with lock:
+        _active_runs[run_key]["status"] = "running"
+        try:
+            report = await run_prod_debug_cycle(repo, objective, symptom=symptom)
+            _active_runs[run_key]["status"] = "completed"
+            _active_runs[run_key]["result"] = {
+                "run_id": report.run_id,
+                "root_cause_found": report.root_cause_found,
+                "severity": report.severity,
+                "fix_attempted": report.fix_attempted,
+                "promoted_to_prod": report.promoted_to_prod,
+            }
+            _server_log(
+                "alarm",
+                f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} "
+                f"root_cause_found={report.root_cause_found} promoted_to_prod={report.promoted_to_prod}",
+            )
+        except Exception as exc:
+            _active_runs[run_key]["status"] = "failed"
+            _active_runs[run_key]["error"] = str(exc)
+            _server_log("alarm", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
+
+
+def _new_run_key(app_name: str, source: str) -> str:
+    run_key = uuid.uuid4().hex[:8]
+    _active_runs[run_key] = {"app": app_name, "source": source, "status": "queued", "started_at": time.time()}
+    return run_key
+
+
+# ── (a) Scheduled: Cloud Scheduler -> here on a cron/interval ─────────────────
+
+
+class ScheduledTrigger(BaseModel):
+    app: str
+    objective: str | None = None
+    feature: str | None = None
+    skip_deploy: bool = False
+
+
+@app.post("/trigger/scheduled")
+async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
+    repo = registry.get_app_repo(payload.app)
+    if repo is None:
+        _server_log("scheduled", f"app={payload.app!r} not registered -- no-op")
+        return {"triggered": False, "reason": f"app {payload.app!r} not registered"}
+
+    if _lock_for(payload.app).locked():
+        _server_log("scheduled", f"app={payload.app!r} already has a cycle running -- skipped")
+        return {"triggered": False, "reason": "a cycle for this app is already running"}
+
+    objective = payload.objective or Memory(repo).get_objective()
+    if not objective:
+        _server_log("scheduled", f"app={payload.app!r} has no objective set -- no-op")
+        return {"triggered": False, "reason": "no objective set for this app"}
+
+    run_key = _new_run_key(payload.app, "scheduled")
+    _server_log("scheduled", f"app={payload.app!r} run_key={run_key} objective={objective!r} -- dispatched")
+    asyncio.create_task(
+        _run_autonomous_background(run_key, payload.app, repo, objective, payload.feature, payload.skip_deploy)
+    )
+    return {"triggered": True, "run_key": run_key}
+
+
+# ── (b) Error/alarm: a GCP Monitoring alerting policy's Webhook notification
+# channel POSTs {"incident": {...}}; also accepts a plain {app, symptom} body
+# directly so this can be triggered/tested without a real alerting policy. ──
+
+
+class AlarmTrigger(BaseModel):
+    app: str
+    symptom: str | None = None
+    objective: str | None = None
+
+
+@app.post("/trigger/alarm")
+async def trigger_alarm(payload: dict) -> dict:
+    incident = payload.get("incident")
+    if incident is not None:
+        # GCP Monitoring's webhook schema: https://cloud.google.com/monitoring/support/notification-options#webhooks
+        # No app name in that schema by design (an alerting policy isn't
+        # app-aware) -- the policy's webhook URL should carry it, e.g.
+        # /trigger/alarm?app=my-app, or the policy's documentation field can
+        # be configured to include {"app": "..."} and this falls back to
+        # parsing that as JSON.
+        app_name = payload.get("app")
+        symptom = incident.get("summary") or incident.get("documentation", {}).get("content")
+        if not app_name:
+            doc_content = (incident.get("documentation") or {}).get("content", "")
+            try:
+                app_name = json.loads(doc_content).get("app")
+            except (json.JSONDecodeError, AttributeError):
+                app_name = None
+        if not app_name:
+            _server_log("alarm", "incident payload had no resolvable app name -- no-op")
+            return {"triggered": False, "reason": "could not resolve app from incident payload"}
+    else:
+        parsed = AlarmTrigger.model_validate(payload)
+        app_name = parsed.app
+        symptom = parsed.symptom
+
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        _server_log("alarm", f"app={app_name!r} not registered -- no-op")
+        return {"triggered": False, "reason": f"app {app_name!r} not registered"}
+
+    if _lock_for(app_name).locked():
+        _server_log("alarm", f"app={app_name!r} already has a cycle running -- skipped")
+        return {"triggered": False, "reason": "a cycle for this app is already running"}
+
+    objective = (payload.get("objective") if incident is None else None) or Memory(repo).get_objective()
+    if not objective:
+        _server_log("alarm", f"app={app_name!r} has no objective set -- no-op")
+        return {"triggered": False, "reason": "no objective set for this app"}
+
+    run_key = _new_run_key(app_name, "alarm")
+    _server_log("alarm", f"app={app_name!r} run_key={run_key} symptom={symptom!r} -- dispatched to prod-debug")
+    asyncio.create_task(_run_prod_debug_background(run_key, app_name, repo, objective, symptom))
+    return {"triggered": True, "run_key": run_key}
+
+
+# ── (c) Queue: a Pub/Sub push subscription -> here whenever a message is
+# published. Cheap, synchronous -- just files the request into the same
+# durable inbox `agentra dispatch` already drains (registry.py). ─────────────
+
+
+@app.post("/trigger/queue")
+async def trigger_queue(envelope: dict) -> dict:
+    message = envelope.get("message")
+    if not message or "data" not in message:
+        # Pub/Sub retries on non-2xx, and a malformed envelope will never become
+        # well-formed on retry -- ack it (200) so Pub/Sub stops resending it,
+        # but log loudly since this is a real integration problem, not a no-op.
+        _server_log("queue", f"malformed push envelope, acking without processing: {envelope!r}")
+        return {"processed": False, "reason": "malformed Pub/Sub envelope"}
+
+    try:
+        raw = base64.b64decode(message["data"]).decode("utf-8")
+        request = json.loads(raw)
+    except Exception as exc:
+        _server_log("queue", f"could not decode message data, acking without processing: {exc!r}")
+        return {"processed": False, "reason": f"could not decode message: {exc}"}
+
+    try:
+        request_id = registry.submit_request(
+            app=request["app"],
+            request_type=request["type"],
+            description=request["description"],
+            severity=request.get("severity"),
+            screenshot_url=request.get("screenshot_url"),
+        )
+    except (KeyError, ValueError) as exc:
+        _server_log("queue", f"invalid request payload {request!r}, acking without processing: {exc!r}")
+        return {"processed": False, "reason": str(exc)}
+
+    summary = registry.dispatch_once()
+    _server_log(
+        "queue",
+        f"request_id={request_id} app={request['app']!r} type={request['type']!r} -- "
+        f"submitted and dispatched (processed={summary.processed} errors={summary.errors})",
+    )
+    return {"processed": True, "request_id": request_id, "dispatch": {"processed": summary.processed, "errors": summary.errors}}
