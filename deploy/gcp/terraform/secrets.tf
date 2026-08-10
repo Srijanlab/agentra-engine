@@ -84,3 +84,32 @@ resource "google_secret_manager_secret_iam_member" "alarm_webhook_password_acces
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
+
+# The cloudflared sidecar's connector token (deploy/cloudflare/terraform's
+# `tunnel_token` output) -- lets the dashboard live at
+# https://agentra.srijanlab.com behind Cloudflare Access without ever
+# making this Cloud Run service itself publicly invokable. See
+# cloudrun.tf's cloudflared container block for why this is a sidecar, not
+# a separate service.
+resource "google_secret_manager_secret" "cloudflare_tunnel_token" {
+  project   = var.project_id
+  secret_id = "agentra-cloudflare-tunnel-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "cloudflare_tunnel_token" {
+  secret      = google_secret_manager_secret.cloudflare_tunnel_token.id
+  secret_data = var.cloudflare_tunnel_token
+}
+
+resource "google_secret_manager_secret_iam_member" "cloudflare_tunnel_token_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.cloudflare_tunnel_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}

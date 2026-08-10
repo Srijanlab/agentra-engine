@@ -43,6 +43,16 @@ variable "github_token" {
   sensitive   = true
 }
 
+variable "cloudflare_tunnel_token" {
+  description = <<-EOT
+    Cloudflare Tunnel connector token for the agentra-orchestrator tunnel
+    (deploy/cloudflare/terraform's `tunnel_token` output). Stored in Secret
+    Manager, never as a plain env var or committed to the repo.
+  EOT
+  type        = string
+  sensitive   = true
+}
+
 variable "git_author_name" {
   type    = string
   default = "agentra-bot"

@@ -49,6 +49,7 @@ resource "google_cloud_run_v2_service" "agentra" {
     }
 
     containers {
+      name  = "agentra"
       image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.agentra.repository_id}/agentra:${var.image_tag}"
       args  = ["serve"]
 
@@ -139,6 +140,56 @@ resource "google_cloud_run_v2_service" "agentra" {
         limits = {
           cpu    = "2000m"
           memory = "2Gi"
+        }
+      }
+    }
+
+    # Cloudflare Tunnel connector, as a sidecar in this same revision --
+    # NOT a separate Cloud Run service. Sidecars in one revision share a
+    # network namespace, so this reaches the agentra container over plain
+    # localhost, never through Cloud Run's own HTTP ingress/IAM-invoker
+    # check (see deploy/cloudflare/terraform/tunnel.tf's comment for why
+    # that matters: that check is all-or-nothing per service, and making
+    # the whole service public would also expose every unauthenticated
+    # /apps, /system/*, /trigger/* endpoint, not just the dashboard).
+    # Cloudflare Access (configured on that same hostname) is the only
+    # thing gating a human's path in.
+    containers {
+      name  = "cloudflared"
+      image = "docker.io/cloudflare/cloudflared:latest"
+      args  = ["tunnel", "--no-autoupdate", "run"]
+      # No `depends_on` guarantee needed the other way: cloudflared retries
+      # its localhost connection on its own until the agentra container is
+      # actually accepting connections, same as any reverse proxy would.
+      depends_on = ["agentra"]
+
+      env {
+        # cloudflared reads its connector token from this env var when no
+        # --token flag is given -- keeps the token out of the container's
+        # args (visible in `gcloud run services describe`/Terraform state)
+        # the way GIT_ASKPASS already keeps GITHUB_TOKEN out of git config.
+        name = "TUNNEL_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.cloudflare_tunnel_token.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        # cloudflared defaults to QUIC (UDP) transport, which fails
+        # outright on Cloud Run's networking -- confirmed live: "failed to
+        # dial to edge with quic: timeout: handshake did not complete in
+        # time", connections never established. http2 runs over plain TCP,
+        # which Cloud Run's egress handles fine.
+        name  = "TUNNEL_TRANSPORT_PROTOCOL"
+        value = "http2"
+      }
+
+      resources {
+        limits = {
+          cpu    = "500m"
+          memory = "128Mi"
         }
       }
     }
