@@ -33,6 +33,98 @@ Description of what needs to be built or fixed.
 
 ---
 
+### TASK-015: Observability dashboard (signals, agent activity, system state)
+**Scope:** both
+**Priority:** high
+
+`agentra/server.py` already logs every trigger (schedule/alarm/queue) to
+`~/.agentra/server.log` and tracks in-flight/recent runs in `_active_runs`,
+but none of it is visible except by reading raw logs. Add a dashboard,
+served from the same Cloud Run service, that visualizes what the system is
+doing: which signals have come in, which agent/cycle is running for which
+app, and overall system status.
+
+**Acceptance criteria:**
+- [ ] A dashboard page (served from the existing FastAPI app, no separate deploy) shows registered apps, recent trigger signals with source/timestamp, and active + recent runs with status
+- [ ] Backed by JSON APIs (not data baked into the HTML) so the same data is scriptable
+- [ ] Refreshes live (polling is fine) without a manual reload
+- [ ] Reuses existing tracking (`_active_runs`, `server.log`, each app's `Memory`) rather than a second parallel logging system
+
+---
+
+### TASK-016: Register any GitHub repo from the dashboard and start an autonomous cycle
+**Scope:** both
+**Priority:** high
+
+Today `agentra apps add` requires a repo already checked out locally --
+there's no way to point agentra at a GitHub repo it hasn't seen before from
+the deployed service (a gap already flagged in `docs/deployment.md`). Add
+that: given a repo URL, clone it (reusing the existing `GITHUB_TOKEN` /
+`GIT_ASKPASS` credential), register it, and let a cycle be started for it
+on demand from the dashboard, not just cron/queue.
+
+**Acceptance criteria:**
+- [ ] Dashboard form to add a GitHub repo by URL + app name + objective
+- [ ] Backend clones the repo server-side using existing git credentials and registers it via `registry.py`
+- [ ] Dashboard/API can start an autonomous cycle for a registered app on demand
+- [ ] Verified live: register a real repo through the running service and confirm a cycle actually starts and logs against it
+
+---
+
+### TASK-017: Shut down the autonomous system from the UI
+**Scope:** both
+**Priority:** high
+
+There's no kill switch today -- once a trigger fires, it runs. Add a global
+pause that every trigger path (scheduled/alarm/queue/on-demand) respects,
+controllable from the dashboard.
+
+**Acceptance criteria:**
+- [ ] Dashboard has a visible pause/resume control for the whole system
+- [ ] While paused, all trigger paths no-op and log why, instead of starting new agent work
+- [ ] Pause state is durable (survives an instance restart), not just in-memory
+- [ ] Verified live: pause via the dashboard, confirm a trigger during pause correctly no-ops, resume, confirm it dispatches again
+
+---
+
+### TASK-018: Dedicated persistent context ("team") per registered project
+**Scope:** backend
+**Priority:** high
+
+Each app's `.agentra/` memory already exists per-repo, but the repo
+checkout and the multi-app registry itself (`~/.agentra/apps.json`) live on
+Cloud Run's ephemeral local disk -- gone on every restart (documented in
+`docs/deployment.md`). TASK-016 and TASK-017 both need this to actually
+persist. Move both onto durable storage so each project's context survives
+restarts and stays isolated from every other project's.
+
+**Acceptance criteria:**
+- [ ] Registered apps and their repo checkouts survive a Cloud Run instance restart/redeploy
+- [ ] Each project's `.agentra/` memory persists and is isolated from other projects'
+- [ ] Documented in `docs/deployment.md`
+- [ ] Verified live: register an app, force a new revision, confirm the app + checkout + memory are still there
+
+---
+
+### TASK-019: Daily standup between the orchestrator and its agents
+**Scope:** backend
+**Priority:** medium
+
+For each registered project, produce a daily standup: what happened
+yesterday (grounded in that project's actual `Memory` -- `shipped.json`,
+`known_bugs.json`, run logs) and what's planned for today (grounded in its
+actual backlog/objective). Not a chat transcript between fictional
+personas -- a real summary an LLM call generates from that project's real
+data, explicitly instructed not to invent activity that didn't happen.
+
+**Acceptance criteria:**
+- [ ] A standup routine runs per registered app, producing a "yesterday" summary and a "today" plan grounded only in that project's real Memory data
+- [ ] Runs automatically on a daily schedule and is viewable from the dashboard
+- [ ] Standup output is persisted (visible after the fact, not just streamed once)
+- [ ] Verified live against at least one real registered project's actual history
+
+---
+
 ## Done
 
 <!-- Completed tasks go here with commit SHA -->
