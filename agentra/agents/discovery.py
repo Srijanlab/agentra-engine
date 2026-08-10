@@ -4,14 +4,14 @@ Decides *what to build next* without a human naming a feature. Looks at the
 codebase, whatever analytics are available, what's already been shipped by
 this system, and (via WebSearch) competitor products, then produces a ranked
 list of feature opportunities. Known production bugs and the customer
-feature-request queue (agentos/registry.py's inbox, absorbed by
-`agentos dispatch`) both take priority over the agent's own autonomous
+feature-request queue (agentra/registry.py's inbox, absorbed by
+`agentra dispatch`) both take priority over the agent's own autonomous
 ideation -- see the priority ordering in the system prompt.
 """
 
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
+from agentra.agents.base import AgentResult, run_agent
 
 SYSTEM_PROMPT = """You are the Product Discovery Agent in an autonomous \
 product engineering system. Your job is to decide what to build next, given \

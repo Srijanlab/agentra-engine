@@ -1,8 +1,8 @@
 """Per-app local/pre-prod/prod environment configuration.
 
 Every app the system operates on gets one of these, stored at
-<repo>/.agentos/environments.yaml. It's the thing that turns "deploy" from a
-single generic step into a real pipeline: local (agentos's own branch, fast
+<repo>/.agentra/environments.yaml. It's the thing that turns "deploy" from a
+single generic step into a real pipeline: local (agentra's own branch, fast
 iteration, nothing deployed) -> pre-prod (isolated Firebase project + Vercel
 preview, a real deployed environment for integration testing) -> prod
 (gated, or auto-remediated only when the app has explicitly opted in).
@@ -42,11 +42,11 @@ class EnvironmentConfig:
 
     @property
     def path_hint(self) -> str:
-        return ".agentos/environments.yaml"
+        return ".agentra/environments.yaml"
 
 
 def config_path(repo: Path) -> Path:
-    return repo / ".agentos" / "environments.yaml"
+    return repo / ".agentra" / "environments.yaml"
 
 
 def load(repo: Path) -> EnvironmentConfig | None:
@@ -143,7 +143,7 @@ def detect(repo: Path) -> EnvironmentConfig:
 
 def _has_push_triggered_workflow(repo: Path) -> bool:
     """Best-effort: any GitHub Actions workflow that triggers on push. Good enough as
-    a detected default -- the human confirms/overrides it in `agentos env init`."""
+    a detected default -- the human confirms/overrides it in `agentra env init`."""
     workflows_dir = repo / ".github" / "workflows"
     if not workflows_dir.is_dir():
         return False

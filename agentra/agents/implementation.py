@@ -27,8 +27,8 @@ than hoping a better-worded prompt fixes it.
 import subprocess
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
-from agentos.environments import EnvironmentConfig
+from agentra.agents.base import AgentResult, run_agent
+from agentra.environments import EnvironmentConfig
 
 SYSTEM_PROMPT = """You are the Implementation Agent in an autonomous product \
 engineering system. You are given a codebase summary and a specific feature \
@@ -70,22 +70,22 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
         check=True, capture_output=True, text=True,
     )
     # codebase.py's understand_codebase step (run just before this, in both
-    # orchestrator.py and brain.py) writes .agentos/memory/... as plain files.
+    # orchestrator.py and brain.py) writes .agentra/memory/... as plain files.
     # Whether those paths are tracked differs by branch -- e.g. committed on
     # pre_prod_branch from an earlier cycle, untracked on whatever branch this
     # process happened to start checked out on. An untracked file that the
     # target branch's tree wants to place there makes checkout refuse to
     # proceed rather than silently clobber it. Confirmed live in the first
     # real scheduled GitHub Actions run: "untracked working tree file
-    # .agentos/memory/architecture/codebase.md would be overwritten by
+    # .agentra/memory/architecture/codebase.md would be overwritten by
     # checkout" -- three identical failures, correctly recognized as
     # non-transient by the Orchestrator Agent, which stopped and explained
     # rather than retrying blindly or faking success.
-    # .agentos/ is entirely agentos's own regenerable bookkeeping (logs,
+    # .agentra/ is entirely agentra's own regenerable bookkeeping (logs,
     # memory, ledgers) -- never a human's uncommitted work -- so clearing
     # untracked content there before checkout is always safe.
     subprocess.run(
-        ["git", "-C", str(repo), "clean", "-fd", ".agentos/"],
+        ["git", "-C", str(repo), "clean", "-fd", ".agentra/"],
         check=True, capture_output=True, text=True,
     )
     subprocess.run(
@@ -105,7 +105,7 @@ def _commit_if_dirty(repo: Path, feature: str) -> bool:
         return False
     subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True, text=True)
     subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", f"{feature}\n\nAuto-committed by agentos: agent turn ended without committing."],
+        ["git", "-C", str(repo), "commit", "-m", f"{feature}\n\nAuto-committed by agentra: agent turn ended without committing."],
         check=True, capture_output=True, text=True,
     )
     return True
@@ -159,9 +159,9 @@ Implement this feature now, following the loop in your system prompt."""
 
     try:
         if _commit_if_dirty(repo, feature):
-            result.text += "\n\n[agentos] Uncommitted changes were present after the agent turn ended; auto-committed them."
+            result.text += "\n\n[agentra] Uncommitted changes were present after the agent turn ended; auto-committed them."
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
-        result.text += f"\n\n[agentos] Safety-net commit failed: {stderr}"
+        result.text += f"\n\n[agentra] Safety-net commit failed: {stderr}"
 
     return result

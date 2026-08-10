@@ -1,6 +1,6 @@
 """Production Debugging Agent (vision.md — post-launch monitoring).
 
-Runs on demand (`agentos debug-prod`) after a launch or when something looks
+Runs on demand (`agentra debug-prod`) after a launch or when something looks
 wrong. Always read-only against production: it inspects logs and the
 codebase to find root cause, and proposes a fix — it never deploys anything
 itself. Whether that proposed fix gets built and shipped automatically is a
@@ -10,8 +10,8 @@ EnvironmentConfig.auto_remediate_prod flag, not this agent.
 
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
-from agentos.environments import EnvironmentConfig
+from agentra.agents.base import AgentResult, run_agent
+from agentra.environments import EnvironmentConfig
 
 SYSTEM_PROMPT = """You are the Production Debugging Agent in an autonomous \
 product engineering system. You are investigating a possible issue in a live \

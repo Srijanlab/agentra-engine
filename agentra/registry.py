@@ -1,9 +1,9 @@
 """Multi-app registry and durable inbox — the "every app sends requests to
-agentos" layer (vision.md's system operating across many apps, not tied to
+agentra" layer (vision.md's system operating across many apps, not tied to
 one project).
 
-Lives at ~/.agentos/ (AGENTOS_HOME), separate from each app's own
-<repo>/.agentos/ memory -- this is agentos's own state about *which* apps
+Lives at ~/.agentra/ (AGENTRA_HOME), separate from each app's own
+<repo>/.agentra/ memory -- this is agentra's own state about *which* apps
 it manages and *what's waiting to be absorbed* into them, not any single
 app's own audit trail.
 
@@ -25,17 +25,17 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentos.memory import Memory
+from agentra.memory import Memory
 
-# NOTE: not `Path(os.environ.get(...)) or Path.home() / ".agentos"` -- Path objects
+# NOTE: not `Path(os.environ.get(...)) or Path.home() / ".agentra"` -- Path objects
 # have no __bool__/__len__, so Path("") is truthy and that pattern silently never
 # falls through to the default (resolves to the cwd instead, wherever that happens
 # to be for a given invocation). Caught this live: it made the registry appear to
 # lose all state between container runs, since each run's cwd differed.
-_env_value = os.environ.get("AGENTOS_HOME")
-AGENTOS_HOME = Path(_env_value) if _env_value else Path.home() / ".agentos"
-APPS_PATH = AGENTOS_HOME / "apps.json"
-INBOX_ROOT = AGENTOS_HOME / "inbox"
+_env_value = os.environ.get("AGENTRA_HOME")
+AGENTRA_HOME = Path(_env_value) if _env_value else Path.home() / ".agentra"
+APPS_PATH = AGENTRA_HOME / "apps.json"
+INBOX_ROOT = AGENTRA_HOME / "inbox"
 
 # A request left in processing/ longer than this is assumed to be from a crashed
 # dispatch run, not one that's genuinely still in flight (processing itself is a
@@ -92,7 +92,7 @@ def submit_request(
 ) -> str:
     """Durably enqueue a request for `app`. Returns the request id.
 
-    This is the one function anything outside agentos should call to get a
+    This is the one function anything outside agentra should call to get a
     signal/feature-request/objective-change into the system -- a filesystem-
     based adapter script, or later, an HTTP handler. Either way, by the time
     this returns, the request is on disk in pending/, not held anywhere in
@@ -101,7 +101,7 @@ def submit_request(
     if request_type not in REQUEST_TYPES:
         raise ValueError(f"unknown request type: {request_type!r}, must be one of {REQUEST_TYPES}")
     if app not in _apps():
-        raise ValueError(f"unknown app {app!r} -- register it first with `agentos apps add`")
+        raise ValueError(f"unknown app {app!r} -- register it first with `agentra apps add`")
 
     request_id = uuid.uuid4().hex[:12]
     pending_dir = INBOX_ROOT / app / "pending"
@@ -179,7 +179,7 @@ def dispatch_once() -> DispatchSummary:
     """Absorb everything currently sitting in the inbox into each app's own
     ledgers. Cheap and fast (pure file/JSON work, no LLM calls) -- meant to run
     frequently (e.g. every few minutes via cron), separate from the actual
-    (expensive, slower) `agentos run` cycles that act on the resulting backlog.
+    (expensive, slower) `agentra run` cycles that act on the resulting backlog.
     """
     resumed_total = 0
     processed = 0

@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-# ─── Stage 1: build agentos package ──────────────────────────────────────────
+# ─── Stage 1: build agentra package ──────────────────────────────────────────
 FROM python:3.12-slim AS builder
 
 WORKDIR /build
 COPY pyproject.toml .
-COPY agentos/ agentos/
+COPY agentra/ agentra/
 
 RUN pip install --no-cache-dir --prefix=/install .
 
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Agent shells out to, globally
 RUN npm install -g @anthropic-ai/claude-code vercel firebase-tools --no-update-notifier
 
-# Copy installed agentos from builder
+# Copy installed agentra from builder
 COPY --from=builder /install /usr/local
 
 # Create a non-root user for safer execution, and pre-create /workspace owned by it --
@@ -35,22 +35,22 @@ COPY --from=builder /install /usr/local
 # root-created WORKDIR. This means cloning, committing, and everything else this image
 # does never needs --user root / chown / su anywhere, in local or server use.
 #
-# Same reasoning applies to /home/agentuser/.claude and /home/agentuser/.agentos below:
+# Same reasoning applies to /home/agentuser/.claude and /home/agentuser/.agentra below:
 # `useradd --create-home` only creates /home/agentuser itself, never nested
-# subdirectories -- so a fresh named volume mounted at one (agentos-claude-home,
-# agentos-home in docker-compose.yml / run-agent.sh) got Docker's default root:root
+# subdirectories -- so a fresh named volume mounted at one (agentra-claude-home,
+# agentra-home in docker-compose.yml / run-agent.sh) got Docker's default root:root
 # mount-point ownership instead. Confirmed live for .claude: the CLI's own
 # session-env setup failed with `EACCES: permission denied, mkdir
 # '/home/agentuser/.claude/session-env'` on every write/process-execution tool
 # (Bash, Write) while read-only tools kept working -- consistent with agentuser
-# being unable to write under a root-owned .claude. /home/agentuser/.agentos (the
-# multi-app registry + inbox, agentos/registry.py) needs the same treatment: without
+# being unable to write under a root-owned .claude. /home/agentuser/.agentra (the
+# multi-app registry + inbox, agentra/registry.py) needs the same treatment: without
 # a persistent, agentuser-writable volume there, every --rm container run would
 # start with a blank registry, silently losing all registered apps and any inbox
-# state a scheduled `agentos dispatch` hadn't yet processed.
+# state a scheduled `agentra dispatch` hadn't yet processed.
 RUN useradd --create-home --shell /bin/bash agentuser \
-    && mkdir -p /workspace /home/agentuser/.claude /home/agentuser/.agentos \
-    && chown agentuser:agentuser /workspace /home/agentuser/.claude /home/agentuser/.agentos
+    && mkdir -p /workspace /home/agentuser/.claude /home/agentuser/.agentra \
+    && chown agentuser:agentuser /workspace /home/agentuser/.claude /home/agentuser/.agentra
 
 # Claude CLI stores its config here; a named volume is mounted at runtime
 # so OAuth tokens / session state persist across container restarts.
@@ -76,7 +76,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/git-askpass.sh
 #
 # ─── Server / clone-on-start mode ──────────────────────────────────────────────
 # Local/dev usage (bind-mount a host checkout at /workspace) needs nothing extra --
-# the entrypoint sees /workspace already has content and runs agentos directly, same
+# the entrypoint sees /workspace already has content and runs agentra directly, same
 # as always. For a server with no pre-existing checkout, mount an empty volume at
 # /workspace and additionally set:
 #   GIT_CLONE_URL=https://x-access-token@github.com/OWNER/REPO.git
@@ -85,7 +85,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/git-askpass.sh
 #     (a one-line script that echoes $GITHUB_TOKEN -- keeps the token out of
 #     .git/config entirely; git invokes it for the password prompt only, since
 #     the username is already in the URL as x-access-token@)
-# The entrypoint then clones before handing off to agentos.
+# The entrypoint then clones before handing off to agentra.
 # ──────────────────────────────────────────────────────────────────────────────
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

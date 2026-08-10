@@ -7,7 +7,7 @@ smoke test. It never touches production.
 promote_prod() is the one place in the whole system that's allowed to touch
 production, and only when called with allow_prod=True by a caller that has
 already checked EnvironmentConfig.auto_remediate_prod (see
-agents/prod_debug.py) or by a human running `agentos promote`.
+agents/prod_debug.py) or by a human running `agentra promote`.
 
 The git merge+push in both is done here in plain Python, not left as prose
 in the agent's system prompt -- same rationale as implementation.py's
@@ -24,8 +24,8 @@ URLs, running smoke tests.
 import subprocess
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
-from agentos.environments import EnvironmentConfig
+from agentra.agents.base import AgentResult, run_agent
+from agentra.environments import EnvironmentConfig
 
 PRE_PROD_SYSTEM_PROMPT = """You are the Deployment Agent, deploying to the \
 PRE-PROD environment only. You must never touch production.
@@ -92,7 +92,7 @@ End your response with a fenced ```json block shaped like:
 
 PROD_SYSTEM_PROMPT = """You are the Deployment Agent, promoting a change to \
 PRODUCTION. This call has been explicitly authorized — either by a human \
-running `agentos promote`, or by the Production Debugging Agent's opted-in \
+running `agentra promote`, or by the Production Debugging Agent's opted-in \
 auto-remediate path after the fix passed pre-prod testing.
 
 {pre_prod_branch} has already been merged into {prod_branch} and pushed for \
@@ -124,7 +124,7 @@ End your response with a fenced ```json block shaped like:
 # rationale as PRE_PROD_CI_CD_SYSTEM_PROMPT above, applied to the prod promotion path.
 PROD_CI_CD_SYSTEM_PROMPT = """You are the Deployment Agent, verifying a PRODUCTION \
 promotion. This call has been explicitly authorized — either by a human running \
-`agentos promote`, or by the Production Debugging Agent's opted-in auto-remediate path \
+`agentra promote`, or by the Production Debugging Agent's opted-in auto-remediate path \
 after the fix passed pre-prod testing.
 
 {pre_prod_branch} has already been merged into {prod_branch} and pushed for you -- that \
@@ -184,7 +184,7 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
 
 
 def persist_audit_trail(repo: Path, branch: str) -> str | None:
-    """Commit and push any dirty .agentos/ bookkeeping (shipped.json, known_bugs.json,
+    """Commit and push any dirty .agentra/ bookkeeping (shipped.json, known_bugs.json,
     feature_queue.json, memory/*) onto `branch`, which the caller must already have merged
     and pushed to (i.e. call this right after a successful deploy_pre_prod/promote_prod).
 
@@ -194,19 +194,19 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
     report regardless of what was actually built. Confirmed live: shipped.json existed
     locally after a real, successful cycle but was never present on origin/beta at all.
 
-    Scoped to .agentos/ only -- same "always safe to clear/commit" reasoning as
+    Scoped to .agentra/ only -- same "always safe to clear/commit" reasoning as
     implementation.py's _checkout_feature_branch applies here to committing, not just
     cleaning. Returns an error message on failure, None on success or if nothing was dirty.
     """
     status = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "--", ".agentos/"],
+        ["git", "-C", str(repo), "status", "--porcelain", "--", ".agentra/"],
         capture_output=True, text=True,
     )
     if not status.stdout.strip():
         return None
     try:
-        _run(repo, "add", ".agentos/")
-        _run(repo, "commit", "-m", "agentos: persist audit trail (shipped/backlog/memory)")
+        _run(repo, "add", ".agentra/")
+        _run(repo, "commit", "-m", "agentra: persist audit trail (shipped/backlog/memory)")
         _run(repo, "push", "origin", branch)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")

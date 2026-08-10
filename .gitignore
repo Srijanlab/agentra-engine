@@ -2,6 +2,6 @@
 __pycache__/
 *.pyc
 *.egg-info/
-.agentos/
+.agentra/
 .claude_oauth_token
 .github_pat

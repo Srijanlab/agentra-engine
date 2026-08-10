@@ -2,7 +2,7 @@
 
 Two entry points:
 
-run_cycle() — the fixed-pipeline loop (CLI: `agentos run --fixed-pipeline`):
+run_cycle() — the fixed-pipeline loop (CLI: `agentra run --fixed-pipeline`):
 understand codebase -> discover (or accept) a feature -> implement -> test ->
 deploy to PRE-PROD -> assess measurability -> repeat, in that hardcoded
 order. Not the default anymore — agents/brain.py::run_autonomous_cycle() is,
@@ -25,11 +25,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentos.agents import codebase, deployment, discovery, feedback, implementation, prod_debug, testing
-from agentos.environments import EnvironmentConfig, feature_branch_name, slug
-from agentos import environments
-from agentos.memory import Memory
-from agentos.ranking import rank
+from agentra.agents import codebase, deployment, discovery, feedback, implementation, prod_debug, testing
+from agentra.environments import EnvironmentConfig, feature_branch_name, slug
+from agentra import environments
+from agentra.memory import Memory
+from agentra.ranking import rank
 
 
 @dataclass
@@ -58,7 +58,7 @@ class ProdDebugReport:
 def _load_env(repo: Path, mem: Memory, run_id: str) -> EnvironmentConfig:
     env = environments.load(repo)
     if env is None:
-        mem.log(run_id, "no .agentos/environments.yaml found; using defaults (run `agentos env init` to configure)")
+        mem.log(run_id, "no .agentra/environments.yaml found; using defaults (run `agentra env init` to configure)")
         env = EnvironmentConfig()
     return env
 
@@ -167,7 +167,7 @@ async def run_cycle(
         f"# Cycle {run_id}\n\nObjective: {objective}\nFeature: {feature}\n\n"
         f"- codebase: ok\n- implementation: {impl.ok}\n- testing (local): {test_passed}\n"
         f"- deployment (pre-prod): {deploy_ok}\n- verified live in pre-prod: {pre_prod_verified}\n"
-        f"\nProduction promotion is a separate, human-gated step: `agentos promote --repo {repo}`.\n",
+        f"\nProduction promotion is a separate, human-gated step: `agentra promote --repo {repo}`.\n",
     )
 
     if deploy_ok:
@@ -197,7 +197,7 @@ async def run_cycle(
 
 
 async def run_promote(repo: Path) -> dict:
-    """Human-triggered prod promotion: `agentos promote`. Always allow_prod=True
+    """Human-triggered prod promotion: `agentra promote`. Always allow_prod=True
     here because a human explicitly invoked it — this is the approval gate."""
     repo = repo.resolve()
     mem = Memory(repo)

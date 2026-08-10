@@ -1,4 +1,4 @@
-# Running agentos in a Container
+# Running agentra in a Container
 
 The agents in this system have unrestricted `Bash`, `Write`, and `Edit` access to
 the target repository via the Claude CLI. The `safety.py` regex filter is a
@@ -38,7 +38,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=<your_oauth_access_token>
 export REPO_PATH=/Users/you/projects/my-app
 
 # 3. Set your git identity (used for commits made by the agent)
-export GIT_AUTHOR_NAME="agentos-bot"
+export GIT_AUTHOR_NAME="agentra-bot"
 export GIT_AUTHOR_EMAIL="rossharma1@gmail.com"
 
 # 4. Run a single improvement cycle
@@ -95,20 +95,20 @@ Both are forwarded into the container automatically by `run-agent.sh`.
 ## Manual docker run (without run-agent.sh)
 
 ```bash
-docker build -t agentos:local .
+docker build -t agentra:local .
 
 docker run --rm -it \
   --volume /path/to/repo:/workspace \
-  --volume agentos-claude-home:/home/agentuser/.claude \
+  --volume agentra-claude-home:/home/agentuser/.claude \
   --tmpfs /tmp:size=256m,mode=1777 \
   --read-only \
   --cap-drop ALL \
   --env CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
-  --env GIT_AUTHOR_NAME="agentos-bot" \
+  --env GIT_AUTHOR_NAME="agentra-bot" \
   --env GIT_AUTHOR_EMAIL="rossharma1@gmail.com" \
-  --env GIT_COMMITTER_NAME="agentos-bot" \
+  --env GIT_COMMITTER_NAME="agentra-bot" \
   --env GIT_COMMITTER_EMAIL="rossharma1@gmail.com" \
-  agentos:local run \
+  agentra:local run \
     --objective "improve engagement" \
     --skip-deploy
 ```
@@ -130,8 +130,8 @@ The container runs with:
 ## Rebuilding the image
 
 ```bash
-# After changing pyproject.toml, agentos/ source, or the Dockerfile:
-docker build --no-cache -t agentos:local .
+# After changing pyproject.toml, agentra/ source, or the Dockerfile:
+docker build --no-cache -t agentra:local .
 ```
 
 Or with compose:

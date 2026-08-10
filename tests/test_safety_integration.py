@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, ToolResultBlock, UserMessage, query
 
-from agentos.agents.base import single_prompt_stream
-from agentos.agents.safety import make_hooks
+from agentra.agents.base import single_prompt_stream
+from agentra.agents.safety import make_hooks
 
 
 async def _run_and_get_tool_result(prompt: str, allow_prod: bool) -> ToolResultBlock | None:

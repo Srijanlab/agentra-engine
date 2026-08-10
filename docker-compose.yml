@@ -1,7 +1,7 @@
 services:
-  agentos:
+  agentra:
     build: .
-    image: agentos:local
+    image: agentra:local
 
     # ── Volumes ────────────────────────────────────────────────────────────────
     volumes:
@@ -15,11 +15,11 @@ services:
       # have to re-auth on every run.
       - claude-home:/home/agentuser/.claude
 
-      # Named volume for agentos's own multi-app registry + durable inbox
-      # (agentos/registry.py). Without this, every --rm container run starts
+      # Named volume for agentra's own multi-app registry + durable inbox
+      # (agentra/registry.py). Without this, every --rm container run starts
       # with a blank registry -- registered apps and any not-yet-dispatched
       # inbox requests would silently vanish between runs.
-      - agentos-home:/home/agentuser/.agentos
+      - agentra-home:/home/agentuser/.agentra
 
     # ── Auth (pick one) ────────────────────────────────────────────────────────
     environment:
@@ -31,9 +31,9 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 
       # ── Git identity (needed for git commits inside the container) ────────────
-      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-agentos-bot}
+      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-agentra-bot}
       - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-rossharma1@gmail.com}
-      - GIT_COMMITTER_NAME=${GIT_AUTHOR_NAME:-agentos-bot}
+      - GIT_COMMITTER_NAME=${GIT_AUTHOR_NAME:-agentra-bot}
       - GIT_COMMITTER_EMAIL=${GIT_AUTHOR_EMAIL:-rossharma1@gmail.com}
 
       # ── Deployment tool tokens (optional; only needed by Deployment Agent) ────
@@ -50,7 +50,7 @@ services:
     cap_drop:
       - ALL
     # Read-only root filesystem except for explicitly-writable paths.
-    # /workspace, /home/agentuser/.claude, and /home/agentuser/.agentos are
+    # /workspace, /home/agentuser/.claude, and /home/agentuser/.agentra are
     # writable via volumes.
     read_only: true
     tmpfs:
@@ -58,4 +58,4 @@ services:
 
 volumes:
   claude-home:
-  agentos-home:
+  agentra-home:

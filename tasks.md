@@ -1,4 +1,4 @@
-# AgentOS Task Queue
+# Agentra Task Queue
 
 Tasks in the `## Queue` section are picked up automatically when the
 **"Claude — Run Tasks (from file)"** GitHub Action is triggered.
@@ -37,8 +37,8 @@ Description of what needs to be built or fixed.
 **Scope:** backend
 **Priority:** high
 
-No cron/queue/pub-sub integration exists today. `agentos/registry.py::dispatch_once()`
-drains a local `~/.agentos/inbox/` dir but nothing schedules it, and the
+No cron/queue/pub-sub integration exists today. `agentra/registry.py::dispatch_once()`
+drains a local `~/.agentra/inbox/` dir but nothing schedules it, and the
 GitHub Action referenced at the top of this file has no `.github/workflows`
 committed in this repo. Add three trigger paths into the orchestrator:
 (a) scheduled, for certain recurring work types, (b) reactive, on
@@ -95,7 +95,7 @@ store instead of a loose file in the repo.
 **Scope:** backend
 **Priority:** medium
 
-Git operations already exist in `agentos/agents/deployment.py`
+Git operations already exist in `agentra/agents/deployment.py`
 (`_sync_branch_to_remote`, `_merge_and_push`, raw `subprocess` git calls) and
 `git-askpass.sh` supplies `$GITHUB_TOKEN` for clone-on-start. Confirm/extend
 this so any spawned agent — not just the deployment agent — can pull latest
@@ -138,6 +138,6 @@ for TASK-013.
 acceptance criterion here (arbitrary objective in, tool-based agent
 selection, decisions logged via `session.note()`, production excluded) —
 it just sat behind an opt-in `--autonomous` flag. Flipped the default:
-`agentos run`/`agentos loop` now use it by default; the old hardcoded
+`agentra run`/`agentra loop` now use it by default; the old hardcoded
 sequence (`orchestrator.py::run_cycle`) is reached via the new
 `--fixed-pipeline` flag instead.

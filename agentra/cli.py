@@ -2,10 +2,10 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from agentos import environments, registry
-from agentos.agents.brain import run_autonomous_cycle
-from agentos.memory import Memory
-from agentos.orchestrator import run_cycle, run_prod_debug_cycle, run_promote
+from agentra import environments, registry
+from agentra.agents.brain import run_autonomous_cycle
+from agentra.memory import Memory
+from agentra.orchestrator import run_cycle, run_prod_debug_cycle, run_promote
 
 
 def _read_analytics(path: Path | None) -> str:
@@ -17,8 +17,8 @@ def _read_analytics(path: Path | None) -> str:
 
 def _resolve_objective(repo: Path, cli_value: str | None) -> str:
     """--objective always wins if given; otherwise fall back to the persistent
-    setting (`agentos objective set`, or an objective_change request absorbed by
-    `agentos dispatch`) so a scheduled/unattended run doesn't need one passed
+    setting (`agentra objective set`, or an objective_change request absorbed by
+    `agentra dispatch`) so a scheduled/unattended run doesn't need one passed
     in every time."""
     if cli_value:
         return cli_value
@@ -27,7 +27,7 @@ def _resolve_objective(repo: Path, cli_value: str | None) -> str:
         return stored
     raise SystemExit(
         "No --objective given and none set for this repo. Either pass --objective, "
-        "or run `agentos objective set \"...\" --repo <repo>` first."
+        "or run `agentra objective set \"...\" --repo <repo>` first."
     )
 
 
@@ -37,7 +37,7 @@ def _add_common_run_args(parser: argparse.ArgumentParser) -> None:
         "--objective",
         default=None,
         help="Business objective, e.g. 'improve retention'. Omit to use the persistent "
-        "setting from `agentos objective set`.",
+        "setting from `agentra objective set`.",
     )
     parser.add_argument(
         "--feature",
@@ -120,7 +120,7 @@ def _interactive_env_init(detected: environments.EnvironmentConfig) -> environme
         detected.ci_cd_on_push,
     )
     print(
-        "\nBy default, production is only ever touched via `agentos promote` "
+        "\nBy default, production is only ever touched via `agentra promote` "
         "(a human runs it deliberately). The option below lets the Production "
         "Debugging Agent skip that and deploy a verified hotfix straight to "
         "prod on its own, once it has passed pre-prod testing."
@@ -142,7 +142,7 @@ def _interactive_env_init(detected: environments.EnvironmentConfig) -> environme
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="agentos")
+    parser = argparse.ArgumentParser(prog="agentra")
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_p = sub.add_parser("run", help="Run one understand->discover->implement->test->deploy-to-pre-prod cycle")
@@ -183,7 +183,7 @@ def main() -> None:
     obj_show_p = obj_sub.add_parser("show", help="Show the current objective")
     obj_show_p.add_argument("--repo", required=True, type=Path)
 
-    apps_p = sub.add_parser("apps", help="Manage the multi-app registry (~/.agentos/apps.json)")
+    apps_p = sub.add_parser("apps", help="Manage the multi-app registry (~/.agentra/apps.json)")
     apps_sub = apps_p.add_subparsers(dest="apps_command", required=True)
     apps_add_p = apps_sub.add_parser("add", help="Register an app")
     apps_add_p.add_argument("name")
@@ -193,7 +193,7 @@ def main() -> None:
     apps_remove_p.add_argument("name")
 
     submit_p = sub.add_parser("submit", help="Durably submit a request into an app's inbox")
-    submit_p.add_argument("--app", required=True, help="Registered app name (see `agentos apps list`)")
+    submit_p.add_argument("--app", required=True, help="Registered app name (see `agentra apps list`)")
     submit_p.add_argument("--type", required=True, choices=registry.REQUEST_TYPES)
     submit_p.add_argument("--description", required=True)
     submit_p.add_argument("--severity", default=None, help="For --type bug: low|medium|high|critical")
@@ -218,7 +218,7 @@ def main() -> None:
                 )
             )
             _print_report(report)
-            print(f"\nDetails written to <repo>/.agentos/memory/ and <repo>/.agentos/logs/{report.run_id}.log")
+            print(f"\nDetails written to <repo>/.agentra/memory/ and <repo>/.agentra/logs/{report.run_id}.log")
         else:
             env = environments.load(repo) or environments.EnvironmentConfig()
             report = asyncio.run(
@@ -232,7 +232,7 @@ def main() -> None:
                 )
             )
             _print_autonomous_report(report)
-        print("Ready for production? Run: agentos promote --repo <repo>")
+        print("Ready for production? Run: agentra promote --repo <repo>")
 
     elif args.command == "loop":
         analytics_summary = _read_analytics(args.analytics)
@@ -284,7 +284,7 @@ def main() -> None:
             print(
                 "\nNote: auto_remediate_prod is ON for this app. The Production "
                 "Debugging Agent may deploy verified hotfixes to prod without "
-                "asking. Edit .agentos/environments.yaml to turn it back off."
+                "asking. Edit .agentra/environments.yaml to turn it back off."
             )
 
     elif args.command == "promote":
@@ -302,7 +302,7 @@ def main() -> None:
         print(f"\nRun {result['run_id']}")
         print(f"  promoted to prod: {result['ok']}")
         if not result["ok"]:
-            print(f"  details written to <repo>/.agentos/memory/failures/{result['run_id']}-prod-promote.md")
+            print(f"  details written to <repo>/.agentra/memory/failures/{result['run_id']}-prod-promote.md")
 
     elif args.command == "debug-prod":
         repo = args.repo.resolve()
@@ -315,7 +315,7 @@ def main() -> None:
         print(f"  promoted to prod:  {report.promoted_to_prod}")
         if report.root_cause_found and not report.fix_attempted:
             print(
-                "\n  Filed as a known bug for the next `agentos run`/`agentos loop` "
+                "\n  Filed as a known bug for the next `agentra run`/`agentra loop` "
                 "cycle (auto_remediate_prod is off for this app)."
             )
 
@@ -351,7 +351,7 @@ def main() -> None:
             severity=args.severity,
             screenshot_url=args.screenshot_url,
         )
-        print(f"Submitted request {request_id} for app {args.app!r} (pending in the inbox until `agentos dispatch` runs)")
+        print(f"Submitted request {request_id} for app {args.app!r} (pending in the inbox until `agentra dispatch` runs)")
 
     elif args.command == "dispatch":
         summary = registry.dispatch_once()

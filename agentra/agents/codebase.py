@@ -6,7 +6,7 @@ features. Output feeds every downstream agent, so it never touches Write/Edit/Ba
 
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
+from agentra.agents.base import AgentResult, run_agent
 
 SYSTEM_PROMPT = """You are the Codebase Understanding Agent in an autonomous \
 product engineering system. Your only job is to build an accurate, concise \

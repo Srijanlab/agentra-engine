@@ -10,7 +10,7 @@ expected success metrics against it.
 
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
+from agentra.agents.base import AgentResult, run_agent
 
 SYSTEM_PROMPT = """You are the Analytics Feedback Agent in an autonomous \
 product engineering system. A feature was just implemented and tested. \

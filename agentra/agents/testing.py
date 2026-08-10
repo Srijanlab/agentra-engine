@@ -17,7 +17,7 @@ serving traffic.
 
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
+from agentra.agents.base import AgentResult, run_agent
 
 LOCAL_SYSTEM_PROMPT = """You are the Testing Agent in an autonomous product \
 engineering system, running in LOCAL mode. A feature was just implemented. \

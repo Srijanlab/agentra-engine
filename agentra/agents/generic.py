@@ -12,7 +12,7 @@ system prompts, dedicated pre/post logic like implementation.py's branch
 checkout), this is the path for everything that doesn't warrant one.
 
 Traceability: every spawn is logged through the same Memory.log() ledger
-every other agent call uses (<repo>/.agentos/logs/<run_id>.log), tagged with
+every other agent call uses (<repo>/.agentra/logs/<run_id>.log), tagged with
 the task's name and its outcome — so a spawned run is inspectable the same
 way as a fixed-pipeline one, not a shadow path with its own bookkeeping.
 """
@@ -20,8 +20,8 @@ way as a fixed-pipeline one, not a shadow path with its own bookkeeping.
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentos.agents.base import AgentResult, run_agent
-from agentos.memory import Memory
+from agentra.agents.base import AgentResult, run_agent
+from agentra.memory import Memory
 
 
 @dataclass

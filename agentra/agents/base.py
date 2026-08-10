@@ -9,7 +9,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
-from agentos.agents.safety import make_hooks
+from agentra.agents.safety import make_hooks
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 

@@ -15,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentos.agents.generic import TaskSpec, spawn
-from agentos.memory import Memory
+from agentra.agents.generic import TaskSpec, spawn
+from agentra.memory import Memory
 
 
 async def main() -> None:

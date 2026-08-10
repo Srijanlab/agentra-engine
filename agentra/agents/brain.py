@@ -19,7 +19,7 @@ spawn_custom_agent) — that's where actual filesystem and shell access
 lives, gated exactly as it was before this module existed. Production is
 deliberately not one of the nine tools (spawn_custom_agent included —
 agents/generic.py::TaskSpec has no allow_prod field at all); promote_prod()
-stays reachable only via `agentos promote` (human) or the debug-prod
+stays reachable only via `agentra promote` (human) or the debug-prod
 auto-remediate path, never from an autonomous sequencing decision. And the
 one invariant that must hold no matter what the model decides — never
 deploy before local tests pass — is enforced in deploy_pre_prod's handler
@@ -37,12 +37,12 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query, tool
 
-from agentos.agents import codebase, deployment, discovery, feedback, implementation, testing
-from agentos.agents.base import single_prompt_stream
-from agentos.agents.generic import TaskSpec, spawn as spawn_generic
-from agentos.environments import EnvironmentConfig, feature_branch_name, slug
-from agentos.memory import Memory
-from agentos.ranking import rank
+from agentra.agents import codebase, deployment, discovery, feedback, implementation, testing
+from agentra.agents.base import single_prompt_stream
+from agentra.agents.generic import TaskSpec, spawn as spawn_generic
+from agentra.environments import EnvironmentConfig, feature_branch_name, slug
+from agentra.memory import Memory
+from agentra.ranking import rank
 
 # Circuit breaker thresholds. Retrying a failing tool is only useful when the failure
 # is about *what* was tried (a bad brief, a flaky test) -- an infrastructure error (a
@@ -86,7 +86,7 @@ class OrchestratorSession:
     def note(self, action: str) -> None:
         self.actions.append(action)
         self.mem.log(self.run_id, action)
-        print(f"[agentos] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
+        print(f"[agentra] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
 
     def check_hard_stop(self) -> dict | None:
         """Call at the top of every tool. Returns an error tool_result once this run has
@@ -495,8 +495,8 @@ async def run_autonomous_cycle(
     session.note(f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}")
 
     tools = _tools_for(session)
-    server = create_sdk_mcp_server(name="agentos_brain", tools=tools)
-    allowed_tools = [f"mcp__agentos_brain__{t.name}" for t in tools]
+    server = create_sdk_mcp_server(name="agentra_brain", tools=tools)
+    allowed_tools = [f"mcp__agentra_brain__{t.name}" for t in tools]
 
     prompt = f"Business objective: {objective}\n"
     if feature:
@@ -508,13 +508,13 @@ async def run_autonomous_cycle(
     options = ClaudeAgentOptions(
         cwd=str(repo),
         system_prompt=SYSTEM_PROMPT.format(objective=objective),
-        mcp_servers={"agentos_brain": server},
+        mcp_servers={"agentra_brain": server},
         allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
         max_turns=max_turns,
     )
 
-    print(f"[agentos] run {run_id} starting | objective={objective!r}", flush=True)
+    print(f"[agentra] run {run_id} starting | objective={objective!r}", flush=True)
     final_text = ""
     try:
         async for message in query(prompt=single_prompt_stream(prompt), options=options):
@@ -547,7 +547,7 @@ async def run_autonomous_cycle(
             session.note(f"persist_audit_trail: failed: {persist_error}")
 
     session.note("autonomous cycle complete")
-    print(f"[agentos] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
+    print(f"[agentra] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
 
     return AutonomousCycleReport(
         run_id=run_id, actions=session.actions, final_message=final_text, cost_usd=session.cost_usd
