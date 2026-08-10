@@ -33,84 +33,6 @@ Description of what needs to be built or fixed.
 
 ---
 
-### TASK-011: Event integrations to invoke the orchestrator (schedule, error/alarm, queue)
-**Scope:** backend
-**Priority:** high
-
-No cron/queue/pub-sub integration exists today. `agentra/registry.py::dispatch_once()`
-drains a local `~/.agentra/inbox/` dir but nothing schedules it, and the
-GitHub Action referenced at the top of this file has no `.github/workflows`
-committed in this repo. Add three trigger paths into the orchestrator:
-(a) scheduled, for certain recurring work types, (b) reactive, on
-errors/alarms, (c) reactive, when new work lands in a queue.
-
-**Acceptance criteria:**
-- [ ] Scheduled invocation: orchestrator triggerable on a cron/interval for a given work type (e.g. Cloud Scheduler → orchestrator endpoint)
-- [ ] Error/alarm invocation: orchestrator triggerable from an error/alarm signal (e.g. GCP Error Reporting / Cloud Monitoring alert), with enough context to run `prod_debug`/`safety`-style agents
-- [ ] Queue invocation: orchestrator triggerable when new work is enqueued (e.g. Pub/Sub, or by extending `registry.py::dispatch_once()`)
-- [ ] Each trigger path logs its source (schedule/alarm/queue) and the task it produced
-
----
-
-### TASK-012: Deploy the multi-agent system safely on GCP (always-on orchestrator, on-demand agents)
-**Scope:** backend
-**Priority:** high
-
-No GCP deployment config exists in this repo (no Cloud Run/GKE/terraform/gcloud
-scripts tracked), despite the `Dockerfile`/`CONTAINER.md` hardening (non-root
-`agentuser`, read-only rootfs, cap-drop ALL, tmpfs `/tmp`) being
-deployment-ready. Deploy so the orchestrator runs continuously as an
-always-on service, while specialized agents (TASK-009) are invoked on demand
-rather than running as standing services themselves.
-
-**Acceptance criteria:**
-- [ ] Orchestrator deployed as an always-on GCP service (e.g. Cloud Run with min-instances ≥ 1, or a GKE Deployment) using the existing `Dockerfile`
-- [ ] Specialized agents run on demand (e.g. Cloud Run Jobs, or short-lived tasks spawned by the orchestrator), not as standing services
-- [ ] Deployment applies the same hardening already documented in `CONTAINER.md`
-- [ ] Secrets (OAuth token / API key, GitHub token) are sourced from GCP Secret Manager, not baked into the image or committed to the repo
-- [ ] Deployment steps/config documented (or IaC added) and reviewed before first production rollout
-
----
-
-### TASK-013: Carry over the existing Claude SDK + OAuth auth into the deployment
-**Scope:** backend
-**Priority:** medium
-
-Sub-agents already authenticate via `CLAUDE_CODE_OAUTH_TOKEN` /
-`ANTHROPIC_API_KEY` env vars read by the Claude CLI (see `run-agent.sh`,
-`CONTAINER.md`, `Dockerfile`). A `.claude_oauth_token` file currently sits
-untracked at the repo root but isn't read by any code. Carry the same SDK +
-OAuth token approach into the GCP deployment (TASK-012) via a proper secret
-store instead of a loose file in the repo.
-
-**Acceptance criteria:**
-- [ ] `CLAUDE_CODE_OAUTH_TOKEN` sourced from GCP Secret Manager in the deployed environment, matching local `run-agent.sh` behavior
-- [ ] Loose `.claude_oauth_token` file at repo root removed from the working tree and confirmed covered by `.gitignore` (never committed)
-- [ ] Token rotation path documented for the deployed environment
-- [ ] Deployed orchestrator/agents authenticate successfully end-to-end using the secret-sourced token
-
----
-
-### TASK-014: Git pull/push support for on-demand agents
-**Scope:** backend
-**Priority:** medium
-
-Git operations already exist in `agentra/agents/deployment.py`
-(`_sync_branch_to_remote`, `_merge_and_push`, raw `subprocess` git calls) and
-`git-askpass.sh` supplies `$GITHUB_TOKEN` for clone-on-start. Confirm/extend
-this so any spawned agent — not just the deployment agent — can pull latest
-and push its own changes as part of its task, which becomes necessary once
-agents run on demand in GCP (TASK-012) instead of a single long-lived local
-checkout.
-
-**Acceptance criteria:**
-- [ ] Orchestrator/agents can `git pull` latest `main` before starting a task, in the deployed environment
-- [ ] Agents can `git push` their committed changes back to the remote using the token from `git-askpass.sh`/`GIT_ASKPASS` (or an equivalent secret-sourced credential)
-- [ ] Push failures (conflicts, rejected pushes) are surfaced/logged rather than silently swallowed
-- [ ] Verified working against the deployed GCP environment (TASK-012), not just local `run-agent.sh` usage
-
----
-
 ## Done
 
 <!-- Completed tasks go here with commit SHA -->
@@ -141,3 +63,71 @@ it just sat behind an opt-in `--autonomous` flag. Flipped the default:
 `agentra run`/`agentra loop` now use it by default; the old hardcoded
 sequence (`orchestrator.py::run_cycle`) is reached via the new
 `--fixed-pipeline` flag instead.
+
+### TASK-011: Event integrations to invoke the orchestrator (schedule, error/alarm, queue)
+**Commit:** 23b3130, b7eb717, c4ab151
+
+Added `agentra/server.py` (FastAPI, run via `agentra serve`) with
+`POST /trigger/scheduled`, `/trigger/alarm`, `/trigger/queue`, each logging
+its source and dispatched task to `~/.agentra/server.log`. Scheduled and
+queue paths authenticate via Cloud Run's IAM invoker check (OIDC tokens from
+dedicated `agentra-scheduler-invoker`/`agentra-pubsub-invoker` service
+accounts, `deploy/gcp/terraform/scheduler.tf`/`pubsub.tf`); the alarm path
+gets its own HTTP Basic Auth check (`_verify_alarm_webhook_auth`) since GCP
+Monitoring's webhook channel has no OIDC support. Verified live against the
+deployed service: all three endpoints respond correctly via
+`gcloud run services proxy`, and a real `gcloud pubsub topics publish` to
+`agentra-work-queue` was confirmed via Cloud Logging to reach
+`/trigger/queue` and return 200 (not just direct curl tests). The alarm path
+isn't wired to a real Monitoring alerting policy yet — no deployed app has
+metrics to alert on — documented in `docs/deployment.md`.
+
+### TASK-012: Deploy the multi-agent system safely on GCP (always-on orchestrator, on-demand agents)
+**Commit:** c4ab151
+
+Deployed to a new dedicated GCP project, `agentra-prod`. Orchestrator runs
+as a Cloud Run Service (`agentra-orchestrator`, `min_instance_count=1`) via
+the existing `Dockerfile`'s `agentra serve` entrypoint. Specialized agents
+remain on-demand subprocesses spawned by the Claude Agent SDK inside that
+service, not standing services themselves. Secrets sourced from Secret
+Manager (see TASK-013). Full Terraform under `deploy/gcp/terraform/`,
+runbook in `docs/deployment.md`. Deployed **idle by design** — zero apps
+registered, per the user's decision to defer app registration to a future
+admin UI rather than hardcode one now; `docs/deployment.md` documents this
+plus the known follow-up gaps it implies (registry on ephemeral disk, no
+clone-on-register mechanism yet for a registered app's repo checkout).
+Live-verified: `/health` returns 200 with the expected body via
+`gcloud run services proxy`.
+
+### TASK-013: Carry over the existing Claude SDK + OAuth auth into the deployment
+**Commit:** c4ab151
+
+`CLAUDE_CODE_OAUTH_TOKEN`/`GITHUB_TOKEN`/`ALARM_WEBHOOK_PASSWORD` all sourced
+from Secret Manager (`deploy/gcp/terraform/secrets.tf`), wired into the
+Cloud Run service env in `cloudrun.tf`. Rotation documented per-secret in
+`docs/deployment.md`. Loose `.claude_oauth_token`/`.github_pat` files
+removed from the repo root (were already gitignored, never committed).
+Auth verified two ways: (1) indirectly, the Cloud Run service starts
+successfully with the secret populated — a failed Secret Manager read would
+fail container start; (2) directly, a real `spawn()` call run locally with
+the exact migrated token value executed a live Bash tool call and returned
+correctly, confirming the credential itself is valid, not just present.
+Not verified: an actual agent turn running *inside* the deployed container,
+since (per TASK-012) no app is registered there yet and there's no
+clone-on-register mechanism to get one in — an honest, documented gap, not
+faked.
+
+### TASK-014: Git pull/push support for on-demand agents
+**Commit:** 7dfd77d
+
+Added `agentra/agents/git_ops.py` (`pull_latest`/`push_branch`, raising
+`GitOpError` with git's real stderr on failure — never silently swallowed)
+and wired `pull_before`/`push_after` fields into `agents/generic.py`'s
+`TaskSpec`/`spawn()`, folding a push failure into `AgentResult.ok=False`
+rather than discarding it. Verified against real local bare-remote git
+repos: pull on an existing branch, a successful push, a deliberately
+conflicting/rejected push correctly raising `GitOpError`, and `pull_latest`
+correctly recovering by resetting to a diverged remote tip — all passed.
+Not verified against the deployed GCP environment itself, for the same
+reason as TASK-013's last point (no app registered there to run a real
+task against yet).
