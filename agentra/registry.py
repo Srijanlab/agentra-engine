@@ -37,6 +37,15 @@ AGENTRA_HOME = Path(_env_value) if _env_value else Path.home() / ".agentra"
 APPS_PATH = AGENTRA_HOME / "apps.json"
 INBOX_ROOT = AGENTRA_HOME / "inbox"
 
+# TASK-016/018: where server.py's clone-on-register path checks a newly
+# registered GitHub repo out to. Separate from AGENTRA_HOME (not
+# AGENTRA_HOME/repos) so a deployment can put registry bookkeeping and repo
+# checkouts on different volumes if it ever needs to -- deploy/gcp sets both
+# to paths under the same GCS FUSE mount (storage.tf/cloudrun.tf), but
+# nothing here assumes that.
+_repos_env_value = os.environ.get("AGENTRA_REPOS_ROOT")
+REPOS_ROOT = Path(_repos_env_value) if _repos_env_value else AGENTRA_HOME / "repos"
+
 # A request left in processing/ longer than this is assumed to be from a crashed
 # dispatch run, not one that's genuinely still in flight (processing itself is a
 # fast, in-process JSON merge -- see dispatch_once -- so a real in-progress case

@@ -22,13 +22,12 @@
 # a stronger isolation boundary than those docker-run flags approximate
 # locally. Not attempting to replicate flag-for-flag here for that reason.
 #
-# Known limitation, not solved here: /home/agentuser/.agentra (the
-# multi-app registry + inbox) is on the container's ephemeral local disk --
-# it does not survive an instance restart. Deployed idle (no apps
-# registered) this doesn't matter yet; once real app registration exists
-# (planned: an admin UI, not part of this task queue), that registry needs
-# to move to something durable (Firestore, or a Filestore/GCS FUSE mount)
-# before it's relied upon in practice.
+# TASK-018: /home/agentuser/.agentra (the multi-app registry + inbox) and
+# every registered app's repo checkout now live on a GCS FUSE volume mount
+# (storage.tf's agentra_data bucket, mounted at /data below) instead of the
+# container's ephemeral local disk -- both survive an instance restart.
+# AGENTRA_HOME points registry.py at the mount; server.py's clone-on-register
+# path (TASK-016) checks repos out under the same mount for the same reason.
 
 resource "google_cloud_run_v2_service" "agentra" {
   name     = "agentra-orchestrator"
@@ -38,6 +37,17 @@ resource "google_cloud_run_v2_service" "agentra" {
   deletion_protection = false
 
   template {
+    # GCS FUSE volume mounts require the gen2 execution environment.
+    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+
+    volumes {
+      name = "agentra-data"
+      gcs {
+        bucket    = google_storage_bucket.agentra_data.name
+        read_only = false
+      }
+    }
+
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.agentra.repository_id}/agentra:${var.image_tag}"
       args  = ["serve"]
@@ -46,6 +56,20 @@ resource "google_cloud_run_v2_service" "agentra" {
         container_port = 8080
       }
 
+      volume_mounts {
+        name       = "agentra-data"
+        mount_path = "/data"
+      }
+
+      env {
+        name  = "AGENTRA_HOME"
+        value = "/data/home"
+      }
+      env {
+        # server.py's clone-on-register path (TASK-016) checks repos out here.
+        name  = "AGENTRA_REPOS_ROOT"
+        value = "/data/repos"
+      }
       env {
         name = "CLAUDE_CODE_OAUTH_TOKEN"
         value_source {
