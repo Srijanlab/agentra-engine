@@ -1,0 +1,9 @@
+local_branch: dev
+pre_prod_branch: beta
+prod_branch: main
+vercel: false
+firebase: false
+firebase_pre_prod_alias: beta
+firebase_prod_alias: default
+ci_cd_on_push: false
+auto_remediate_prod: false
