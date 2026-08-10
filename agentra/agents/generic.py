@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentra.agents.base import AgentResult, run_agent
+from agentra.agents.git_ops import GitOpError, pull_latest, push_branch
 from agentra.memory import Memory
 
 
@@ -45,6 +46,15 @@ class TaskSpec:
     # narrowly-scoped call — never a general-purpose spawn path. A caller that
     # genuinely needs prod access should use that path, not this one.
     retry_on_contradictory_result: bool = True
+    # TASK-014: deterministic git plumbing, matching implementation.py's own
+    # "don't trust an LLM system prompt to remember this" philosophy (see
+    # git_ops.py's module docstring). pull_before is a branch name to
+    # fetch+hard-reset to before the agent turn starts; push_after is a
+    # branch name to push after it ends (only if the agent turn itself
+    # succeeded — a failed task's commits, if any, stay local for
+    # inspection rather than being pushed automatically).
+    pull_before: str | None = None
+    push_after: str | None = None
 
 
 async def spawn(repo: Path, spec: TaskSpec, mem: Memory | None = None, run_id: str | None = None) -> AgentResult:
@@ -63,6 +73,14 @@ async def spawn(repo: Path, spec: TaskSpec, mem: Memory | None = None, run_id: s
 
         run_id = uuid.uuid4().hex[:8]
 
+    if spec.pull_before:
+        try:
+            pull_latest(repo, spec.pull_before)
+            mem.log(run_id, f"spawn[{spec.name}]: pulled latest {spec.pull_before!r}")
+        except GitOpError as exc:
+            mem.log(run_id, f"spawn[{spec.name}]: {exc}")
+            return AgentResult(ok=False, text=str(exc), json_data=None, cost_usd=0.0, turns=0)
+
     mem.log(run_id, f"spawn[{spec.name}]: starting | tools={spec.allowed_tools} permission_mode={spec.permission_mode!r}")
     result = await run_agent(
         prompt=spec.prompt,
@@ -75,4 +93,17 @@ async def spawn(repo: Path, spec: TaskSpec, mem: Memory | None = None, run_id: s
         retry_on_contradictory_result=spec.retry_on_contradictory_result,
     )
     mem.log(run_id, f"spawn[{spec.name}]: ok={result.ok} turns={result.turns} cost=${result.cost_usd:.4f}")
+
+    if spec.push_after and result.ok:
+        try:
+            push_branch(repo, spec.push_after)
+            mem.log(run_id, f"spawn[{spec.name}]: pushed {spec.push_after!r}")
+        except GitOpError as exc:
+            # The agent turn itself succeeded -- don't discard that outcome,
+            # but the push failure is real and must not be swallowed: fold it
+            # into the result so the caller sees ok=False and why.
+            mem.log(run_id, f"spawn[{spec.name}]: {exc}")
+            result.ok = False
+            result.text += f"\n\n[agentra] {exc}"
+
     return result
