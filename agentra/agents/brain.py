@@ -70,6 +70,15 @@ class OrchestratorSession:
     # this same session resets to None) -- once true, a merge+push to pre-prod already
     # durably happened and should be persisted regardless of what happens afterward.
     deployed_to_pre_prod: bool = False
+    # True once deployment.deploy_pre_prod() was actually called, regardless
+    # of whether it succeeded -- distinct from deployed_to_pre_prod above.
+    # HEAD is guaranteed to be on pre_prod_branch by then either way (see
+    # that call site), which is what makes persisting the audit trail safe
+    # even after a failed deploy. Without this, a failed cycle's entire
+    # decisions/failures record stayed on the container's ephemeral disk
+    # only -- confirmed live, a real failed cycle's audit trail never made
+    # it past that.
+    deploy_attempted: bool = False
     pre_prod_verified: bool = False
     current_feature: str | None = None
     # Set on the first implement_feature call and reused for every later call in this
@@ -339,6 +348,13 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "is_error": True,
             }
         deploy = await deployment.deploy_pre_prod(session.repo, session.env, session.feature_branch)
+        # deployment.deploy_pre_prod's first action is always
+        # _sync_branch_to_remote(repo, pre_prod_branch) -- by the time this
+        # call returns, success or failure, HEAD is guaranteed to be on
+        # pre_prod_branch (a merge failure aborts back onto it, never
+        # leaves HEAD on the feature branch). That's what makes it safe to
+        # persist the audit trail below regardless of deploy outcome.
+        session.deploy_attempted = True
         session.cost_usd += deploy.cost_usd
         ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         session.pre_prod_url = (deploy.json_data or {}).get("preview_url") if ok else None
@@ -585,10 +601,14 @@ async def run_autonomous_cycle(
         + f"\n\nFinal message:\n{final_text}\n",
     )
 
-    if session.deployed_to_pre_prod:
-        # Only meaningful once merged onto a durable, shared branch (pre-prod) -- must come
-        # after every mem.write above so feedback/decisions ride along too, not just
-        # shipped.json. See deployment.persist_audit_trail's docstring for why this exists.
+    if session.deployed_to_pre_prod or session.deploy_attempted:
+        # Persist regardless of whether the deploy itself succeeded -- a
+        # failed cycle's decisions/failures record is at least as valuable
+        # as a successful one's (arguably more, for debugging next time),
+        # and deploy_attempted (unlike deployed_to_pre_prod) is true either
+        # way. Must come after every mem.write above so feedback/decisions
+        # ride along too, not just shipped.json. See
+        # deployment.persist_audit_trail's docstring for why this exists.
         persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
         if persist_error:
             session.note(f"persist_audit_trail: failed: {persist_error}")
