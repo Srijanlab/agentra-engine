@@ -1,7 +1,1 @@
-[
-  {
-    "description": "registry.get_app_repo() only re-clones when the local checkout path is entirely missing -- it never refreshes an EXISTING stale checkout to match the remote. This means an externally-made .agentra/ change (objective.yaml edit via dashboard, a manual fix) has no effect until something else happens to force a resync. Add a lightweight staleness check (e.g. compare remote HEAD sha) before reading objective/environment on each trigger.",
-    "source": "customer",
-    "external_id": "3d51744a1609"
-  }
-]
+[]
