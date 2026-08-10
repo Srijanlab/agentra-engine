@@ -106,6 +106,13 @@ DASHBOARD_HTML = """\
   .badge.running, .badge.queued { background: rgba(227,179,65,0.15); color: var(--warn); }
   #msg { font-size: 12px; color: var(--muted); min-height: 16px; margin-top: 8px; }
   code { color: var(--accent); }
+  .standup-entry { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .standup-entry:last-child { border-bottom: none; }
+  .standup-entry .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .standup-entry .head strong { font-size: 13px; }
+  .standup-entry .date { color: var(--muted); font-size: 11px; }
+  .standup-entry .body { white-space: pre-wrap; font-size: 13px; color: var(--text); }
+  .standup-entry .body.none { color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
@@ -154,6 +161,12 @@ DASHBOARD_HTML = """\
       <tbody></tbody>
     </table>
     <div class="empty" id="apps-empty" style="display:none;">No apps registered yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Daily standup</h2>
+    <div id="standup-list"></div>
+    <div class="empty" id="standup-empty" style="display:none;">No apps registered yet.</div>
   </div>
 
   <div class="panel">
@@ -219,6 +232,28 @@ async function refreshApps() {
   `).join("");
 }
 
+async function refreshStandups() {
+  const appsData = await jsonFetch("/apps");
+  const names = Object.keys(appsData.apps);
+  $("#standup-empty").style.display = names.length ? "none" : "block";
+  const entries = await Promise.all(names.map(async (name) => {
+    const data = await jsonFetch(`/apps/${encodeURIComponent(name)}/standup/latest`).catch(() => ({standup: null}));
+    return { name, standup: data.standup };
+  }));
+  $("#standup-list").innerHTML = entries.map(({name, standup}) => `
+    <div class="standup-entry">
+      <div class="head">
+        <strong>${esc(name)}</strong>
+        <span>
+          <span class="date">${standup ? esc(standup.date) : "no standup yet"}</span>
+          <button class="ghost standup-now" data-app="${esc(name)}" style="margin-left:8px;">Generate now</button>
+        </span>
+      </div>
+      <div class="body ${standup ? "" : "none"}">${standup ? esc(standup.content) : "No standup generated for this project yet."}</div>
+    </div>
+  `).join("");
+}
+
 async function refreshRuns() {
   const data = await jsonFetch("/runs");
   $("#runs-empty").style.display = data.runs.length ? "none" : "block";
@@ -246,7 +281,7 @@ async function refreshSignals() {
 }
 
 async function refreshAll() {
-  await Promise.all([refreshStatus(), refreshApps(), refreshRuns(), refreshSignals()]).catch(() => {});
+  await Promise.all([refreshStatus(), refreshApps(), refreshStandups(), refreshRuns(), refreshSignals()]).catch(() => {});
 }
 
 $("#pause-btn").addEventListener("click", async () => {
@@ -279,16 +314,26 @@ $("#register-form").addEventListener("submit", async (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  if (!e.target.classList.contains("run-now")) return;
-  const appName = e.target.dataset.app;
-  e.target.disabled = true;
-  e.target.textContent = "Starting…";
-  try {
-    await jsonFetch(`/apps/${encodeURIComponent(appName)}/run`, { method: "POST" });
-  } finally {
-    e.target.disabled = false;
-    e.target.textContent = "Run now";
-    refreshRuns();
+  if (e.target.classList.contains("run-now")) {
+    const appName = e.target.dataset.app;
+    e.target.disabled = true;
+    e.target.textContent = "Starting…";
+    try {
+      await jsonFetch(`/apps/${encodeURIComponent(appName)}/run`, { method: "POST" });
+    } finally {
+      e.target.disabled = false;
+      e.target.textContent = "Run now";
+      refreshRuns();
+    }
+  } else if (e.target.classList.contains("standup-now")) {
+    const appName = e.target.dataset.app;
+    e.target.disabled = true;
+    e.target.textContent = "Generating…";
+    try {
+      await jsonFetch(`/apps/${encodeURIComponent(appName)}/standup`, { method: "POST" });
+    } finally {
+      refreshStandups();
+    }
   }
 });
 

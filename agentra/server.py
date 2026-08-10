@@ -48,6 +48,7 @@ from agentra.agents.brain import run_autonomous_cycle
 from agentra.dashboard import DASHBOARD_HTML
 from agentra.memory import Memory
 from agentra.orchestrator import run_prod_debug_cycle
+from agentra.standup import run_daily_standup, run_standup
 
 logger = logging.getLogger("agentra.server")
 
@@ -225,6 +226,56 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
     _server_log("register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}")
     return {"registered": True, "name": payload.name, "repo_path": str(dest)}
+
+
+# ── Standups: TASK-019. Cheap enough (no tools, one short LLM call) to run
+# synchronously from an HTTP handler, unlike a full autonomous cycle. ──────
+
+
+@app.get("/apps/{app_name}/standup/latest")
+async def get_latest_standup(app_name: str) -> dict:
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+    latest = Memory(repo).latest_standup()
+    if latest is None:
+        return {"app": app_name, "standup": None}
+    return {"app": app_name, "standup": latest}
+
+
+@app.post("/apps/{app_name}/standup")
+async def trigger_app_standup(app_name: str) -> dict:
+    if registry.is_paused():
+        _server_log("standup", f"app={app_name!r} system is paused -- no-op")
+        return {"triggered": False, "reason": "system is paused"}
+
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+
+    report = await run_standup(repo, app_name)
+    _server_log("standup", f"app={app_name!r} generated")
+    return {"app": app_name, "report": report}
+
+
+@app.post("/standup/daily")
+async def trigger_daily_standup() -> dict:
+    """The orchestrator's side of the daily standup: run every registered
+    app's standup and return the batch. Meant to sit behind Cloud
+    Scheduler (scheduler.tf's agentra-daily-standup job), same pattern as
+    /trigger/scheduled."""
+    if registry.is_paused():
+        _server_log("standup", "system is paused -- no-op")
+        return {"triggered": False, "reason": "system is paused"}
+
+    apps = registry.list_apps()
+    if not apps:
+        _server_log("standup", "no apps registered -- no-op")
+        return {"triggered": False, "reason": "no apps registered"}
+
+    reports = await run_daily_standup(apps)
+    _server_log("standup", f"daily standup generated for {list(reports.keys())}")
+    return {"triggered": True, "reports": reports}
 
 
 async def _run_autonomous_background(

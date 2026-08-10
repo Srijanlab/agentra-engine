@@ -11,24 +11,23 @@ itself (`agents/base.py::run_agent`), the same as every other entry point in
 this codebase. "On demand, not a standing service" was already true of that
 architecture before this deployment existed.
 
-## Current state: deployed idle
+## Current state: deployed idle, dashboard live
 
-This deployment intentionally has **zero apps registered**
-(`agentra apps list` is empty). It's live and reachable, but there is
-nothing for it to act on. Real app registration is planned via an admin UI
-(not part of this repo yet) — until that exists, register one manually with
-`agentra apps add <name> --repo <path>` against the running instance, or via
-`gcloud run services proxy` / a one-off exec.
+This deployment intentionally has **zero apps registered** as shipped, but
+registering one is now a normal, supported action — visit the orchestrator
+URL in a browser (the dashboard, TASK-015, is served from `GET /`) and use
+the "Register a repo" form, or `POST /apps` directly, to add one. Real admin
+auth for that UI is still future work (not part of this repo yet); today
+anyone who can reach the URL can register/run apps, same trust boundary as
+every other trigger endpoint.
 
-Known limitation this implies: the multi-app registry
-(`~/.agentra/apps.json`, `agentra/registry.py`) lives on the Cloud Run
-instance's ephemeral local disk — it does not survive an instance restart.
-Fine while idle; needs a durable backing store (Firestore, or a
-Filestore/GCS FUSE mount) before it's relied on for a real registered app.
-Likewise, a registered app's own repo checkout would need to live on that
-same ephemeral disk (cloned on first use, mirroring `docker-entrypoint.sh`'s
-existing "server / clone-on-start" mode) — not yet wired up for the
-multi-app case, only for the original single-repo container mode.
+The multi-app registry (`~/.agentra/apps.json`, `agentra/registry.py`) and
+every registered app's own repo checkout live on a GCS FUSE volume mount
+(TASK-018, `deploy/gcp/terraform/storage.tf`/`cloudrun.tf`) at `/data` inside
+the container, not the ephemeral local disk — both survive an instance
+restart/redeploy. `AGENTRA_HOME=/data/home` and `AGENTRA_REPOS_ROOT=/data/repos`
+are the two env vars that make this durable in the deployed environment;
+locally (no such mount) both default to paths under `~/.agentra`.
 
 ## One-time setup
 
@@ -172,3 +171,48 @@ gcloud pubsub topics publish agentra-work-queue --project=agentra-prod \
 This is live and fully working today — verified end-to-end locally (see the
 commit history) — it just has nothing to route to until an app is
 registered.
+
+## Dashboard and app registration (TASK-015/016)
+
+`GET /` serves a self-contained dashboard: system status (with pause/resume,
+see below), a form to register any GitHub repo by URL, the registered-apps
+list with a "Run now" button, the standup panel (see below), recent runs,
+and recent signals. Backed by JSON APIs that are just as usable directly:
+
+- `POST /apps` — `{"name", "repo_url", "branch": "main", "objective": null}`.
+  Clones server-side (same `GIT_ASKPASS`/`GITHUB_TOKEN` credential as
+  TASK-014's pull/push) under `AGENTRA_REPOS_ROOT`, registers it.
+- `GET /apps` — registry, plus each app's objective/shipped/known-bug counts.
+- `POST /apps/{name}/run` — on-demand equivalent of `/trigger/scheduled`.
+- `GET /runs`, `GET /signals` — feed the dashboard's activity tables.
+
+No auth on any of this yet beyond Cloud Run's IAM invoker check on the
+service as a whole — anyone who can reach the URL can register/run apps.
+Fine for the current single-operator deployment; needs real auth before
+this is opened up to a team.
+
+## Kill switch (TASK-017)
+
+`POST /system/pause` (optional `{"reason": "..."}`) / `POST /system/resume`
+/ `GET /system/status`. The pause state is a durable marker file
+(`registry.PAUSE_PATH`, under `AGENTRA_HOME` — on the same GCS mount as the
+registry, TASK-018) checked at the top of every trigger path: scheduled,
+alarm, queue, and the on-demand `/apps/{name}/run`. While paused, each
+returns a clean no-op (`{"triggered": false, "reason": "system is paused"}`)
+instead of starting new agent work. Survives a restart.
+
+## Daily standup (TASK-019)
+
+For each registered app, `POST /standup/daily` (behind the paused
+`agentra-daily-standup` Scheduler job, `0 8 * * *` UTC — resume it the same
+way as `agentra-daily-cycle` once an app exists, no per-app body needed
+since it iterates the whole registry) generates a short "Yesterday" /
+"Today" report and persists it to that app's own
+`.agentra/standups/<date>.md`. Grounded only in that project's real data:
+"yesterday" comes from timestamped `.agentra/logs/*.log` lines in the last
+24h, "today" from the actual open `known_bugs`/`feature_queue`/objective —
+the model is explicitly instructed not to invent activity or plans beyond
+what it's given, and an empty project gets a plain "no activity / no
+backlog" report with no LLM call at all. `POST /apps/{name}/standup` runs
+one app's standup on demand; `GET /apps/{name}/standup/latest` (and the
+dashboard's standup panel) reads the most recent one back.

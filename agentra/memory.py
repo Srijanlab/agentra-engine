@@ -76,6 +76,7 @@ class Memory:
         self.feature_queue_path = self.root / "feature_queue.json"
         self.objective_path = self.root / "objective.yaml"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
+        self.standups_root = self.root / "standups"
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -229,3 +230,49 @@ class Memory:
 
     def update_feedback_sync_state(self, last_synced_at: str) -> None:
         self.feedback_sync_state_path.write_text(json.dumps({"last_synced_at": last_synced_at}, indent=2))
+
+    # ── Standups: TASK-019. "Yesterday" comes from these -- the one place in
+    # .agentra/ with real per-event timestamps (shipped/known_bugs/feature_queue
+    # are point-in-time snapshots, not event logs). "Today" is just the current
+    # backlog (known_bugs/feature_queue/objective), read directly by the caller. ──
+
+    def recent_log_lines(self, since: dt.datetime) -> list[str]:
+        """Every timestamped line across all run logs at or after `since`,
+        oldest first. The run logs are the only append-only, per-event
+        record in .agentra/ -- shipped_features()/known_bugs() are current
+        snapshots with no history of *when* an entry was added."""
+        lines: list[str] = []
+        if not self.log_root.is_dir():
+            return lines
+        for path in self.log_root.glob("*.log"):
+            for raw_line in path.read_text().splitlines():
+                if not raw_line.startswith("["):
+                    continue
+                ts_str, _, rest = raw_line[1:].partition("] ")
+                try:
+                    ts = dt.datetime.fromisoformat(ts_str)
+                except ValueError:
+                    continue
+                if ts >= since:
+                    lines.append(f"[{ts.isoformat()}] {rest}")
+        lines.sort()
+        return lines
+
+    def record_standup(self, date_str: str, content: str) -> Path:
+        self.standups_root.mkdir(parents=True, exist_ok=True)
+        path = self.standups_root / f"{date_str}.md"
+        path.write_text(content)
+        return path
+
+    def get_standup(self, date_str: str) -> str | None:
+        path = self.standups_root / f"{date_str}.md"
+        return path.read_text() if path.exists() else None
+
+    def latest_standup(self) -> dict | None:
+        if not self.standups_root.is_dir():
+            return None
+        dated = sorted(self.standups_root.glob("*.md"), key=lambda p: p.stem)
+        if not dated:
+            return None
+        latest = dated[-1]
+        return {"date": latest.stem, "content": latest.read_text()}
