@@ -204,6 +204,9 @@ def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
     unreachable, auth failure, local checkout in a weird state) is logged
     and swallowed so a trigger always falls back to using whatever checkout
     is already on disk rather than crashing."""
+    if not (repo / ".git").exists():
+        logger.info("get_app_repo: %s is not a git checkout, skipping remote resync", repo)
+        return
     try:
         remote_sha = _remote_head_sha(repo_url, branch)
         if remote_sha is None:
@@ -700,3 +703,16 @@ def list_loops(app: str) -> list[dict]:
 
     result.sort(key=lambda l: l["started_at"], reverse=True)
     return result
+
+
+def last_run_at(app: str, source: str | None = None) -> float | None:
+    """Most recent started_at for `app` (optionally filtered to one
+    trigger source), or None if it's never run. Backs the per-app
+    schedule_hours check in server.py's /trigger/scheduled -- one Cloud
+    Scheduler cron tick can serve every app on its own configured cadence
+    by asking "was the last scheduled run recently enough" instead of
+    needing a real GCP Scheduler job per app."""
+    matches = [r for r in list_runs(limit=200) if r.get("app") == app and (source is None or r.get("source") == source)]
+    if not matches:
+        return None
+    return max(r["started_at"] for r in matches)

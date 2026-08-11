@@ -34,21 +34,23 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agentra import environments, registry
+from agentra.agents import deployment
 from agentra.agents.brain import run_autonomous_cycle
 from agentra.connectors import github_app
 from agentra.memory import Memory
-from agentra.orchestrator import run_prod_debug_cycle
+from agentra.orchestrator import run_prod_debug_cycle, run_promote
 from agentra.standup import run_daily_standup, run_standup
 
 logger = logging.getLogger("agentra.server")
@@ -119,6 +121,53 @@ def _server_log(source: str, message: str) -> None:
     logger.info("source=%s %s", source, message)
 
 
+def _branch_head_sha(repo: Path, branch: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", branch],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def _record_production_release(repo: Path, run_id: str) -> list[str]:
+    env = environments.load(repo) or environments.EnvironmentConfig()
+    mem = Memory(repo)
+    released = {feature["feature"] for feature in mem.released_features()}
+    prod_sha = _branch_head_sha(repo, env.prod_branch)
+    newly_released: list[str] = []
+
+    for feature in mem.shipped_features():
+        name = feature["feature"]
+        if name in released:
+            continue
+        mem.record_released(name, release_run_id=run_id, commit_sha=prod_sha or feature.get("commit_sha"))
+        newly_released.append(name)
+
+    if newly_released:
+        persist_error = deployment.persist_audit_trail(repo, env.prod_branch)
+        if persist_error:
+            _server_log("promote", f"release ledger persisted locally but push failed: {persist_error}")
+    return newly_released
+
+
+def _run_log_path(run_key: str) -> Path | None:
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
+    if run is None:
+        return None
+    repo = registry.get_app_repo(run["app"])
+    if repo is None:
+        return None
+    return Memory(repo).log_root / f"{run_key}.log"
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "apps_registered": len(registry.list_apps())}
@@ -168,6 +217,43 @@ async def get_run(run_key: str) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run_key")
     return run
+
+
+@app.get("/runs/{run_key}/logs")
+async def stream_run_logs(run_key: str) -> StreamingResponse:
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run_key")
+
+    log_path = _run_log_path(run_key)
+    if log_path is None:
+        raise HTTPException(status_code=409, detail="local checkout for this run is missing and could not be recovered")
+
+    async def event_stream():
+        offset = 0
+        terminal_cycles = 0
+        while True:
+            if log_path.exists():
+                lines = log_path.read_text().splitlines()
+                for line in lines[offset:]:
+                    yield f"data: {json.dumps({'line': line})}\n\n"
+                offset = len(lines)
+            current = _active_runs.get(run_key) or registry.get_run(run_key)
+            terminal = current is not None and current.get("status") in {"completed", "failed"}
+            if terminal:
+                terminal_cycles += 1
+                if terminal_cycles >= 2:
+                    yield "event: done\ndata: {}\n\n"
+                    break
+            else:
+                terminal_cycles = 0
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/runs")
@@ -300,6 +386,8 @@ class RegisterAppRequest(BaseModel):
     ci_cd_on_push: bool | None = None
     pre_prod_branch: str | None = None
     prod_branch: str | None = None
+    schedule_hours: float | None = None
+    alarm_enabled: bool | None = None
     # Free-form context agents should have on hand -- saved as Memory
     # "architecture" entries (the category meant for exactly this: standing
     # context an agent reads at the start of a cycle, not per-run data).
@@ -329,11 +417,17 @@ async def list_apps() -> dict:
     for name, info in apps.items():
         repo = Path(info["repo_path"])
         mem = Memory(repo) if repo.exists() else None
+        env_config = environments.load(repo) if repo.exists() else None
         result[name] = {
             "repo_path": info["repo_path"],
             "objective": mem.get_objective() if mem else None,
             "shipped_count": len(mem.shipped_features()) if mem else 0,
+            "released_count": len(mem.released_features()) if mem else 0,
             "known_bugs": len(mem.known_bugs()) if mem else 0,
+            "pre_prod_branch": env_config.pre_prod_branch if env_config else environments.EnvironmentConfig().pre_prod_branch,
+            "prod_branch": env_config.prod_branch if env_config else environments.EnvironmentConfig().prod_branch,
+            "schedule_hours": env_config.schedule_hours if env_config else environments.EnvironmentConfig().schedule_hours,
+            "alarm_enabled": env_config.alarm_enabled if env_config else environments.EnvironmentConfig().alarm_enabled,
         }
     return {"apps": result}
 
@@ -348,6 +442,8 @@ def _apply_app_config(
     ci_cd_on_push: bool | None,
     pre_prod_branch: str | None,
     prod_branch: str | None,
+    schedule_hours: float | None,
+    alarm_enabled: bool | None,
     documentation_notes: str | None,
     testing_notes: str | None,
     detect_defaults: bool,
@@ -371,6 +467,8 @@ def _apply_app_config(
         ("ci_cd_on_push", ci_cd_on_push),
         ("pre_prod_branch", pre_prod_branch),
         ("prod_branch", prod_branch),
+        ("schedule_hours", schedule_hours),
+        ("alarm_enabled", alarm_enabled),
     ):
         if value is not None:
             setattr(env_config, field, value)
@@ -423,6 +521,8 @@ async def register_app(payload: RegisterAppRequest) -> dict:
         ci_cd_on_push=payload.ci_cd_on_push,
         pre_prod_branch=payload.pre_prod_branch,
         prod_branch=payload.prod_branch,
+        schedule_hours=payload.schedule_hours,
+        alarm_enabled=payload.alarm_enabled,
         documentation_notes=payload.documentation_notes,
         testing_notes=payload.testing_notes,
         detect_defaults=True,
@@ -461,8 +561,10 @@ async def get_app(name: str) -> dict:
         "branch": info.get("branch"),
         "objective": mem.get_objective(),
         "shipped_count": len(mem.shipped_features()),
+        "released_count": len(mem.released_features()),
         "known_bugs": len(mem.known_bugs()),
         "shipped": mem.shipped_features(),
+        "released": mem.released_features(),
         "bugs": mem.known_bugs(),
         "feature_queue": mem.feature_queue(),
         "vercel": env_config.vercel,
@@ -470,6 +572,8 @@ async def get_app(name: str) -> dict:
         "ci_cd_on_push": env_config.ci_cd_on_push,
         "pre_prod_branch": env_config.pre_prod_branch,
         "prod_branch": env_config.prod_branch,
+        "schedule_hours": env_config.schedule_hours,
+        "alarm_enabled": env_config.alarm_enabled,
         "documentation_notes": mem.read("architecture", "documentation"),
         "testing_notes": mem.read("architecture", "testing-notes"),
     }
@@ -482,6 +586,8 @@ class UpdateAppRequest(BaseModel):
     ci_cd_on_push: bool | None = None
     pre_prod_branch: str | None = None
     prod_branch: str | None = None
+    schedule_hours: float | None = None
+    alarm_enabled: bool | None = None
     documentation_notes: str | None = None
     testing_notes: str | None = None
 
@@ -506,6 +612,8 @@ async def update_app(name: str, payload: UpdateAppRequest) -> dict:
         ci_cd_on_push=payload.ci_cd_on_push,
         pre_prod_branch=payload.pre_prod_branch,
         prod_branch=payload.prod_branch,
+        schedule_hours=payload.schedule_hours,
+        alarm_enabled=payload.alarm_enabled,
         documentation_notes=payload.documentation_notes,
         testing_notes=payload.testing_notes,
         detect_defaults=False,
@@ -527,6 +635,45 @@ async def get_app_loops(name: str) -> dict:
     if name not in registry.list_apps():
         raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
     return {"loops": registry.list_loops(name)}
+
+
+class BacklogRequestPayload(BaseModel):
+    type: str = "feature_request"
+    description: str
+    severity: str | None = None
+
+
+@app.post("/apps/{name}/backlog")
+async def submit_backlog_request(name: str, payload: BacklogRequestPayload) -> dict:
+    """Dashboard's "add to backlog" action -- same durable inbox path
+    /trigger/queue uses (registry.submit_request then dispatch_once,
+    cheap/synchronous, no LLM calls), just submitted directly instead of
+    via a Pub/Sub envelope. The request type determines whether it appears
+    in known_bugs or feature_queue immediately, not after the next queue tick."""
+    if payload.type not in {"bug", "feature_request"}:
+        raise HTTPException(status_code=400, detail="type must be 'bug' or 'feature_request'")
+    if payload.type == "bug" and payload.severity not in {"critical", "high", "medium", "low"}:
+        raise HTTPException(status_code=400, detail="bug severity must be critical, high, medium, or low")
+    try:
+        request_id = registry.submit_request(
+            app=name,
+            request_type=payload.type,
+            description=payload.description,
+            severity=payload.severity if payload.type == "bug" else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    registry.dispatch_once()
+    _server_log("queue", f"request_id={request_id} app={name!r} type={payload.type!r} -- submitted from dashboard")
+    return {"submitted": True, "request_id": request_id}
+
+
+@app.post("/apps/{name}/feature-requests")
+async def submit_feature_request(name: str, payload: BacklogRequestPayload) -> dict:
+    """Compatibility endpoint for older dashboard clients."""
+    payload.type = "feature_request"
+    payload.severity = None
+    return await submit_backlog_request(name, payload)
 
 
 # ── Standups: TASK-019. Cheap enough (no tools, one short LLM call) to run
@@ -638,6 +785,35 @@ async def _run_prod_debug_background(
             _server_log("alarm", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
+async def _run_promote_background(run_key: str, app_name: str, repo: Path) -> None:
+    lock = _lock_for(app_name)
+    async with lock:
+        _set_run(run_key, status="running")
+        try:
+            result = await run_promote(repo, run_id=run_key)
+            released_features: list[str] = []
+            if result["ok"]:
+                released_features = _record_production_release(repo, run_key)
+            _set_run(
+                run_key,
+                status="completed" if result["ok"] else "failed",
+                result={
+                    "run_id": result["run_id"],
+                    "promoted": result["ok"],
+                    "released_features": released_features,
+                    "released_count": len(released_features),
+                    "final_message": result["text"][:2000],
+                },
+            )
+            _server_log(
+                "promote",
+                f"app={app_name!r} run_key={run_key} promoted={result['ok']} released={len(released_features)}",
+            )
+        except Exception as exc:
+            _set_run(run_key, status="failed", error=str(exc))
+            _server_log("promote", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
+
+
 def _new_run_key(app_name: str, source: str, objective: str) -> str:
     run_key = uuid.uuid4().hex[:8]
     _active_runs[run_key] = {
@@ -662,40 +838,89 @@ class ScheduledTrigger(BaseModel):
     skip_deploy: bool = False
 
 
-@app.post("/trigger/scheduled")
-async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
+async def _dispatch_cycle(
+    app_name: str, source: str, objective_override: str | None, feature: str | None, skip_deploy: bool, enforce_schedule: bool
+) -> dict:
     if registry.is_paused():
-        return _paused_response("scheduled")
+        return _paused_response(source)
 
-    repo = registry.get_app_repo(payload.app)
+    repo = registry.get_app_repo(app_name)
     if repo is None:
-        _server_log("scheduled", f"app={payload.app!r} not registered -- no-op")
-        return {"triggered": False, "reason": f"app {payload.app!r} not registered"}
+        _server_log(source, f"app={app_name!r} not registered -- no-op")
+        return {"triggered": False, "reason": f"app {app_name!r} not registered"}
 
-    if _lock_for(payload.app).locked():
-        _server_log("scheduled", f"app={payload.app!r} already has a cycle running -- skipped")
+    if _lock_for(app_name).locked():
+        _server_log(source, f"app={app_name!r} already has a cycle running -- skipped")
         return {"triggered": False, "reason": "a cycle for this app is already running"}
 
-    objective = payload.objective or Memory(repo).get_objective()
+    objective = objective_override or Memory(repo).get_objective()
     if not objective:
-        _server_log("scheduled", f"app={payload.app!r} has no objective set -- no-op")
+        _server_log(source, f"app={app_name!r} has no objective set -- no-op")
         return {"triggered": False, "reason": "no objective set for this app"}
 
-    run_key = _new_run_key(payload.app, "scheduled", objective)
-    _server_log("scheduled", f"app={payload.app!r} run_key={run_key} objective={objective!r} -- dispatched")
-    asyncio.create_task(
-        _run_autonomous_background(run_key, payload.app, repo, objective, payload.feature, payload.skip_deploy)
-    )
+    if enforce_schedule:
+        env = environments.load(repo) or environments.EnvironmentConfig()
+        last = registry.last_run_at(app_name, source="scheduled")
+        due_in = None if last is None else env.schedule_hours * 3600 - (time.time() - last)
+        if due_in is not None and due_in > 0:
+            _server_log(source, f"app={app_name!r} not due for {due_in / 3600:.1f}h more (schedule_hours={env.schedule_hours}) -- skipped")
+            return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
+
+    run_key = _new_run_key(app_name, source, objective)
+    _server_log(source, f"app={app_name!r} run_key={run_key} objective={objective!r} -- dispatched")
+    asyncio.create_task(_run_autonomous_background(run_key, app_name, repo, objective, feature, skip_deploy))
     return {"triggered": True, "run_key": run_key}
+
+
+@app.post("/trigger/scheduled")
+async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
+    """Meant to sit behind one Cloud Scheduler cron tick shared by every
+    app (e.g. hourly) -- enforce_schedule=True means each app only
+    actually dispatches once its own configured schedule_hours has
+    elapsed since its last scheduled run, so one tick serves every app on
+    its own cadence without a GCP Scheduler job per app."""
+    return await _dispatch_cycle(
+        payload.app, "scheduled", payload.objective, payload.feature, payload.skip_deploy, enforce_schedule=True
+    )
 
 
 @app.post("/apps/{app_name}/run")
 async def run_app_now(app_name: str, payload: ScheduledTrigger | None = None) -> dict:
     """On-demand equivalent of /trigger/scheduled, for the dashboard's "run
-    now" button -- same dispatch path, just not waiting for a cron tick."""
+    now" button -- same dispatch path, but never schedule-gated (a human
+    explicitly asking for a run now should never be told "not due yet")."""
     body = payload or ScheduledTrigger(app=app_name)
-    body.app = app_name
-    return await trigger_scheduled(body)
+    return await _dispatch_cycle(
+        app_name, "on-demand", body.objective, body.feature, body.skip_deploy, enforce_schedule=False
+    )
+
+
+@app.post("/apps/{app_name}/promote")
+async def promote_app(app_name: str) -> dict:
+    """Dashboard's Promote-to-prod action: merges pre_prod_branch into
+    prod_branch and pushes, via the exact same human-approved
+    orchestrator.run_promote flow `agentra promote` uses -- just
+    triggered from the UI instead of a terminal. There is no dry-run or
+    review step here: clicking Promote IS the approval, and it pushes to
+    prod_branch immediately."""
+    if app_name not in registry.list_apps():
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+    if registry.is_paused():
+        return _paused_response("promote")
+
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=409, detail=f"local checkout for {app_name!r} is missing and could not be recovered")
+
+    if _lock_for(app_name).locked():
+        _server_log("promote", f"app={app_name!r} already has a cycle running -- skipped")
+        return {"triggered": False, "reason": "a cycle for this app is already running"}
+
+    objective = Memory(repo).get_objective() or ""
+    run_key = _new_run_key(app_name, "promote", objective)
+    _server_log("promote", f"app={app_name!r} run_key={run_key} -- promotion to prod dispatched")
+    asyncio.create_task(_run_promote_background(run_key, app_name, repo))
+    return {"triggered": True, "run_key": run_key}
 
 
 # ── (b) Error/alarm: a GCP Monitoring alerting policy's Webhook notification
@@ -773,6 +998,11 @@ async def trigger_alarm(payload: dict) -> dict:
     if repo is None:
         _server_log("alarm", f"app={app_name!r} not registered -- no-op")
         return {"triggered": False, "reason": f"app {app_name!r} not registered"}
+
+    env = environments.load(repo) or environments.EnvironmentConfig()
+    if not env.alarm_enabled:
+        _server_log("alarm", f"app={app_name!r} has alarms disabled -- no-op")
+        return {"triggered": False, "reason": "alarms disabled for this app"}
 
     if _lock_for(app_name).locked():
         _server_log("alarm", f"app={app_name!r} already has a cycle running -- skipped")

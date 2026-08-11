@@ -89,7 +89,13 @@ async def run_cycle(
     if feature is None:
         mem.log(run_id, "discovery agent: starting")
         disc = await discovery.run(
-            repo, objective, cb.text, analytics_summary, mem.shipped_features(), mem.known_bugs(), mem.feature_queue()
+            repo,
+            objective,
+            cb.text,
+            analytics_summary,
+            [f["feature"] for f in mem.shipped_features()],
+            mem.known_bugs(),
+            mem.feature_queue(),
         )
         mem.write("decisions", f"{run_id}-discovery", disc.text)
         mem.log(run_id, f"discovery agent: ok={disc.ok} turns={disc.turns} cost=${disc.cost_usd:.4f}")
@@ -196,12 +202,14 @@ async def run_cycle(
     )
 
 
-async def run_promote(repo: Path) -> dict:
-    """Human-triggered prod promotion: `agentra promote`. Always allow_prod=True
-    here because a human explicitly invoked it — this is the approval gate."""
+async def run_promote(repo: Path, run_id: str | None = None) -> dict:
+    """Human-triggered prod promotion: `agentra promote`, or the dashboard's
+    Promote button (server.py's /apps/{name}/promote). Always
+    allow_prod=True here because a human explicitly invoked it -- this is
+    the approval gate. run_id: see run_autonomous_cycle's docstring."""
     repo = repo.resolve()
     mem = Memory(repo)
-    run_id = uuid.uuid4().hex[:8]
+    run_id = run_id or uuid.uuid4().hex[:8]
     env = _load_env(repo, mem, run_id)
     mem.log(run_id, "promote: human-approved promotion to production starting")
     promote = await deployment.promote_prod(repo, env)

@@ -110,6 +110,22 @@ def test_unreachable_remote_falls_back_to_existing_checkout(tmp_path, registry_e
     assert _head_sha(local) == sha
 
 
+def test_existing_non_git_directory_with_repo_url_is_left_alone(tmp_path, registry_env):
+    repo = tmp_path / "fixture_repo"
+    repo.mkdir()
+    (repo / "objective.yaml").write_text("objective: fixture\n")
+
+    registry_env.register_app(
+        "myapp",
+        str(repo),
+        repo_url="https://github.com/acme/myapp.git",
+        branch="main",
+    )
+
+    assert registry_env.get_app_repo("myapp") == repo
+    assert (repo / "objective.yaml").read_text() == "objective: fixture\n"
+
+
 def test_clone_from_scratch_path_is_unaffected(tmp_path, registry_env):
     """Registering an app whose repo_path doesn't exist yet still clones,
     same as before this change -- the staleness check only applies to an

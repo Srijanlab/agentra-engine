@@ -32,6 +32,7 @@ code; verify_pre_prod independently verifies the live deployment afterward
 
 import hashlib
 import json
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -253,7 +254,7 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def check_backlog(_args):
         if stop := session.check_hard_stop():
             return stop
-        shipped = session.mem.shipped_features()
+        shipped = [f["feature"] for f in session.mem.shipped_features()]
         bugs = session.mem.known_bugs()
         queue = session.mem.feature_queue()
         text = (
@@ -280,7 +281,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.objective,
             session.cb_summary,
             session.analytics_summary,
-            session.mem.shipped_features(),
+            [f["feature"] for f in session.mem.shipped_features()],
             session.mem.known_bugs(),
             session.mem.feature_queue(),
         )
@@ -345,7 +346,16 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
         session.record_success("implement_feature")
-        session.mem.record_shipped(feature_name)
+        commit_sha = None
+        try:
+            head = subprocess.run(
+                ["git", "-C", str(session.repo), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
+            )
+            if head.returncode == 0:
+                commit_sha = head.stdout.strip()
+        except Exception:
+            pass  # dashboard's shipped list just shows no artifact link -- not worth failing the cycle over
+        session.mem.record_shipped(feature_name, commit_sha=commit_sha)
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
         if resolves_id:
@@ -378,9 +388,19 @@ def _tools_for(session: OrchestratorSession) -> list:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         test = await testing.run_local(session.repo, session.cb_summary)
         session.cost_usd += test.cost_usd
-        passed = test.ok and (test.json_data or {}).get("status") != "fail"
+        data = test.json_data or {}
+        passed = test.ok and data.get("status") != "fail"
         session.tests_passed = passed
-        session.note(f"run_local_tests: passed={passed}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
+        # The structured result (lint/typecheck status, which tests failed) used to only
+        # get durably recorded on failure (mem.write("failures", ...) below) -- on a pass
+        # it vanished once the process ended, so the dashboard's "testing artifacts" view
+        # had nothing to show for a clean run. note()'s message is already durable
+        # (agent_steps.summary + this run's own actions list), so folding the detail in
+        # here costs nothing new to store.
+        detail = f"lint={data.get('lint_status', '?')} typecheck={data.get('typecheck_status', '?')}"
+        if data.get("failed_tests"):
+            detail += f" failed={data['failed_tests']}"
+        session.note(f"run_local_tests: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
             session.mem.write("failures", f"{session.run_id}-testing", test.text)
             session.record_failure("run_local_tests")
@@ -459,9 +479,11 @@ def _tools_for(session: OrchestratorSession) -> list:
             }
         test = await testing.run_pre_prod(session.repo, session.cb_summary or "", session.pre_prod_url)
         session.cost_usd += test.cost_usd
-        passed = test.ok and (test.json_data or {}).get("status") != "fail"
+        data = test.json_data or {}
+        passed = test.ok and data.get("status") != "fail"
         session.pre_prod_verified = passed
-        session.note(f"verify_pre_prod: passed={passed}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
+        detail = f"reachable={data.get('reachable', '?')} feature_verified={data.get('feature_verified', '?')}"
+        session.note(f"verify_pre_prod: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
             session.mem.write("failures", f"{session.run_id}-pre-prod-verification", test.text)
             session.record_failure("verify_pre_prod")

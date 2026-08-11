@@ -21,6 +21,7 @@ On first use, Memory writes a .agentra/.gitignore into the target repo so that:
   memory/  (architecture, decisions,    logs/  (verbose timestamped traces)
            features, metrics, failures)
   shipped.json
+  released.json
   known_bugs.json
   feature_queue.json
   objective.yaml
@@ -50,6 +51,7 @@ logs/
 # ── tracked (listed for clarity; git tracks everything not ignored) ───────────
 # memory/
 # shipped.json
+# released.json
 # known_bugs.json
 # feature_queue.json
 # objective.yaml
@@ -72,6 +74,7 @@ class Memory:
         self.memory_root = self.root / "memory"
         self.log_root = self.root / "logs"
         self.shipped_path = self.root / "shipped.json"
+        self.released_path = self.root / "released.json"
         self.known_bugs_path = self.root / "known_bugs.json"
         self.feature_queue_path = self.root / "feature_queue.json"
         self.objective_path = self.root / "objective.yaml"
@@ -109,16 +112,70 @@ class Memory:
             f.write(f"[{timestamp}] {content}\n")
         return path
 
-    def shipped_features(self) -> list[str]:
+    def shipped_features(self) -> list[dict]:
+        """Each entry: {feature, commit_sha, ts} -- commit_sha links the
+        dashboard's Shipped list to the actual artifact (a GitHub commit
+        URL, built client-side from the app's repo_url + this sha) instead
+        of just a description with nothing to click through to. Normalizes
+        older shipped.json files (a plain list[str], from before commit_sha
+        was tracked) into the same shape with commit_sha=None, so existing
+        repos don't need a migration."""
         if not self.shipped_path.exists():
             return []
-        return json.loads(self.shipped_path.read_text())
+        raw = json.loads(self.shipped_path.read_text())
+        return [
+            {"feature": e, "commit_sha": None, "ts": None} if isinstance(e, str) else e
+            for e in raw
+        ]
 
-    def record_shipped(self, feature: str) -> None:
+    def record_shipped(self, feature: str, commit_sha: str | None = None) -> None:
         features = self.shipped_features()
-        if feature not in features:
-            features.append(feature)
-            self.shipped_path.write_text(json.dumps(features, indent=2))
+        if any(f["feature"] == feature for f in features):
+            return
+        features.append({"feature": feature, "commit_sha": commit_sha, "ts": dt.datetime.now(dt.timezone.utc).isoformat()})
+        self.shipped_path.write_text(json.dumps(features, indent=2))
+
+    def released_features(self) -> list[dict]:
+        """Each entry: {feature, commit_sha, ts, release_run_id} -- the
+        production release ledger. This is intentionally separate from
+        shipped_features(): shipped means "implemented and in pre-prod", while
+        released means "made it to prod". Older released.json files that might
+        only contain a plain list[str] normalize into the same shape."""
+        if not self.released_path.exists():
+            return []
+        raw = json.loads(self.released_path.read_text())
+        if not isinstance(raw, list):
+            return []
+        return [
+            {
+                "feature": e,
+                "commit_sha": None,
+                "ts": None,
+                "release_run_id": None,
+            }
+            if isinstance(e, str)
+            else e
+            for e in raw
+        ]
+
+    def record_released(
+        self,
+        feature: str,
+        release_run_id: str,
+        commit_sha: str | None = None,
+    ) -> None:
+        released = self.released_features()
+        if any(f["feature"] == feature for f in released):
+            return
+        released.append(
+            {
+                "feature": feature,
+                "commit_sha": commit_sha,
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "release_run_id": release_run_id,
+            }
+        )
+        self.released_path.write_text(json.dumps(released, indent=2))
 
     # ── Signals: production issues, from agentra's own monitoring (debug-prod) ──
     # or from customer bug reports pulled in via feedback_fetch_command. Same

@@ -22,7 +22,12 @@ from agentra.memory import Memory
 _APPS = {
     "agentra": {
         "objective": "Improve agentra itself: hunt down and fix known gaps in its own codebase.",
-        "shipped": ["Stagnation breaker", "Firestore-backed runs", "SrijanLab dashboard theme"],
+        "repo_url": "https://github.com/RoshanSharma1/srijanlab-agentos.git",
+        "shipped": [
+            ("Stagnation breaker", "9c104a7"),
+            ("Firestore-backed runs", "ebbd94d"),
+            ("SrijanLab dashboard theme", "ebbd94d"),
+        ],
         "bugs": [
             {
                 "severity": "medium",
@@ -33,7 +38,8 @@ _APPS = {
     },
     "cap": {
         "objective": "Ship the creator dashboard's approvals queue.",
-        "shipped": ["Approvals queue UI", "Bulk approve action"],
+        "repo_url": "git@github.com:ContentAutomationPlatform/ContentAutomationPlatform.git",
+        "shipped": [("Approvals queue UI", "a1b2c3d"), ("Bulk approve action", "e4f5a6b")],
         "bugs": [
             {
                 "severity": "high",
@@ -61,13 +67,13 @@ def seed(force: bool = False) -> None:
         repo.mkdir(parents=True, exist_ok=True)
         mem = Memory(repo)
         mem.set_objective(fixture["objective"])
-        for feature in fixture["shipped"]:
-            mem.record_shipped(feature)
+        for feature, sha in fixture["shipped"]:
+            mem.record_shipped(feature, commit_sha=sha)
         for i, bug in enumerate(fixture["bugs"]):
             mem.record_known_bug(run_id=f"seed-{name}-{i}", **bug)
         for req in _FEATURE_QUEUE.get(name, []):
             mem.record_feature_request(**req)
-        registry.register_app(name, str(repo))
+        registry.register_app(name, str(repo), repo_url=fixture.get("repo_url"), branch="main")
 
     agentra_objective = _APPS["agentra"]["objective"]
     cap_objective = _APPS["cap"]["objective"]

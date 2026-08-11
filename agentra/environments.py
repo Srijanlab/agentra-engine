@@ -39,6 +39,22 @@ class EnvironmentConfig:
     # verified hotfix straight to prod once it passes pre-prod testing, with
     # no human approval step. False is the safe default for every app.
     auto_remediate_prod: bool = False
+    # Per-app schedule: how often a scheduled cycle should actually run this
+    # app, in hours. The dashboard's dashboard-configurable "one Cloud
+    # Scheduler tick decides per-app whether it's due" design (rather than a
+    # real Scheduler job per app) -- server.py's /trigger/scheduled checks
+    # this against the app's last scheduled run before dispatching, so one
+    # cron tick (e.g. hourly) can serve every app on its own cadence without
+    # provisioning GCP infra per registration.
+    schedule_hours: float = 24.0
+    # Per-app opt-out of the alarm-triggered prod-debug path. The GCP
+    # Monitoring policy and its webhook are global (one alerting policy,
+    # not one per app -- see cloudrun.tf's comment on why /trigger/alarm
+    # needs its own Basic Auth instead of per-app IAM), so this is agentra's
+    # own routing decision once an incident names this app: True (default)
+    # runs prod-debug as normal, False no-ops so an app can be temporarily
+    # or permanently excluded without touching the GCP-side policy.
+    alarm_enabled: bool = True
 
     @property
     def path_hint(self) -> str:
