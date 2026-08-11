@@ -199,6 +199,7 @@ async def run_agent(
     max_turns: int | None = None,
     allow_prod: bool = False,
     retry_on_contradictory_result: bool = True,
+    agent_label: str | None = None,
 ) -> AgentResult:
     """Run one agent to completion and return its final result message.
 
@@ -215,6 +216,14 @@ async def run_agent(
     this error surfaces the agent's actual work (file edits, a git commit) has
     typically already happened, so a blind retry risks a second, conflicting
     attempt at the same commit rather than recovering anything.
+
+    agent_label: the human-readable identity to prefix every logged line
+    with (e.g. "Codebase Agent") -- matches agentRoster.ts's labels exactly
+    so the dashboard's live-log view can tell which agent is currently
+    speaking and show a "who's active right now" pill instead of an
+    undifferentiated firehose. None (the CLI's own direct calls have no
+    caller-supplied label) falls back to a generic "Agent" tag rather than
+    silently dropping the prefix, so parsing on the frontend stays uniform.
     """
     options = ClaudeAgentOptions(
         cwd=str(cwd),
@@ -228,7 +237,9 @@ async def run_agent(
     )
 
     attempts = 2 if retry_on_contradictory_result else 1
-    logger = _RUN_LOGGER.get()
+    raw_logger = _RUN_LOGGER.get()
+    label = agent_label or "Agent"
+    logger = (lambda line: raw_logger(f"[{label}] {line}")) if raw_logger else None
     for attempt in range(attempts):
         result_msg: ResultMessage | None = None
         try:

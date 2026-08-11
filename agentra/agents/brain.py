@@ -630,6 +630,14 @@ Use judgment, not a rigid script, but this is generally sound:
    explain plainly why you stopped short (e.g. tests kept failing, or the \
    live deployment didn't check out).
 
+In your final summary, never claim a benefit is already realized if it's \
+actually gated on something that hasn't happened yet (a dormant/inactive \
+pipeline, an unconfigured service, a pending human action) — say plainly \
+what's still blocking it instead. Confirmed live: a cycle's own summary said \
+"CI will now fail loudly on future regressions" about a workflow file that \
+was never wired into GitHub Actions at all — that's not what happened, and \
+saying so misleads whoever reads this run later.
+
 Business objective: {objective}
 """
 
@@ -700,7 +708,12 @@ async def run_autonomous_cycle(
     try:
         with run_log_scope(lambda line: mem.log(run_id, line)):
             async for message in query(prompt=single_prompt_stream(prompt), options=options):
-                log_claude_message(message)
+                # Explicit logger (not log_claude_message's own _RUN_LOGGER fallback) so
+                # this top-level orchestrator turn's own lines get the same "[Label] ..."
+                # prefix agents/base.py::run_agent gives every nested specialized-agent
+                # call -- otherwise these lines would be the one unlabeled gap in an
+                # otherwise fully agent-tagged live log.
+                log_claude_message(message, lambda line: mem.log(run_id, f"[Orchestrator] {line}"))
                 if isinstance(message, ResultMessage):
                     final_text = message.result or ""
                     session.cost_usd += message.total_cost_usd or 0.0
