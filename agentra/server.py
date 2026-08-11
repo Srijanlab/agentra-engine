@@ -158,6 +158,10 @@ def _record_production_release(repo: Path, run_id: str) -> list[str]:
     return newly_released
 
 
+def _app_branch(app_name: str) -> str:
+    return registry.list_apps().get(app_name, {}).get("branch") or "main"
+
+
 def _run_log_path(run_key: str) -> Path | None:
     run = _active_runs.get(run_key) or registry.get_run(run_key)
     if run is None:
@@ -708,6 +712,9 @@ async def trigger_app_standup(app_name: str) -> dict:
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
 
     report = await run_standup(repo, app_name)
+    error = registry.persist_agentra_dir(repo, _app_branch(app_name), f"agentra: daily standup for {app_name!r}")
+    if error:
+        _server_log("standup", f"app={app_name!r} standup saved locally but failed to push: {error}")
     _server_log("standup", f"app={app_name!r} generated")
     return {"app": app_name, "report": report}
 
@@ -730,6 +737,180 @@ async def trigger_daily_standup() -> dict:
     reports = await run_daily_standup(apps)
     _server_log("standup", f"daily standup generated for {list(reports.keys())}")
     return {"triggered": True, "reports": reports}
+
+
+class ChatPayload(BaseModel):
+    message: str
+
+class WorkUpdatePayload(BaseModel):
+    description: str
+
+AGENT_CHAT_SYSTEM_PROMPTS = {
+    "orchestrator": """You are the Orchestrator Agent. You decide which agent to call next and sequence tasks. You are now communicating directly with a human user. Respond to their queries in a helpful and concise manner.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "codebase": """You are the Codebase Agent. Your role is read-only scanning of the repository: mapping framework, architecture, and existing patterns. Respond to user queries about the code.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "discovery": """You are the Discovery Agent. Your role is deciding what to build next based on codebase, analytics, and backlog signals.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "implementation": """You are the Implementation Agent. Your role is implementing features and fixing bugs on dedicated branches.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "testing": """You are the Testing Agent. Your role is verifying the code locally and independently verifying live deployments.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "deployment": """You are the Deployment Agent. Your role is deploying verified feature branches to pre-prod or promoting to production.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "feedback": """You are the Analytics Feedback Agent. Your role is checking if a shipped feature is measurable and naming success metrics.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "prod_debug": """You are the Production Debugging Agent. Your role is diagnosing production alarms and auto-remediating issues.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+""",
+    "custom": """You are a Custom Agent. Your role is executing one-off sub-tasks that do not fit specialized agents.
+If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
+```json
+{
+  "work_update": "Description of the work you performed"
+}
+```
+"""
+}
+
+@app.get("/apps/{app_name}/agents/{agent_id}/chat")
+async def get_agent_chat(app_name: str, agent_id: str) -> dict:
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+    mem = Memory(repo)
+    messages = mem.get_agent_chat_messages(agent_id)
+    return {"messages": messages}
+
+@app.post("/apps/{app_name}/agents/{agent_id}/chat")
+async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) -> dict:
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+    
+    mem = Memory(repo)
+    mem.record_agent_chat_message(agent_id, "human", payload.message)
+    
+    from agentra.agents.base import run_agent, extract_json_block
+    system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
+    
+    history = mem.get_agent_chat_messages(agent_id)
+    recent_history = history[-6:-1]
+    history_str = ""
+    for msg in recent_history:
+        history_str += f"{msg['sender'].capitalize()}: {msg['text']}\n"
+    
+    prompt = f"Chat history:\n{history_str}Human: {payload.message}\nAgent:"
+    
+    agent_label = agent_id.capitalize() + " Agent"
+    if agent_id == "orchestrator":
+        agent_label = "Orchestrator"
+    elif agent_id == "prod_debug":
+        agent_label = "Production Debugging Agent"
+    elif agent_id == "feedback":
+        agent_label = "Analytics Feedback Agent"
+    elif agent_id == "custom":
+        agent_label = "Custom Agent"
+        
+    result = await run_agent(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        cwd=repo,
+        allowed_tools=[],
+        max_turns=1,
+        agent_label=agent_label,
+    )
+    
+    response_text = result.text or "(no response)"
+    json_data = extract_json_block(response_text)
+    work_update = None
+    if json_data and "work_update" in json_data:
+        work_update = json_data["work_update"]
+        mem.record_work_update(agent_id, work_update)
+        import re
+        response_text = re.sub(r"```json\s*.*?\s*```", "", response_text, flags=re.DOTALL).strip()
+
+    mem.record_agent_chat_message(agent_id, "agent", response_text)
+
+    error = registry.persist_agentra_dir(
+        repo, _app_branch(app_name), f"agentra: chat with {agent_id!r} for {app_name!r}"
+    )
+    if error:
+        _server_log("chat", f"app={app_name!r} agent={agent_id!r} chat saved locally but failed to push: {error}")
+
+    return {
+        "response": response_text,
+        "work_update": work_update
+    }
+
+@app.get("/apps/{app_name}/work-updates")
+async def get_work_updates(app_name: str) -> dict:
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+    mem = Memory(repo)
+    return {"updates": mem.get_work_updates()}
+
+@app.post("/apps/{app_name}/agents/{agent_id}/work")
+async def post_work_update(app_name: str, agent_id: str, payload: WorkUpdatePayload) -> dict:
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+    mem = Memory(repo)
+    mem.record_work_update(agent_id, payload.description)
+    error = registry.persist_agentra_dir(
+        repo, _app_branch(app_name), f"agentra: log work update for {agent_id!r} on {app_name!r}"
+    )
+    if error:
+        _server_log("chat", f"app={app_name!r} agent={agent_id!r} work update saved locally but failed to push: {error}")
+    return {"ok": True}
 
 
 async def _run_autonomous_background(

@@ -383,24 +383,31 @@ def _apply_request(repo: Path, request: dict) -> None:
         raise ValueError(f"unknown request type: {request_type!r}")
 
 
-def _persist_backlog(app: str, repo: Path, branch: str, errors: list[str]) -> None:
-    """_apply_request only ever writes known_bugs.json/feature_queue.json/
-    objective.yaml to THIS instance's local checkout -- never durable on
-    its own. Confirmed live: a bug/feature added via the dashboard would
-    vanish the next time a *different* Cloud Run instance (a fresh
-    checkout, cloned straight from git) served a request for the same app,
-    since nothing had ever pushed the addition anywhere. Every other write
-    path that touches .agentra/ (register_app, update_app) already commits
-    and pushes immediately for exactly this reason -- dispatch_once's
-    absorption path was the one gap. One commit per app per dispatch batch
-    (not one per request), same "durable before this call returns success"
-    bar the inbox write itself already holds."""
+def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:
+    """Commit and push .agentra/ -- returns an error string on failure
+    (caller decides how to surface it), None on success. Any write that
+    only touches the local checkout (Memory.record_*, mem.write, etc.) is
+    NOT durable on its own -- confirmed live for the backlog-absorption
+    path: an addition would vanish the next time a *different* Cloud Run
+    instance (a fresh checkout, cloned straight from git) served a request
+    for the same app, since nothing had ever pushed it anywhere. Shared by
+    dispatch_once's backlog absorption and server.py's chat/work-update/
+    standup endpoints -- every write path that touches .agentra/ needs
+    this same "durable before the call returns success" bar register_app/
+    update_app already hold themselves to."""
     from agentra.agents.git_ops import GitOpError, commit_and_push
 
     try:
-        commit_and_push(repo, branch, f"agentra: absorb inbox requests for {app!r}", [".agentra/"])
+        commit_and_push(repo, branch, message, [".agentra/"])
+        return None
     except GitOpError as exc:
-        errors.append(f"{app}: applied locally but failed to push .agentra/: {exc}")
+        return str(exc)
+
+
+def _persist_backlog(app: str, repo: Path, branch: str, errors: list[str]) -> None:
+    error = persist_agentra_dir(repo, branch, f"agentra: absorb inbox requests for {app!r}")
+    if error:
+        errors.append(f"{app}: applied locally but failed to push .agentra/: {error}")
 
 
 # ── Local (file-based) fallback implementation ──────────────────────────────

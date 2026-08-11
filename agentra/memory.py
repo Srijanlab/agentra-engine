@@ -80,6 +80,7 @@ class Memory:
         self.objective_path = self.root / "objective.yaml"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
         self.standups_root = self.root / "standups"
+        self.work_updates_path = self.root / "work_updates.json"
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -332,4 +333,58 @@ class Memory:
         if not dated:
             return None
         latest = dated[-1]
-        return {"date": latest.stem, "content": latest.read_text()}
+        date_str = latest.stem
+        json_path = self.standups_root / f"{date_str}.json"
+        
+        updates = None
+        if json_path.exists():
+            try:
+                updates = json.loads(json_path.read_text())
+            except Exception:
+                pass
+                
+        return {
+            "date": date_str,
+            "content": latest.read_text(),
+            "updates": updates
+        }
+
+    # ── Agent Chat & Work Updates ─────────────────────────────────────────────
+
+    def agent_chat_path(self, agent_id: str) -> Path:
+        return self.root / f"agent_chats_{agent_id}.json"
+
+    def get_agent_chat_messages(self, agent_id: str) -> list[dict]:
+        path = self.agent_chat_path(agent_id)
+        if not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return []
+
+    def record_agent_chat_message(self, agent_id: str, sender: str, text: str) -> None:
+        messages = self.get_agent_chat_messages(agent_id)
+        messages.append({
+            "sender": sender,
+            "text": text,
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat()
+        })
+        self.agent_chat_path(agent_id).write_text(json.dumps(messages, indent=2))
+
+    def get_work_updates(self) -> list[dict]:
+        if not self.work_updates_path.exists():
+            return []
+        try:
+            return json.loads(self.work_updates_path.read_text())
+        except Exception:
+            return []
+
+    def record_work_update(self, agent_id: str, description: str) -> None:
+        updates = self.get_work_updates()
+        updates.append({
+            "agent_id": agent_id,
+            "description": description,
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat()
+        })
+        self.work_updates_path.write_text(json.dumps(updates, indent=2))

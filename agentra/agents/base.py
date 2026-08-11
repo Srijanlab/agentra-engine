@@ -189,6 +189,26 @@ def extract_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
+def label_to_id(label: str) -> str:
+    if "Codebase" in label:
+        return "codebase"
+    if "Discovery" in label:
+        return "discovery"
+    if "Implementation" in label:
+        return "implementation"
+    if "Testing" in label:
+        return "testing"
+    if "Deployment" in label:
+        return "deployment"
+    if "Feedback" in label:
+        return "feedback"
+    if "Production Debugging" in label:
+        return "prod_debug"
+    if "Custom" in label:
+        return "custom"
+    return "orchestrator"
+
+
 async def run_agent(
     *,
     prompt: str,
@@ -266,10 +286,19 @@ async def run_agent(
         return AgentResult(ok=False, text="", json_data=None, cost_usd=0.0, turns=0)
 
     text = result_msg.result or ""
-    return AgentResult(
+    res = AgentResult(
         ok=not result_msg.is_error,
         text=text,
         json_data=extract_json_block(text),
         cost_usd=result_msg.total_cost_usd or 0.0,
         turns=result_msg.num_turns,
     )
+    if res.ok and res.json_data and "work_update" in res.json_data:
+        try:
+            from agentra.memory import Memory
+            mem = Memory(cwd)
+            agent_id = label_to_id(agent_label or "Agent")
+            mem.record_work_update(agent_id, res.json_data["work_update"])
+        except Exception:
+            pass
+    return res
