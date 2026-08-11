@@ -716,3 +716,50 @@ def last_run_at(app: str, source: str | None = None) -> float | None:
     if not matches:
         return None
     return max(r["started_at"] for r in matches)
+
+
+# A run stuck at queued/running with no agent_steps activity for this long
+# is presumed orphaned -- the container that was executing it died mid-cycle
+# (OOM kill, revision rollout, etc.) without ever reaching the except block
+# that would normally write status="failed". Confirmed live: a Cloud Run
+# OOM kill left a run showing "running" in the dashboard indefinitely, with
+# no process left anywhere that would ever complete it.
+STALE_RUN_SECONDS = 600
+
+
+def reconcile_stale_runs() -> list[str]:
+    """Marks orphaned running/queued runs as failed. Called opportunistically
+    from GET /runs (server.py) rather than a separate background loop --
+    the dashboard already polls that endpoint every few seconds, so any
+    open dashboard self-heals this within one poll cycle; a run nobody's
+    looking at stays "running" a little longer, which is an acceptable
+    tradeoff against the complexity of a standalone sweep task that could
+    itself be killed mid-sweep. Returns the run_keys it marked failed."""
+    now = time.time()
+    steps_by_run: dict[str, float] = {}
+    for step in list_agent_steps(limit=500):
+        run_id = step.get("run_id")
+        if not run_id:
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(step["ts"]).timestamp()
+        except (KeyError, ValueError):
+            continue
+        if run_id not in steps_by_run or ts > steps_by_run[run_id]:
+            steps_by_run[run_id] = ts
+
+    marked: list[str] = []
+    for run in list_runs(limit=200):
+        if run.get("status") not in ("queued", "running"):
+            continue
+        run_key = run["run_key"]
+        last_activity = steps_by_run.get(run_key, run.get("started_at", now))
+        if now - last_activity > STALE_RUN_SECONDS:
+            record_run(
+                run_key,
+                status="failed",
+                error=f"orphaned: no activity for over {STALE_RUN_SECONDS // 60} minutes -- "
+                "the process running this cycle likely died (e.g. an OOM kill or revision rollout)",
+            )
+            marked.append(run_key)
+    return marked

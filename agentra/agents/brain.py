@@ -40,7 +40,7 @@ from pathlib import Path
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query, tool
 
 from agentra.agents import codebase, deployment, discovery, feedback, implementation, testing
-from agentra.agents.base import single_prompt_stream
+from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
 from agentra.environments import EnvironmentConfig, feature_branch_name, slug
 from agentra.memory import Memory
@@ -698,10 +698,12 @@ async def run_autonomous_cycle(
     print(f"[agentra] run {run_id} starting | objective={objective!r}", flush=True)
     final_text = ""
     try:
-        async for message in query(prompt=single_prompt_stream(prompt), options=options):
-            if isinstance(message, ResultMessage):
-                final_text = message.result or ""
-                session.cost_usd += message.total_cost_usd or 0.0
+        with run_log_scope(lambda line: mem.log(run_id, line)):
+            async for message in query(prompt=single_prompt_stream(prompt), options=options):
+                log_claude_message(message)
+                if isinstance(message, ResultMessage):
+                    final_text = message.result or ""
+                    session.cost_usd += message.total_cost_usd or 0.0
     except Exception as exc:
         # Same rationale as agents/base.py's run_agent: an SDK/CLI-subprocess-level
         # exception here has nothing to do with the actual orchestration work, and

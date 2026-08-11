@@ -262,7 +262,13 @@ async def list_runs(limit: int = 50) -> dict:
     Sourced from registry.list_runs() (Firestore-backed when configured,
     same durable pattern as agent_steps/signals) rather than the in-process
     _active_runs dict, so this survives a redeploy instead of only
-    reflecting runs since the current instance started."""
+    reflecting runs since the current instance started.
+
+    reconcile_stale_runs() runs first so a run orphaned by a dead process
+    (see its own docstring) gets marked failed the moment any dashboard
+    polls this -- cheap (no LLM calls, just comparing timestamps already
+    in hand), so doing it on every poll is fine."""
+    registry.reconcile_stale_runs()
     return {"runs": registry.list_runs(limit)}
 
 
