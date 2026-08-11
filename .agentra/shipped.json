@@ -1,0 +1,4 @@
+[
+  "Add tests/test_safety_hook.py (fast deterministic pytest coverage for make_pre_tool_use_hook) and fix the DELETE FROM end-of-string-anchoring bypass",
+  "registry.py get_app_repo(): resync an existing stale checkout to remote HEAD before handing it back"
+]

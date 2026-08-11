@@ -3,4 +3,4 @@ objective: 'Improve agentra itself: hunt down and fix known gaps in its own code
   and implement small, safe, well-scoped improvements. Never touch production directly
   -- only ever push to a feature branch off beta for review. Prefer small, verifiable
   changes over large risky ones.'
-updated_at: '2026-08-10T19:25:53.160455+00:00'
+updated_at: '2026-08-10T20:09:24.726610+00:00'

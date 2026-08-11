@@ -12,7 +12,10 @@ agentra/web/*.tsbuildinfo
 # rule here silently swallowed all of it -- git never even sees inside an
 # ignored directory, so registry.commit_and_push() found "nothing dirty"
 # to push every time, discovered live once agentra was registered against
-# its own repo.
+# its own repo. The beta branch had forked from main before this fix
+# landed there, so it needed the same fix applied directly too -- three
+# real autonomous-cycle commits landed on beta with zero .agentra/ audit
+# trail before that was caught.
 .agentra/logs/
 .claude_oauth_token
 .github_pat
