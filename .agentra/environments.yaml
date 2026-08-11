@@ -7,5 +7,5 @@ firebase_pre_prod_alias: beta
 firebase_prod_alias: default
 ci_cd_on_push: false
 auto_remediate_prod: false
-schedule_hours: 6.0
+schedule_hours: 2.0
 alarm_enabled: true
