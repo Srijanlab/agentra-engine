@@ -628,10 +628,17 @@ async def run_autonomous_cycle(
     feature: str | None = None,
     skip_deploy: bool = False,
     max_turns: int = 40,
+    run_id: str | None = None,
 ) -> AutonomousCycleReport:
+    """run_id: pass the caller's own id to use as this cycle's id instead of
+    minting a fresh one -- server.py passes its run_key here, so the id
+    used to poll/track a run (GET /runs/{run_key}) is the exact same id
+    agent_steps.run_id and Memory's per-run log file use, instead of two
+    unrelated uuids for what's really one run. CLI callers pass nothing and
+    get a fresh id as before."""
     repo = repo.resolve()
     mem = Memory(repo)
-    run_id = uuid.uuid4().hex[:8]
+    run_id = run_id or uuid.uuid4().hex[:8]
     session = OrchestratorSession(
         repo=repo,
         objective=objective,

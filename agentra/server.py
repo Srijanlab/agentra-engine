@@ -228,9 +228,31 @@ async def list_agent_steps(app_name: str | None = None, limit: int = 100) -> dic
 # actually able to reach this org's repos" is answerable from the
 # dashboard instead of discovered by a 403 mid-registration. ──────────────
 
+# Local testing capability: without this, App.tsx's whole dashboard is
+# gated behind a real installed GitHub App, so seeing anything beyond the
+# ConnectGate screen locally meant either real credentials or a one-off
+# Playwright route mock outside a real browser session. AGENTRA_DEV_MODE=1
+# (set by scripts/dev.sh, never in any deployed environment) fakes a
+# already-installed App so `agentra dev` renders the full dashboard against
+# dev_seed.py's fixture data -- only takes effect when a real App genuinely
+# isn't configured, so it can never mask a real misconfiguration.
+DEV_MODE = os.environ.get("AGENTRA_DEV_MODE") == "1"
+_DEV_INSTALLATION = {"account": "dev-local", "type": "User", "repository_selection": "all"}
+_DEV_REPOS = [
+    {
+        "full_name": "dev-local/example-app",
+        "clone_url": "https://github.com/dev-local/example-app.git",
+        "default_branch": "main",
+        "private": False,
+        "account": "dev-local",
+    }
+]
+
 
 @app.get("/connectors/github")
 async def github_connector_status() -> dict:
+    if DEV_MODE and not github_app.is_configured():
+        return {"configured": True, "installations": [_DEV_INSTALLATION], "error": None, "install_url": None}
     if not github_app.is_configured():
         return {"configured": False, "installations": [], "error": None, "install_url": None}
     try:
@@ -290,6 +312,8 @@ async def github_connector_repos() -> dict:
     """Backs the dashboard's repo picker -- every repo the App can
     currently reach, so registering one is a selection, not a URL to find
     and paste by hand."""
+    if DEV_MODE and not github_app.is_configured():
+        return {"repos": _DEV_REPOS}
     if not github_app.is_configured():
         return {"repos": []}
     try:
@@ -314,6 +338,66 @@ async def list_apps() -> dict:
     return {"apps": result}
 
 
+def _apply_app_config(
+    dest: Path,
+    branch: str,
+    *,
+    objective: str | None,
+    vercel: bool | None,
+    firebase: bool | None,
+    ci_cd_on_push: bool | None,
+    pre_prod_branch: str | None,
+    prod_branch: str | None,
+    documentation_notes: str | None,
+    testing_notes: str | None,
+    detect_defaults: bool,
+    commit_message: str,
+) -> str | None:
+    """Shared by register (fresh clone, detect_defaults=True so an
+    auto-detected baseline is layered under any explicit answers) and
+    update (existing checkout, detect_defaults=False so an untouched field
+    keeps its current saved value instead of being silently reset to
+    whatever detect() would guess today). Returns a push-failure warning
+    string, or None on success -- same shape either caller surfaces to the
+    dashboard."""
+    mem = Memory(dest)
+    if objective:
+        mem.set_objective(objective)
+
+    env_config = environments.detect(dest) if detect_defaults else (environments.load(dest) or environments.EnvironmentConfig())
+    for field, value in (
+        ("vercel", vercel),
+        ("firebase", firebase),
+        ("ci_cd_on_push", ci_cd_on_push),
+        ("pre_prod_branch", pre_prod_branch),
+        ("prod_branch", prod_branch),
+    ):
+        if value is not None:
+            setattr(env_config, field, value)
+    environments.save(dest, env_config)
+
+    if documentation_notes:
+        mem.write("architecture", "documentation", documentation_notes)
+    if testing_notes:
+        mem.write("architecture", "testing-notes", testing_notes)
+
+    # Without this, everything just written above (objective.yaml,
+    # environments.yaml, the notes) only ever lands in this container's
+    # local checkout -- which is NOT durable (TASK-018: only the registry
+    # entry survives a restart; the checkout itself re-clones from
+    # repo_url on demand, restoring whatever's on the remote, not whatever
+    # was written here). Confirmed: without this push, a redeploy before
+    # any cycle happened to run persist_audit_trail would silently lose
+    # all of it.
+    from agentra.agents.git_ops import GitOpError, commit_and_push
+
+    try:
+        commit_and_push(dest, branch, commit_message, [".agentra/"])
+        return None
+    except GitOpError as exc:
+        return str(exc)
+
+
 @app.post("/apps")
 async def register_app(payload: RegisterAppRequest) -> dict:
     if payload.name in registry.list_apps():
@@ -330,47 +414,119 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
 
-    mem = Memory(dest)
-    if payload.objective:
-        mem.set_objective(payload.objective)
-
-    # Best-effort auto-detect from the repo itself, then layer any explicit
-    # answers from the form on top -- detect() alone is a good default,
-    # but shouldn't silently override something the user just told us.
-    env_config = environments.detect(dest)
-    for field in ("vercel", "firebase", "ci_cd_on_push", "pre_prod_branch", "prod_branch"):
-        value = getattr(payload, field)
-        if value is not None:
-            setattr(env_config, field, value)
-    environments.save(dest, env_config)
-
-    if payload.documentation_notes:
-        mem.write("architecture", "documentation", payload.documentation_notes)
-    if payload.testing_notes:
-        mem.write("architecture", "testing-notes", payload.testing_notes)
-
-    # Without this, everything just written above (objective.yaml,
-    # environments.yaml, the notes) only ever lands in this container's
-    # local checkout -- which is NOT durable (TASK-018: only the registry
-    # entry survives a restart; the checkout itself re-clones from
-    # repo_url on demand, restoring whatever's on the remote, not whatever
-    # was written here). Confirmed: without this push, a redeploy before
-    # any cycle happened to run persist_audit_trail would silently lose
-    # all of it.
-    from agentra.agents.git_ops import GitOpError, commit_and_push
-
-    push_warning = None
-    try:
-        commit_and_push(dest, payload.branch, "agentra: register app (objective/environment/notes)", [".agentra/"])
-    except GitOpError as exc:
-        push_warning = str(exc)
-        _server_log("register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {exc}")
+    push_warning = _apply_app_config(
+        dest,
+        payload.branch,
+        objective=payload.objective,
+        vercel=payload.vercel,
+        firebase=payload.firebase,
+        ci_cd_on_push=payload.ci_cd_on_push,
+        pre_prod_branch=payload.pre_prod_branch,
+        prod_branch=payload.prod_branch,
+        documentation_notes=payload.documentation_notes,
+        testing_notes=payload.testing_notes,
+        detect_defaults=True,
+        commit_message="agentra: register app (objective/environment/notes)",
+    )
+    if push_warning:
+        _server_log("register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {push_warning}")
 
     _server_log("register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}")
     result = {"registered": True, "name": payload.name, "repo_path": str(dest)}
     if push_warning:
         result["warning"] = f"registered, but could not push .agentra/ to the remote: {push_warning}"
     return result
+
+
+@app.get("/apps/{name}")
+async def get_app(name: str) -> dict:
+    """Full config for the dashboard's edit modal -- the list view (GET
+    /apps) deliberately stays a cheap digest since it's polled every 5s;
+    this one is fetched on demand when a user opens Edit."""
+    apps = registry.list_apps()
+    if name not in apps:
+        raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
+    info = apps[name]
+
+    repo = registry.get_app_repo(name)
+    if repo is None:
+        raise HTTPException(status_code=409, detail=f"local checkout for {name!r} is missing and could not be recovered")
+
+    mem = Memory(repo)
+    env_config = environments.load(repo) or environments.EnvironmentConfig()
+    return {
+        "name": name,
+        "repo_path": str(repo),
+        "repo_url": info.get("repo_url"),
+        "branch": info.get("branch"),
+        "objective": mem.get_objective(),
+        "shipped_count": len(mem.shipped_features()),
+        "known_bugs": len(mem.known_bugs()),
+        "shipped": mem.shipped_features(),
+        "bugs": mem.known_bugs(),
+        "feature_queue": mem.feature_queue(),
+        "vercel": env_config.vercel,
+        "firebase": env_config.firebase,
+        "ci_cd_on_push": env_config.ci_cd_on_push,
+        "pre_prod_branch": env_config.pre_prod_branch,
+        "prod_branch": env_config.prod_branch,
+        "documentation_notes": mem.read("architecture", "documentation"),
+        "testing_notes": mem.read("architecture", "testing-notes"),
+    }
+
+
+class UpdateAppRequest(BaseModel):
+    objective: str | None = None
+    vercel: bool | None = None
+    firebase: bool | None = None
+    ci_cd_on_push: bool | None = None
+    pre_prod_branch: str | None = None
+    prod_branch: str | None = None
+    documentation_notes: str | None = None
+    testing_notes: str | None = None
+
+
+@app.patch("/apps/{name}")
+async def update_app(name: str, payload: UpdateAppRequest) -> dict:
+    apps = registry.list_apps()
+    if name not in apps:
+        raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
+    info = apps[name]
+
+    repo = registry.get_app_repo(name)
+    if repo is None:
+        raise HTTPException(status_code=409, detail=f"local checkout for {name!r} is missing and could not be recovered")
+
+    push_warning = _apply_app_config(
+        repo,
+        info.get("branch", "main"),
+        objective=payload.objective,
+        vercel=payload.vercel,
+        firebase=payload.firebase,
+        ci_cd_on_push=payload.ci_cd_on_push,
+        pre_prod_branch=payload.pre_prod_branch,
+        prod_branch=payload.prod_branch,
+        documentation_notes=payload.documentation_notes,
+        testing_notes=payload.testing_notes,
+        detect_defaults=False,
+        commit_message="agentra: update app configuration",
+    )
+    _server_log("update", f"app={name!r} configuration updated" + (f" -- push failed: {push_warning}" if push_warning else ""))
+    result = {"updated": True, "name": name}
+    if push_warning:
+        result["warning"] = f"updated, but could not push .agentra/ to the remote: {push_warning}"
+    return result
+
+
+@app.get("/apps/{name}/loops")
+async def get_app_loops(name: str) -> dict:
+    """The end-to-end view: every run made toward one objective for this
+    app, grouped together with aggregate cost and a per-agent breakdown --
+    see registry.list_loops's own docstring for why a loop is exactly
+    this and not a separately tracked start/stop batch."""
+    if name not in registry.list_apps():
+        raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
+    return {"loops": registry.list_loops(name)}
 
 
 # ── Standups: TASK-019. Cheap enough (no tools, one short LLM call) to run
@@ -432,7 +588,7 @@ async def _run_autonomous_background(
         try:
             env = environments.load(repo) or environments.EnvironmentConfig()
             report = await run_autonomous_cycle(
-                repo, objective, env, feature=feature, skip_deploy=skip_deploy
+                repo, objective, env, feature=feature, skip_deploy=skip_deploy, run_id=run_key
             )
             _set_run(
                 run_key,
@@ -460,7 +616,7 @@ async def _run_prod_debug_background(
     async with lock:
         _set_run(run_key, status="running")
         try:
-            report = await run_prod_debug_cycle(repo, objective, symptom=symptom)
+            report = await run_prod_debug_cycle(repo, objective, symptom=symptom, run_id=run_key)
             _set_run(
                 run_key,
                 status="completed",
@@ -482,9 +638,16 @@ async def _run_prod_debug_background(
             _server_log("alarm", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
-def _new_run_key(app_name: str, source: str) -> str:
+def _new_run_key(app_name: str, source: str, objective: str) -> str:
     run_key = uuid.uuid4().hex[:8]
-    _active_runs[run_key] = {"app": app_name, "source": source, "status": "queued", "started_at": time.time()}
+    _active_runs[run_key] = {
+        "app": app_name,
+        "source": source,
+        "status": "queued",
+        "started_at": time.time(),
+        "objective": objective,
+        "loop_id": registry.loop_id_for(objective),
+    }
     registry.record_run(run_key, **_active_runs[run_key])
     return run_key
 
@@ -518,7 +681,7 @@ async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
         _server_log("scheduled", f"app={payload.app!r} has no objective set -- no-op")
         return {"triggered": False, "reason": "no objective set for this app"}
 
-    run_key = _new_run_key(payload.app, "scheduled")
+    run_key = _new_run_key(payload.app, "scheduled", objective)
     _server_log("scheduled", f"app={payload.app!r} run_key={run_key} objective={objective!r} -- dispatched")
     asyncio.create_task(
         _run_autonomous_background(run_key, payload.app, repo, objective, payload.feature, payload.skip_deploy)
@@ -620,7 +783,7 @@ async def trigger_alarm(payload: dict) -> dict:
         _server_log("alarm", f"app={app_name!r} has no objective set -- no-op")
         return {"triggered": False, "reason": "no objective set for this app"}
 
-    run_key = _new_run_key(app_name, "alarm")
+    run_key = _new_run_key(app_name, "alarm", objective)
     _server_log("alarm", f"app={app_name!r} run_key={run_key} symptom={symptom!r} -- dispatched to prod-debug")
     asyncio.create_task(_run_prod_debug_background(run_key, app_name, repo, objective, symptom))
     return {"triggered": True, "run_key": run_key}

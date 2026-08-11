@@ -641,3 +641,62 @@ def list_runs(limit: int = 50) -> list[dict]:
         reverse=True,
     )
     return ordered[:limit]
+
+
+# ── Loops: the "what actually happened, end to end" view ───────────────────
+# A single run or a single agent_steps row each answer a narrow question
+# ("what happened in this one cycle" / "how's this one agent doing").
+# Neither answers "what did agentra accomplish working toward this
+# objective, across every cycle it took." A loop groups every run made
+# while an app's objective was unchanged -- deterministic from the
+# objective text itself, not a separately tracked "current loop" pointer,
+# so grouping needs no new start/stop action: editing an app's objective
+# (the dashboard's Edit modal, or `agentra objective set`) naturally starts
+# a new loop the moment the next run picks up the new text, and reverting
+# to a previous exact objective naturally rejoins that earlier loop.
+
+
+def loop_id_for(objective: str) -> str:
+    import hashlib
+
+    return hashlib.sha1(objective.encode("utf-8")).hexdigest()[:10]
+
+
+def list_loops(app: str) -> list[dict]:
+    """One object per loop_id for `app`: the objective it was working
+    toward, every run made under it (oldest first), and cost/agent
+    aggregates across all of them. Cross-references agent_steps by run_key
+    (server.py passes its run_key down as the cycle's own run_id, so the
+    two are the same value for anything dispatched over HTTP -- see
+    run_autonomous_cycle's run_id parameter)."""
+    runs = [r for r in list_runs(limit=1000) if r.get("app") == app and r.get("loop_id")]
+    steps = list_agent_steps(app=app, limit=2000)
+    steps_by_run_key: dict[str, list[dict]] = {}
+    for s in steps:
+        steps_by_run_key.setdefault(s.get("run_id"), []).append(s)
+
+    loops: dict[str, dict] = {}
+    for run in runs:
+        lid = run["loop_id"]
+        loop = loops.setdefault(lid, {"loop_id": lid, "objective": run.get("objective"), "runs": []})
+        loop["runs"].append(run)
+
+    result = []
+    for loop in loops.values():
+        loop["runs"].sort(key=lambda r: r["started_at"])
+        loop["started_at"] = loop["runs"][0]["started_at"]
+        loop["cost_usd"] = sum((r.get("result") or {}).get("cost_usd") or 0 for r in loop["runs"])
+        loop["cycles_completed"] = sum(1 for r in loop["runs"] if r.get("status") == "completed")
+        loop["cycles_total"] = len(loop["runs"])
+
+        agent_totals: dict[str, dict] = {}
+        for r in loop["runs"]:
+            for s in steps_by_run_key.get(r["run_key"], []):
+                bucket = agent_totals.setdefault(s["agent"], {"agent": s["agent"], "count": 0, "cost_usd": 0.0})
+                bucket["count"] += 1
+                bucket["cost_usd"] += s.get("cost_usd") or 0
+        loop["agents"] = sorted(agent_totals.values(), key=lambda a: -a["cost_usd"])
+        result.append(loop)
+
+    result.sort(key=lambda l: l["started_at"], reverse=True)
+    return result

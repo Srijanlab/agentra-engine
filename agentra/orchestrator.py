@@ -216,10 +216,13 @@ async def run_prod_debug_cycle(
     repo: Path,
     objective: str,
     symptom: str | None = None,
+    run_id: str | None = None,
 ) -> ProdDebugReport:
+    """run_id: see run_autonomous_cycle's docstring -- same reasoning,
+    lets server.py's run_key double as this cycle's id."""
     repo = repo.resolve()
     mem = Memory(repo)
-    run_id = uuid.uuid4().hex[:8]
+    run_id = run_id or uuid.uuid4().hex[:8]
     mem.log(run_id, f"prod-debug start | symptom={symptom!r}")
     env = _load_env(repo, mem, run_id)
 
