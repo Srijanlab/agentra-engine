@@ -39,6 +39,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agentra.memory import Memory
 
@@ -577,3 +578,66 @@ def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:
     if app is not None:
         steps = [s for s in steps if s.get("app") == app]
     return steps[:limit]
+
+
+# ── Runs: durable record of every background cycle server.py kicks off ─────
+# server.py's _active_runs dict is process-local by design (see its own
+# docstring) so polling a specific run_key from the same request that
+# started it works without any of this. But the dashboard's "Runs" tab
+# reads /runs across restarts and redeploys -- every real dogfooding cycle
+# looked like it vanished the moment Cloud Run rolled a new revision, which
+# is what actually prompted this. Firestore doc ID is the run_key itself so
+# repeated status updates (queued -> running -> completed/failed) are a
+# plain upsert, not an append log like agent_steps.
+_RUNS_PATH = AGENTRA_HOME / "runs.json"
+
+
+def _local_runs() -> dict[str, dict]:
+    if not _RUNS_PATH.exists():
+        return {}
+    return json.loads(_RUNS_PATH.read_text())
+
+
+def _local_save_runs(runs: dict[str, dict]) -> None:
+    _RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _RUNS_PATH.write_text(json.dumps(runs, indent=2))
+
+
+def record_run(run_key: str, **fields: Any) -> None:
+    """Upsert -- pass only the fields that changed (e.g. just `status` on a
+    transition, or `status`+`result` together on completion)."""
+    if _db is not None:
+        _db.collection("runs").document(run_key).set(fields, merge=True)
+        return
+    runs = _local_runs()
+    runs.setdefault(run_key, {}).update(fields)
+    _local_save_runs(runs)
+
+
+def get_run(run_key: str) -> dict | None:
+    if _db is not None:
+        doc = _db.collection("runs").document(run_key).get()
+        return doc.to_dict() if doc.exists else None
+    return _local_runs().get(run_key)
+
+
+def list_runs(limit: int = 50) -> list[dict]:
+    """Newest first."""
+    if _db is not None:
+        from google.cloud import firestore
+
+        docs = (
+            _db.collection("runs")
+            .order_by("started_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        return [{"run_key": d.id, **d.to_dict()} for d in docs]
+
+    runs = _local_runs()
+    ordered = sorted(
+        ({"run_key": key, **info} for key, info in runs.items()),
+        key=lambda r: r["started_at"],
+        reverse=True,
+    )
+    return ordered[:limit]

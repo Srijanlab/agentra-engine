@@ -79,13 +79,19 @@ async def dashboard() -> FileResponse | dict:
 
 # In-memory record of background runs this process has kicked off -- lets a
 # duplicate trigger for an app already mid-cycle be told so instead of
-# double-starting a second, conflicting cycle, and backs GET /runs/{run_key}
-# for polling. Deliberately in-process, not persisted: a restart losing this
-# bookkeeping is fine, the durable record of what actually happened is each
-# app's own <repo>/.agentra/memory/ and .agentra/logs/, same as every other
-# entry point.
+# double-starting a second, conflicting cycle. Every mutation is also
+# written through to registry.record_run (Firestore-backed when configured,
+# same as agent_steps/signals) via _set_run below, so GET /runs and
+# /runs/{run_key} survive a redeploy instead of a rolled Cloud Run revision
+# making every just-finished dogfooding cycle look like it never happened --
+# the dashboard's whole "Runs" tab was silently instance-local until this.
 _active_runs: dict[str, dict[str, Any]] = {}
 _app_locks: dict[str, asyncio.Lock] = {}
+
+
+def _set_run(run_key: str, **fields: Any) -> None:
+    _active_runs[run_key].update(fields)
+    registry.record_run(run_key, **fields)
 
 
 def _lock_for(app_name: str) -> asyncio.Lock:
@@ -158,7 +164,7 @@ async def system_resume() -> dict:
 
 @app.get("/runs/{run_key}")
 async def get_run(run_key: str) -> dict:
-    run = _active_runs.get(run_key)
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run_key")
     return run
@@ -167,15 +173,11 @@ async def get_run(run_key: str) -> dict:
 @app.get("/runs")
 async def list_runs(limit: int = 50) -> dict:
     """TASK-015: dashboard feed of active + recently completed runs.
-    _active_runs is process-local (see its own docstring on why that's
-    fine -- the durable record is each app's own Memory), so this only
-    reflects runs since the current instance started, newest first."""
-    runs = sorted(
-        ({"run_key": key, **info} for key, info in _active_runs.items()),
-        key=lambda r: r["started_at"],
-        reverse=True,
-    )
-    return {"runs": runs[:limit]}
+    Sourced from registry.list_runs() (Firestore-backed when configured,
+    same durable pattern as agent_steps/signals) rather than the in-process
+    _active_runs dict, so this survives a redeploy instead of only
+    reflecting runs since the current instance started."""
+    return {"runs": registry.list_runs(limit)}
 
 
 _SIGNAL_LINE_RE = re.compile(r"^\[(?P<ts>[^\]]+)\] source=(?P<source>\S+) (?P<message>.*)$")
@@ -426,26 +428,28 @@ async def _run_autonomous_background(
 ) -> None:
     lock = _lock_for(app_name)
     async with lock:
-        _active_runs[run_key]["status"] = "running"
+        _set_run(run_key, status="running")
         try:
             env = environments.load(repo) or environments.EnvironmentConfig()
             report = await run_autonomous_cycle(
                 repo, objective, env, feature=feature, skip_deploy=skip_deploy
             )
-            _active_runs[run_key]["status"] = "completed"
-            _active_runs[run_key]["result"] = {
-                "run_id": report.run_id,
-                "actions": report.actions,
-                "final_message": report.final_message,
-                "cost_usd": report.cost_usd,
-            }
+            _set_run(
+                run_key,
+                status="completed",
+                result={
+                    "run_id": report.run_id,
+                    "actions": report.actions,
+                    "final_message": report.final_message,
+                    "cost_usd": report.cost_usd,
+                },
+            )
             _server_log(
                 _active_runs[run_key]["source"],
                 f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} completed | cost=${report.cost_usd:.4f}",
             )
         except Exception as exc:
-            _active_runs[run_key]["status"] = "failed"
-            _active_runs[run_key]["error"] = str(exc)
+            _set_run(run_key, status="failed", error=str(exc))
             _server_log(_active_runs[run_key]["source"], f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
@@ -454,31 +458,34 @@ async def _run_prod_debug_background(
 ) -> None:
     lock = _lock_for(app_name)
     async with lock:
-        _active_runs[run_key]["status"] = "running"
+        _set_run(run_key, status="running")
         try:
             report = await run_prod_debug_cycle(repo, objective, symptom=symptom)
-            _active_runs[run_key]["status"] = "completed"
-            _active_runs[run_key]["result"] = {
-                "run_id": report.run_id,
-                "root_cause_found": report.root_cause_found,
-                "severity": report.severity,
-                "fix_attempted": report.fix_attempted,
-                "promoted_to_prod": report.promoted_to_prod,
-            }
+            _set_run(
+                run_key,
+                status="completed",
+                result={
+                    "run_id": report.run_id,
+                    "root_cause_found": report.root_cause_found,
+                    "severity": report.severity,
+                    "fix_attempted": report.fix_attempted,
+                    "promoted_to_prod": report.promoted_to_prod,
+                },
+            )
             _server_log(
                 "alarm",
                 f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} "
                 f"root_cause_found={report.root_cause_found} promoted_to_prod={report.promoted_to_prod}",
             )
         except Exception as exc:
-            _active_runs[run_key]["status"] = "failed"
-            _active_runs[run_key]["error"] = str(exc)
+            _set_run(run_key, status="failed", error=str(exc))
             _server_log("alarm", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
 def _new_run_key(app_name: str, source: str) -> str:
     run_key = uuid.uuid4().hex[:8]
     _active_runs[run_key] = {"app": app_name, "source": source, "status": "queued", "started_at": time.time()}
+    registry.record_run(run_key, **_active_runs[run_key])
     return run_key
 
 
