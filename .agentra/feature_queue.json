@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "description": "As a user, I would like to comunicate with each agent in voice and recieve response in voice,. I should also use same communication model running live stand-up, each agent should able to tell their update in voice and text during standup. Builder necesaary tooling and infra required for this.",
+    "source": "customer",
+    "external_id": "0ae501859f0d"
+  },
+  {
+    "description": "Each agent should have two channel: one for orchrstrator, another for human communication. Each agent should have ability to  update the work they performed",
+    "source": "customer",
+    "external_id": "d456dc873d9c"
+  }
+]

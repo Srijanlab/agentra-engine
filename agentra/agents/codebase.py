@@ -44,4 +44,5 @@ async def run(repo: Path) -> AgentResult:
         cwd=repo,
         allowed_tools=["Read", "Glob", "Grep"],
         permission_mode="bypassPermissions",
+        agent_label="Codebase Agent",
     )

@@ -91,6 +91,7 @@ async def spawn(repo: Path, spec: TaskSpec, mem: Memory | None = None, run_id: s
         max_turns=spec.max_turns,
         allow_prod=False,
         retry_on_contradictory_result=spec.retry_on_contradictory_result,
+        agent_label=f"Custom Agent: {spec.name}",
     )
     mem.log(run_id, f"spawn[{spec.name}]: ok={result.ok} turns={result.turns} cost=${result.cost_usd:.4f}")
 

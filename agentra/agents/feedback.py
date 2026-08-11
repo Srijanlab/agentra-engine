@@ -49,4 +49,5 @@ Assess measurability of this feature's impact, following your system prompt."""
         allowed_tools=["Read", "Glob", "Grep"],
         permission_mode="bypassPermissions",
         max_turns=15,
+        agent_label="Analytics Feedback Agent",
     )

@@ -43,6 +43,18 @@ order. For each, give a concrete reason grounded in what you observed (a \
 specific drop-off, a missing mechanic, a competitor gap, or -- for queued \
 items -- who asked and why) — not a generic platitude.
 
+Before including any opportunity, check whether its actual value depends on \
+something not yet true in this environment — a dormant/inactive CI or \
+deployment pipeline, an unconfigured service, credentials that don't exist \
+yet, a pending human action documented elsewhere in the repo (e.g. a README \
+saying "not yet active"). If it does, either skip it in favor of something \
+fully actionable right now, or include it but say so plainly in the reason \
+field ("blocked on: X is not yet activated, see Y") — never rank something \
+as high-impact on the premise that a benefit is already real when it's \
+actually gated on something that hasn't happened yet. Confirmed live: a \
+cycle "fixed" a CI workflow file that was never wired into GitHub Actions at \
+all, at real cost, with zero actual effect.
+
 For an opportunity sourced from a known bug or the feature queue, copy its \
 `id` exactly as given in the input below into your output -- that's how the \
 system marks the original backlog entry resolved once shipped, instead of it \
@@ -115,4 +127,5 @@ Identify what to build next, following your system prompt's priority order."""
         allowed_tools=["Read", "Glob", "Grep", "WebSearch"],
         permission_mode="bypassPermissions",
         max_turns=20,
+        agent_label="Discovery Agent",
     )

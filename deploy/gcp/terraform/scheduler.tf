@@ -8,20 +8,28 @@ resource "google_service_account" "scheduler_invoker" {
   display_name = "Cloud Scheduler -> agentra orchestrator invoker"
 }
 
-# Paused, not deleted: there's no app registered yet (deployed idle, on
-# purpose -- app registration is planned via an admin UI, not part of this
-# task queue), so a live cron would just be dead weight in the logs every
-# run. The job, schedule, and payload shape are all real and correct --
-# `gcloud scheduler jobs resume agentra-daily-cycle` (or update --app=<name>
-# once an app is registered) is the only step needed to turn this into a
-# working recurring cycle.
+# Live and targeting agentra itself since the dogfooding directive (was
+# deployed paused with a placeholder app name -- resumed and pointed at
+# "agentra" once that app was registered, matching what's actually
+# running; this source drifted out of sync with that live change until
+# now). Ticks every 15 minutes, deliberately much finer than any sane
+# EnvironmentConfig.schedule_hours value (dashboard-configurable per app,
+# e.g. agentra's own is currently 2): the dashboard is meant to be the one
+# place cadence is controlled, so the tick needs to be frequent enough
+# that whatever's configured there is what actually happens, without
+# someone also having to hand-tune this cron expression to match every
+# time the dashboard value changes. server.py's /trigger/scheduled already
+# no-ops per-app until that app's own schedule_hours has elapsed, so
+# ticking this often costs nothing extra when nothing is due yet.
+# Still agentra-only: other registered apps (e.g. PredictionLeague) have no
+# trigger at all yet -- see /trigger/scheduled's single-app payload shape.
 resource "google_cloud_scheduler_job" "daily_cycle" {
   project   = var.project_id
   region    = var.region
   name      = "agentra-daily-cycle"
-  schedule  = "0 9 * * *"
+  schedule  = "*/15 * * * *"
   time_zone = "UTC"
-  paused    = true
+  paused    = false
 
   http_target {
     uri         = "${google_cloud_run_v2_service.agentra.uri}/trigger/scheduled"
@@ -29,8 +37,7 @@ resource "google_cloud_scheduler_job" "daily_cycle" {
     headers = {
       "Content-Type" = "application/json"
     }
-    # Placeholder app name -- update once a real app is registered.
-    body = base64encode(jsonencode({ app = "REPLACE_WITH_REGISTERED_APP_NAME" }))
+    body = base64encode(jsonencode({ app = "agentra" }))
 
     oidc_token {
       service_account_email = google_service_account.scheduler_invoker.email

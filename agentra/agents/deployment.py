@@ -244,6 +244,7 @@ async def deploy_pre_prod(repo: Path, env: EnvironmentConfig, feature_branch: st
         permission_mode="bypassPermissions",
         max_turns=20,
         allow_prod=False,
+        agent_label="Deployment Agent",
     )
 
 
@@ -283,4 +284,5 @@ async def promote_prod(repo: Path, env: EnvironmentConfig) -> AgentResult:
         permission_mode="bypassPermissions",
         max_turns=20,
         allow_prod=True,
+        agent_label="Deployment Agent",
     )

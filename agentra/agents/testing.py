@@ -100,6 +100,7 @@ Run the full local test/QA pass now, following your system prompt."""
         allowed_tools=["Read", "Bash", "Glob", "Grep"],
         permission_mode="bypassPermissions",
         max_turns=30,
+        agent_label="Testing Agent",
     )
 
 
@@ -118,4 +119,5 @@ Independently verify the live deployment now, following your system prompt."""
         allowed_tools=["Read", "Bash", "Glob", "Grep"],
         permission_mode="bypassPermissions",
         max_turns=20,
+        agent_label="Testing Agent",
     )

@@ -383,6 +383,26 @@ def _apply_request(repo: Path, request: dict) -> None:
         raise ValueError(f"unknown request type: {request_type!r}")
 
 
+def _persist_backlog(app: str, repo: Path, branch: str, errors: list[str]) -> None:
+    """_apply_request only ever writes known_bugs.json/feature_queue.json/
+    objective.yaml to THIS instance's local checkout -- never durable on
+    its own. Confirmed live: a bug/feature added via the dashboard would
+    vanish the next time a *different* Cloud Run instance (a fresh
+    checkout, cloned straight from git) served a request for the same app,
+    since nothing had ever pushed the addition anywhere. Every other write
+    path that touches .agentra/ (register_app, update_app) already commits
+    and pushes immediately for exactly this reason -- dispatch_once's
+    absorption path was the one gap. One commit per app per dispatch batch
+    (not one per request), same "durable before this call returns success"
+    bar the inbox write itself already holds."""
+    from agentra.agents.git_ops import GitOpError, commit_and_push
+
+    try:
+        commit_and_push(repo, branch, f"agentra: absorb inbox requests for {app!r}", [".agentra/"])
+    except GitOpError as exc:
+        errors.append(f"{app}: applied locally but failed to push .agentra/: {exc}")
+
+
 # ── Local (file-based) fallback implementation ──────────────────────────────
 
 
@@ -424,6 +444,7 @@ def _local_dispatch_once() -> DispatchSummary:
         if not pending_dir.is_dir():
             continue
 
+        applied_any = False
         for path in sorted(pending_dir.glob("*.json")):
             processing_path = processing_dir / path.name
             try:
@@ -441,6 +462,10 @@ def _local_dispatch_once() -> DispatchSummary:
 
             os.rename(processing_path, done_dir / path.name)
             processed += 1
+            applied_any = True
+
+        if applied_any:
+            _persist_backlog(app, repo, info.get("branch") or "main", errors)
 
     return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
 
@@ -487,6 +512,7 @@ def _firestore_dispatch_once() -> DispatchSummary:
             doc.reference.update({"status": "pending"})
             resumed_total += 1
 
+        applied_any = False
         for doc in requests_ref.where(filter=FieldFilter("status", "==", "pending")).stream():
             if not _firestore_try_claim(doc.reference):
                 continue
@@ -497,6 +523,10 @@ def _firestore_dispatch_once() -> DispatchSummary:
                 continue  # left in "processing" -- resumed and retried next run
             doc.reference.update({"status": "done"})
             processed += 1
+            applied_any = True
+
+        if applied_any:
+            _persist_backlog(app, repo, info.get("branch") or "main", errors)
 
     return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
 
@@ -716,3 +746,50 @@ def last_run_at(app: str, source: str | None = None) -> float | None:
     if not matches:
         return None
     return max(r["started_at"] for r in matches)
+
+
+# A run stuck at queued/running with no agent_steps activity for this long
+# is presumed orphaned -- the container that was executing it died mid-cycle
+# (OOM kill, revision rollout, etc.) without ever reaching the except block
+# that would normally write status="failed". Confirmed live: a Cloud Run
+# OOM kill left a run showing "running" in the dashboard indefinitely, with
+# no process left anywhere that would ever complete it.
+STALE_RUN_SECONDS = 600
+
+
+def reconcile_stale_runs() -> list[str]:
+    """Marks orphaned running/queued runs as failed. Called opportunistically
+    from GET /runs (server.py) rather than a separate background loop --
+    the dashboard already polls that endpoint every few seconds, so any
+    open dashboard self-heals this within one poll cycle; a run nobody's
+    looking at stays "running" a little longer, which is an acceptable
+    tradeoff against the complexity of a standalone sweep task that could
+    itself be killed mid-sweep. Returns the run_keys it marked failed."""
+    now = time.time()
+    steps_by_run: dict[str, float] = {}
+    for step in list_agent_steps(limit=500):
+        run_id = step.get("run_id")
+        if not run_id:
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(step["ts"]).timestamp()
+        except (KeyError, ValueError):
+            continue
+        if run_id not in steps_by_run or ts > steps_by_run[run_id]:
+            steps_by_run[run_id] = ts
+
+    marked: list[str] = []
+    for run in list_runs(limit=200):
+        if run.get("status") not in ("queued", "running"):
+            continue
+        run_key = run["run_key"]
+        last_activity = steps_by_run.get(run_key, run.get("started_at", now))
+        if now - last_activity > STALE_RUN_SECONDS:
+            record_run(
+                run_key,
+                status="failed",
+                error=f"orphaned: no activity for over {STALE_RUN_SECONDS // 60} minutes -- "
+                "the process running this cycle likely died (e.g. an OOM kill or revision rollout)",
+            )
+            marked.append(run_key)
+    return marked

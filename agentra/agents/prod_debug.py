@@ -69,4 +69,5 @@ Investigate the production issue now, following your system prompt."""
         permission_mode="bypassPermissions",
         max_turns=25,
         allow_prod=False,
+        agent_label="Production Debugging Agent",
     )

@@ -155,6 +155,7 @@ Implement this feature now, following the loop in your system prompt."""
         # surface as a normal failure instead -- _commit_if_dirty below still saves
         # any uncommitted work either way.
         retry_on_contradictory_result=False,
+        agent_label="Implementation Agent",
     )
 
     try:
