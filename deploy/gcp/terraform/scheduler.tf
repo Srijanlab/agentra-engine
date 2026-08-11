@@ -12,18 +12,22 @@ resource "google_service_account" "scheduler_invoker" {
 # deployed paused with a placeholder app name -- resumed and pointed at
 # "agentra" once that app was registered, matching what's actually
 # running; this source drifted out of sync with that live change until
-# now). Hourly, not once-daily: agentra's own EnvironmentConfig.schedule_hours
-# (dashboard-configurable, currently 2) is only meaningful if the tick
-# checking it fires more often than that -- server.py's /trigger/scheduled
-# already no-ops per-app until each app's own schedule_hours has elapsed,
-# so ticking hourly costs nothing extra when an app isn't due yet.
+# now). Ticks every 15 minutes, deliberately much finer than any sane
+# EnvironmentConfig.schedule_hours value (dashboard-configurable per app,
+# e.g. agentra's own is currently 2): the dashboard is meant to be the one
+# place cadence is controlled, so the tick needs to be frequent enough
+# that whatever's configured there is what actually happens, without
+# someone also having to hand-tune this cron expression to match every
+# time the dashboard value changes. server.py's /trigger/scheduled already
+# no-ops per-app until that app's own schedule_hours has elapsed, so
+# ticking this often costs nothing extra when nothing is due yet.
 # Still agentra-only: other registered apps (e.g. PredictionLeague) have no
 # trigger at all yet -- see /trigger/scheduled's single-app payload shape.
 resource "google_cloud_scheduler_job" "daily_cycle" {
   project   = var.project_id
   region    = var.region
   name      = "agentra-daily-cycle"
-  schedule  = "0 * * * *"
+  schedule  = "*/15 * * * *"
   time_zone = "UTC"
   paused    = false
 
