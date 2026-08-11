@@ -383,6 +383,26 @@ def _apply_request(repo: Path, request: dict) -> None:
         raise ValueError(f"unknown request type: {request_type!r}")
 
 
+def _persist_backlog(app: str, repo: Path, branch: str, errors: list[str]) -> None:
+    """_apply_request only ever writes known_bugs.json/feature_queue.json/
+    objective.yaml to THIS instance's local checkout -- never durable on
+    its own. Confirmed live: a bug/feature added via the dashboard would
+    vanish the next time a *different* Cloud Run instance (a fresh
+    checkout, cloned straight from git) served a request for the same app,
+    since nothing had ever pushed the addition anywhere. Every other write
+    path that touches .agentra/ (register_app, update_app) already commits
+    and pushes immediately for exactly this reason -- dispatch_once's
+    absorption path was the one gap. One commit per app per dispatch batch
+    (not one per request), same "durable before this call returns success"
+    bar the inbox write itself already holds."""
+    from agentra.agents.git_ops import GitOpError, commit_and_push
+
+    try:
+        commit_and_push(repo, branch, f"agentra: absorb inbox requests for {app!r}", [".agentra/"])
+    except GitOpError as exc:
+        errors.append(f"{app}: applied locally but failed to push .agentra/: {exc}")
+
+
 # ── Local (file-based) fallback implementation ──────────────────────────────
 
 
@@ -424,6 +444,7 @@ def _local_dispatch_once() -> DispatchSummary:
         if not pending_dir.is_dir():
             continue
 
+        applied_any = False
         for path in sorted(pending_dir.glob("*.json")):
             processing_path = processing_dir / path.name
             try:
@@ -441,6 +462,10 @@ def _local_dispatch_once() -> DispatchSummary:
 
             os.rename(processing_path, done_dir / path.name)
             processed += 1
+            applied_any = True
+
+        if applied_any:
+            _persist_backlog(app, repo, info.get("branch") or "main", errors)
 
     return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
 
@@ -487,6 +512,7 @@ def _firestore_dispatch_once() -> DispatchSummary:
             doc.reference.update({"status": "pending"})
             resumed_total += 1
 
+        applied_any = False
         for doc in requests_ref.where(filter=FieldFilter("status", "==", "pending")).stream():
             if not _firestore_try_claim(doc.reference):
                 continue
@@ -497,6 +523,10 @@ def _firestore_dispatch_once() -> DispatchSummary:
                 continue  # left in "processing" -- resumed and retried next run
             doc.reference.update({"status": "done"})
             processed += 1
+            applied_any = True
+
+        if applied_any:
+            _persist_backlog(app, repo, info.get("branch") or "main", errors)
 
     return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
 
