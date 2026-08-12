@@ -13,5 +13,10 @@
     "feature": "Add test coverage for agentra's git/deployment safety-critical code paths",
     "commit_sha": "5589756defb8cf3423acb0e474acf403360a05b4",
     "ts": "2026-08-11T12:40:53.763955+00:00"
+  },
+  {
+    "feature": "Set up frontend unit/component test tooling (Vitest + RTL) for agentra/web/, with tests for RunDetailDrawer, AgentsPanel, and StandupsPaner",
+    "commit_sha": "7e4b0d58916c2cd7ab32eb57cb27e58cf9c40b87",
+    "ts": "2026-08-12T09:57:03.798737+00:00"
   }
 ]
