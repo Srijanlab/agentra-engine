@@ -8,5 +8,15 @@
     "sender": "agent",
     "text": "Hi! What can I help you with today?",
     "ts": "2026-08-12T03:52:20.407488+00:00"
+  },
+  {
+    "sender": "human",
+    "text": "give me update for today",
+    "ts": "2026-08-12T03:52:33.283041+00:00"
+  },
+  {
+    "sender": "agent",
+    "text": "Happy to help \u2014 but \"update for today\" could mean a few different things. I have access to Slack and Google Drive, but not email or a calendar tool right now. Could you clarify what you'd like a rundown of? For example:\n\n- **Slack**: recent messages/mentions in specific channels or DMs\n- **Google Drive**: recently modified or shared files\n- Something else entirely (news, a specific project, etc.)\n\nLet me know which one(s), and I'll pull it together.",
+    "ts": "2026-08-12T03:52:43.343173+00:00"
   }
 ]
