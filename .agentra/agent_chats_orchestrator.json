@@ -18,5 +18,15 @@
     "sender": "agent",
     "text": "Happy to help \u2014 but \"update for today\" could mean a few different things. I have access to Slack and Google Drive, but not email or a calendar tool right now. Could you clarify what you'd like a rundown of? For example:\n\n- **Slack**: recent messages/mentions in specific channels or DMs\n- **Google Drive**: recently modified or shared files\n- Something else entirely (news, a specific project, etc.)\n\nLet me know which one(s), and I'll pull it together.",
     "ts": "2026-08-12T03:52:43.343173+00:00"
+  },
+  {
+    "sender": "human",
+    "text": "really there is no slack",
+    "ts": "2026-08-12T06:17:03.751995+00:00"
+  },
+  {
+    "sender": "agent",
+    "text": "Yeah, my mistake \u2014 the Slack connector wasn't actually available (it was still in a \"connecting\" state, and I shouldn't have implied I could use it). If you want Slack access, you'd need to authorize it in your claude.ai connector settings first. Let me know what you'd like to do instead.",
+    "ts": "2026-08-12T06:17:11.642395+00:00"
   }
 ]
