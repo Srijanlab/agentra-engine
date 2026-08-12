@@ -57,6 +57,20 @@ def run_log_scope(logger: RunLogger | None):
         _RUN_LOGGER.reset(token)
 
 
+def current_run_logger() -> RunLogger | None:
+    """The ambient logger set by the innermost active run_log_scope, if any.
+
+    Lets other modules that don't otherwise hold a Memory instance or run_id
+    (e.g. agents/safety.py's PreToolUse hook, which only ever sees
+    tool_name/tool_input/context) write into the same durable per-run audit
+    log that run_agent's own message logging uses, without threading new
+    Memory/run_id plumbing through every call site. Returns None outside any
+    run_log_scope (e.g. a bare unit test), in which case callers should just
+    skip logging rather than raise.
+    """
+    return _RUN_LOGGER.get()
+
+
 def _compact_text(text: str, limit: int = 240) -> str:
     compact = _WHITESPACE.sub(" ", text).strip()
     if len(compact) <= limit:

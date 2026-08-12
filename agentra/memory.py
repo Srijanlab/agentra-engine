@@ -38,6 +38,25 @@ from pathlib import Path
 
 CATEGORIES = ("architecture", "decisions", "features", "metrics", "failures")
 
+_SAFETY_DETAIL_LIMIT = 200
+
+
+def format_safety_denial_line(tool_name: str, pattern: str, detail: str, limit: int = _SAFETY_DETAIL_LIMIT) -> str:
+    """Build the run-log line for a blocked tool call, tagged with a
+    '[safety]' channel so it's greppable inside the otherwise-freeform
+    per-run log that Memory.log/record_safety_denial write to.
+
+    A module-level function (not just a Memory method) so agents/safety.py's
+    PreToolUse hook -- which has no Memory instance or run_id, only the
+    ambient run logger from base.py's run_log_scope -- can build the same
+    line shape that Memory.record_safety_denial below does, and hand it to
+    that logger directly instead of needing new plumbing to call
+    record_safety_denial itself.
+    """
+    truncated = detail if len(detail) <= limit else detail[: limit - 3] + "..."
+    return f"[safety] denied tool={tool_name} pattern={pattern!r} detail={truncated!r}"
+
+
 # Written to <repo>/.agentra/.gitignore on first use. We commit the audit
 # trail and config; ignore only the verbose per-run logs that add noise
 # without value in history.
@@ -112,6 +131,22 @@ class Memory:
             timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
             f.write(f"[{timestamp}] {content}\n")
         return path
+
+    def record_safety_denial(self, run_id: str, tool_name: str, pattern: str, detail: str) -> Path:
+        """Durable audit trail for agents/safety.py's guarded_pre_tool_use:
+        every blocked tool call gets a '[safety]'-tagged line in the run's
+        log via the same self.log() channel everything else in a cycle
+        writes to, instead of the deny decision going back to the SDK with
+        zero trace left anywhere. `detail` is the (already truncated)
+        command/file_path that tripped `pattern`.
+
+        In practice the hook itself calls format_safety_denial_line directly
+        through the ambient run logger (base.py's run_log_scope) rather than
+        this method, since it has no Memory instance or run_id of its own --
+        see agents/safety.py. This method exists for any caller that *does*
+        hold a Memory instance, and to keep the line format defined in one
+        place."""
+        return self.log(run_id, format_safety_denial_line(tool_name, pattern, detail))
 
     def shipped_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, ts} -- commit_sha links the

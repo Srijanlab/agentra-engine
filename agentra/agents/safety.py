@@ -43,6 +43,8 @@ import re
 
 from claude_agent_sdk import HookMatcher
 
+from agentra.memory import format_safety_denial_line
+
 # These are matched with re.search against the full Bash `command` string, which
 # can be an arbitrary shell one-liner (e.g. `cmd1 && cmd2`, `cmd1; cmd2`). Do NOT
 # anchor any of these to end-of-string (`$`) unless the trailing content is
@@ -78,7 +80,29 @@ FORBIDDEN_EDIT_PATH_PATTERNS = [
 ]
 
 
-def _deny(reason: str) -> dict:
+def _record_denial(tool_name: str, pattern: str, detail: str) -> None:
+    """Write a durable audit-trail line for a blocked tool call via the
+    ambient run logger that base.py's run_log_scope sets (the same
+    ContextVar run_agent's own message logging reads from) -- so a denial
+    leaves a trace in the run's log instead of just the deny decision going
+    back to the SDK with zero record anywhere else.
+
+    Imports base.py lazily: base.py imports make_hooks from this module at
+    module scope, so this module importing base.py at module scope too would
+    be circular (base.py hasn't finished defining current_run_logger yet at
+    the point it imports this file). By the time this function actually
+    runs, both modules are fully imported, so the lazy import just works.
+    """
+    from agentra.agents.base import current_run_logger
+
+    logger = current_run_logger()
+    if logger is None:
+        return  # no active run_log_scope (e.g. a bare unit test) -- nothing to write to
+    logger(format_safety_denial_line(tool_name, pattern, detail))
+
+
+def _deny(reason: str, *, tool_name: str, pattern: str, detail: str) -> dict:
+    _record_denial(tool_name, pattern, detail)
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -104,7 +128,10 @@ def make_pre_tool_use_hook(allow_prod: bool = False):
                         f"Blocked by safety policy: command matches forbidden "
                         f"pattern for autonomous execution ({pattern!r}). "
                         "Destructive data ops and secrets/billing access are "
-                        "never allowed autonomously."
+                        "never allowed autonomously.",
+                        tool_name=tool_name,
+                        pattern=pattern,
+                        detail=command,
                     )
             if not allow_prod:
                 for pattern in PROD_ONLY_BASH_PATTERNS:
@@ -112,13 +139,21 @@ def make_pre_tool_use_hook(allow_prod: bool = False):
                         return _deny(
                             f"Blocked by safety policy: command touches production "
                             f"({pattern!r}). Production changes require the explicit, "
-                            "opted-in promote/auto-remediate path, not this agent."
+                            "opted-in promote/auto-remediate path, not this agent.",
+                            tool_name=tool_name,
+                            pattern=pattern,
+                            detail=command,
                         )
         if tool_name in ("Write", "Edit"):
             path = str(tool_input.get("file_path", ""))
             for pattern in FORBIDDEN_EDIT_PATH_PATTERNS:
                 if re.search(pattern, path, re.IGNORECASE):
-                    return _deny(f"Blocked by safety policy: refusing to edit {path!r} autonomously.")
+                    return _deny(
+                        f"Blocked by safety policy: refusing to edit {path!r} autonomously.",
+                        tool_name=tool_name,
+                        pattern=pattern,
+                        detail=path,
+                    )
         return {}
 
     return guarded_pre_tool_use

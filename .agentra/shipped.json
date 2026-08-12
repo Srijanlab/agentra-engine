@@ -1,4 +1,17 @@
 [
-  "Add tests/test_safety_hook.py (fast deterministic pytest coverage for make_pre_tool_use_hook) and fix the DELETE FROM end-of-string-anchoring bypass",
-  "registry.py get_app_repo(): resync an existing stale checkout to remote HEAD before handing it back"
+  {
+    "feature": "Add tests/test_safety_hook.py (fast deterministic pytest coverage for make_pre_tool_use_hook) and fix the DELETE FROM end-of-string-anchoring bypass",
+    "commit_sha": null,
+    "ts": null
+  },
+  {
+    "feature": "registry.py get_app_repo(): resync an existing stale checkout to remote HEAD before handing it back",
+    "commit_sha": null,
+    "ts": null
+  },
+  {
+    "feature": "Add test coverage for agentra's git/deployment safety-critical code paths",
+    "commit_sha": "5589756defb8cf3423acb0e474acf403360a05b4",
+    "ts": "2026-08-11T12:40:53.763955+00:00"
+  }
 ]
