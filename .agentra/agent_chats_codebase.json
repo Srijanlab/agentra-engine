@@ -1,0 +1,12 @@
+[
+  {
+    "sender": "human",
+    "text": "hello",
+    "ts": "2026-08-12T15:55:09.938043+00:00"
+  },
+  {
+    "sender": "agent",
+    "text": "Hi! I'm the Codebase Agent \u2014 I do read-only scanning of this repository to help answer questions about its framework, architecture, and existing code patterns.\n\nWhat would you like to know? For example, I can help with:\n- Understanding the overall project structure/architecture\n- Locating where specific features or symbols are implemented\n- Explaining existing patterns/conventions used in the code\n- Investigating how a particular module or component works\n\nWhat are you looking to explore?",
+    "ts": "2026-08-12T15:55:17.523397+00:00"
+  }
+]
