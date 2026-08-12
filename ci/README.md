@@ -1,8 +1,8 @@
 # CI workflow -- not yet active
 
 `github-actions-ci.yml` in this directory is a real, ready-to-use GitHub
-Actions workflow (py_compile across `agentra/`, `npm run build` in
-`agentra/web/`) -- it isn't at `.github/workflows/ci.yml` because the
+Actions workflow (py_compile + pytest across `agentra/`, `npm test` +
+`npm run build` in `agentra/web/`) -- it isn't at `.github/workflows/ci.yml` because the
 `agentra-orchestrator` GitHub App (the one this repo is itself registered
 under, in agentra's own dashboard) was never granted the **Workflows**
 permission. GitHub Apps categorically cannot push anything under
