@@ -24,9 +24,13 @@ unreachable or unconfigured, a known availability tradeoff -- see
 known_bugs()'s own docstring). A shipped feature is a closed 'enhancement'
 issue (record_shipped()/shipped_features()), so the whole feature lifecycle
 -- requested, in progress, shipped -- lives as one GitHub Issue with a
-run_id/commit_sha trail, not a JSON ledger duplicating it. Getting real data
-INTO the backlog (customer feedback from whatever database a given app
-uses) is the job of a per-app adapter command
+run_id/commit_sha trail, not a JSON ledger duplicating it. That same Issue
+also gets a card on the app's GitHub Project board (connectors/
+github_projects.py, "Todo" on record_feature_request, "Done" on
+record_shipped) -- "feature mapped to project, bug mapped to issue": bugs
+stay Issues-only, features get both. Getting real data INTO the backlog
+(customer feedback from whatever database a given app uses) is the job of
+a per-app adapter command
 (EnvironmentConfig.feedback_fetch_command, invoked by orchestrator.py/
 brain.py) -- agentra's own code never talks to Firestore/Postgres/anything
 app-specific directly.
@@ -336,12 +340,19 @@ class Memory:
             from agentra.connectors import github_issues
 
             if resolves_id and resolves_id.isdigit():
-                github_issues.close_issue(repo_url, int(resolves_id), comment=note, body_suffix=body_suffix)
+                issue_number = int(resolves_id)
+                github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
             else:
                 issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL])
-                github_issues.close_issue(repo_url, issue["number"], comment=note, body_suffix=body_suffix)
+                issue_number = issue["number"]
+                github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
         except Exception:
             logger.error("record_shipped: failed to record shipped feature %r on %s", feature, repo_url, exc_info=True)
+            return
+
+        from agentra.connectors import github_projects
+
+        github_projects.add_item_to_project(repo_url, issue_number, status="Done")
 
     def released_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, ts, release_run_id} -- the
@@ -498,9 +509,14 @@ class Memory:
             body = f"Source: {source}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, description, body, labels=[_FEATURE_LABEL])
+            issue = github_issues.create_issue(repo_url, description, body, labels=[_FEATURE_LABEL])
         except Exception:
             logger.error("record_feature_request: failed to create a GitHub issue on %s -- feature %r was NOT recorded anywhere", repo_url, description, exc_info=True)
+            return
+
+        from agentra.connectors import github_projects
+
+        github_projects.add_item_to_project(repo_url, issue["number"], status="Todo")
 
     def clear_feature_request(self, external_id: str, resolution_note: str | None = None) -> None:
         if not external_id.isdigit():

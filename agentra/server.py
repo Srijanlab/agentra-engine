@@ -593,6 +593,16 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
 
+    # One GitHub Project per app, provisioned once at onboarding -- see
+    # github_projects.py's module docstring. Best-effort: ensure_project
+    # never raises (missing "Projects" App permission, no github.com
+    # remote, etc. all just log and return None), so a Project hiccup
+    # never blocks registering the app itself.
+    from agentra.connectors import github_projects
+
+    if github_projects.ensure_project(payload.repo_url) is None:
+        _server_log("register", f"app={payload.name!r} registered, but GitHub Project provisioning failed or was skipped")
+
     push_warning = _apply_app_config(
         dest,
         payload.branch,

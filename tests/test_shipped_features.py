@@ -11,8 +11,20 @@ real local git repos on disk, github_issues' HTTP calls monkeypatched.
 import subprocess
 from pathlib import Path
 
-from agentra.connectors import github_issues
+import pytest
+
+from agentra.connectors import github_issues, github_projects
 from agentra.memory import Memory
+
+
+@pytest.fixture(autouse=True)
+def _stub_project_sync(monkeypatch):
+    # record_shipped also moves the issue's card to "Done" on the app's
+    # GitHub Project (see memory.py/github_projects.py) -- stubbed to a
+    # no-op here so these Issues-focused tests don't also need a fake
+    # Project backend. test_github_projects.py covers github_projects.py
+    # itself; a dedicated test below asserts this gets called correctly.
+    monkeypatch.setattr(github_projects, "add_item_to_project", lambda *a, **k: None)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -124,6 +136,26 @@ def test_record_shipped_closes_the_originating_feature_queue_issue_instead_of_cr
 
     assert closed["issue_number"] == 42
     assert "Shipped-Run-ID: run7" in closed["body_suffix"]
+
+
+def test_record_shipped_moves_the_project_card_to_done(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(github_issues, "create_issue", lambda *a, **k: {"number": 99})
+    monkeypatch.setattr(github_issues, "close_issue", lambda *a, **k: None)
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects, "add_item_to_project", lambda repo_url, issue_number, status="Todo": project_calls.append((issue_number, status))
+    )
+
+    mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
+
+    assert project_calls == [(99, "Done")]
+
+    project_calls.clear()
+    mem.record_shipped("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
+
+    assert project_calls == [(42, "Done")]
 
 
 def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
