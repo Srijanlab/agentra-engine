@@ -400,7 +400,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
-        test = await testing.run_local(session.repo, session.cb_summary)
+        test = await testing.run_local(session.repo, session.cb_summary, session.mem)
         session.cost_usd += test.cost_usd
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
