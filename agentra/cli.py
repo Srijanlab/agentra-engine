@@ -285,14 +285,15 @@ def main() -> None:
             config = detected
         else:
             config = _interactive_env_init(detected)
-        path = environments.save(repo, config)
-        print(f"\nWrote {path}")
+        environments.save(repo, config)
+        print("\nSaved to GitHub Actions Variables (AGENTRA_*).")
         print(config)
         if config.auto_remediate_prod:
             print(
                 "\nNote: auto_remediate_prod is ON for this app. The Production "
                 "Debugging Agent may deploy verified hotfixes to prod without "
-                "asking. Edit .agentra/environments.yaml to turn it back off."
+                "asking. Edit the AGENTRA_AUTO_REMEDIATE_PROD repo variable on "
+                "GitHub to turn it back off."
             )
 
     elif args.command == "promote":
@@ -328,8 +329,7 @@ def main() -> None:
             )
 
     elif args.command == "objective" and args.objective_command == "set":
-        path = Memory(args.repo.resolve()).set_objective(args.objective_text)
-        print(f"Wrote {path}")
+        Memory(args.repo.resolve()).set_objective(args.objective_text)
         print(f"objective: {args.objective_text}")
 
     elif args.command == "objective" and args.objective_command == "show":

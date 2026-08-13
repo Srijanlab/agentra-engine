@@ -14,9 +14,12 @@ dashboard's ConnectGate doesn't block on a real credential).
 from __future__ import annotations
 
 import datetime as dt
+import subprocess
 import time
+from pathlib import Path
 
 from agentra import registry
+from agentra.connectors import github_fake
 from agentra.memory import Memory
 
 _APPS = {
@@ -55,16 +58,46 @@ _FEATURE_QUEUE = {
 }
 
 
+def _git_init_with_remote(repo: Path, remote_url: str | None) -> None:
+    """known_bugs/feature_queue/objective/environments are GitHub-only now
+    (memory.py/environments.py derive the target via `git remote get-url
+    origin` on this checkout, no local file fallback) -- without a real
+    git repo + remote here, every fixture write below would silently no-op
+    and the dev dashboard would show nothing seeded at all. No network
+    operation: `git remote add` just records the URL, it doesn't need the
+    remote to actually be reachable, so this works with the SSH-style URL
+    (ContentAutomationPlatform's fixture) too."""
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "agentra-dev"], cwd=repo, check=True, capture_output=True)
+    (repo / "README.md").write_text(f"# {repo.name} (dev fixture)\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "dev fixture"], cwd=repo, check=True, capture_output=True)
+    if remote_url:
+        subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=repo, check=True, capture_output=True)
+
+
 def seed(force: bool = False) -> None:
     """No-op if apps are already registered, unless force=True -- so
     re-running `agentra dev` doesn't duplicate fixture data every time."""
     if registry.list_apps() and not force:
         return
 
+    # No real GitHub App credentials in dev mode -- fake the backend so the
+    # GitHub-only known_bugs/feature_queue/objective/environments storage
+    # (see memory.py's module docstring) has somewhere to actually land,
+    # instead of every seed write below silently no-op'ing. Same
+    # persist_path server.py's own DEV_MODE startup uses -- dev.sh runs
+    # this seed script and `agentra serve` as separate processes, so the
+    # fake backend's state has to survive on disk between them.
+    github_fake.install(persist_path=registry.AGENTRA_HOME / "dev_github_fake.json")
+
     dev_repos_root = registry.AGENTRA_HOME / "dev_repos"
     for name, fixture in _APPS.items():
         repo = dev_repos_root / name
         repo.mkdir(parents=True, exist_ok=True)
+        if not (repo / ".git").exists():
+            _git_init_with_remote(repo, fixture.get("repo_url"))
         mem = Memory(repo)
         mem.set_objective(fixture["objective"])
         for feature, sha in fixture["shipped"]:
