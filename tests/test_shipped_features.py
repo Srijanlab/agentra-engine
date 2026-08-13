@@ -119,7 +119,7 @@ def test_record_shipped_creates_and_closes_a_fresh_issue_for_a_self_initiated_fe
     monkeypatch.setattr(github_issues, "create_issue", _create_issue)
     monkeypatch.setattr(github_issues, "close_issue", _close_issue)
 
-    mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
+    result = mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
 
     assert created["title"] == "Dark mode"
     assert created["labels"] == ["enhancement"]
@@ -128,6 +128,7 @@ def test_record_shipped_creates_and_closes_a_fresh_issue_for_a_self_initiated_fe
     assert "abc1234" in closed["comment"]
     assert "Shipped-Run-ID: run42" in closed["body_suffix"]
     assert "Shipped-Commit: abc1234" in closed["body_suffix"]
+    assert result == 99
 
 
 def test_record_shipped_closes_the_originating_feature_queue_issue_instead_of_creating_a_new_one(tmp_path, monkeypatch):
@@ -146,10 +147,11 @@ def test_record_shipped_closes_the_originating_feature_queue_issue_instead_of_cr
         ),
     )
 
-    mem.record_shipped("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
+    result = mem.record_shipped("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
 
     assert closed["issue_number"] == 42
     assert "Shipped-Run-ID: run7" in closed["body_suffix"]
+    assert result == 42
 
 
 def test_record_shipped_moves_the_project_card_to_done(tmp_path, monkeypatch):
@@ -161,17 +163,73 @@ def test_record_shipped_moves_the_project_card_to_done(tmp_path, monkeypatch):
     monkeypatch.setattr(
         github_projects,
         "add_item_to_feature_project",
-        lambda repo_url, feature_issue_number, title, status="Todo": project_calls.append((feature_issue_number, title, status)),
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, title, issue_number, status)
+        ),
     )
 
     mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
 
-    assert project_calls == [(99, "Dark mode", "Done")]
+    assert project_calls == [(99, "Dark mode", None, "Done")]
 
     project_calls.clear()
     mem.record_shipped("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
 
-    assert project_calls == [(42, "Approvals queue UI", "Done")]
+    assert project_calls == [(42, "Approvals queue UI", None, "Done")]
+
+
+def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    sub_issue_calls = {}
+
+    def _create_sub_issue(repo_url, parent_issue_number, title, body, labels=None):
+        sub_issue_calls.update(parent_issue_number=parent_issue_number, title=title, labels=labels)
+        return {"number": 55, "title": title}
+
+    monkeypatch.setattr(github_issues, "create_sub_issue", _create_sub_issue)
+    monkeypatch.setattr(github_issues, "close_issue", lambda *a, **k: None)
+    monkeypatch.setattr(github_issues, "get_issue", lambda repo_url, issue_number: {"number": issue_number, "title": "Big feature"})
+
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, title, issue_number, status)
+        ),
+    )
+
+    result = mem.record_shipped("Part two", commit_sha="cafe123", run_id="run9", sub_feature_of="10")
+
+    assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["enhancement"]}
+    # Lands on the PARENT's board (feature_issue_number=10, the parent's own
+    # title), as an additional item (issue_number=55), not a board of its own.
+    assert project_calls == [(10, "Big feature", 55, "Done")]
+    assert result == 55
+
+
+def test_record_shipped_with_sub_feature_of_falls_back_to_the_feature_name_when_parent_lookup_fails(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(github_issues, "create_sub_issue", lambda *a, **k: {"number": 55, "title": "Part two"})
+    monkeypatch.setattr(github_issues, "close_issue", lambda *a, **k: None)
+    monkeypatch.setattr(github_issues, "get_issue", lambda repo_url, issue_number: None)
+
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, title, issue_number, status)
+        ),
+    )
+
+    mem.record_shipped("Part two", sub_feature_of="10")
+
+    assert project_calls == [(10, "Part two", 55, "Done")]
 
 
 def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):

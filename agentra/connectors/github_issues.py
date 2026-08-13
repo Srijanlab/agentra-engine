@@ -44,6 +44,22 @@ def _headers(repo_url: str) -> dict[str, str]:
     return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
 
 
+def get_issue(repo_url: str, issue_number: int) -> dict | None:
+    """Single issue's REST JSON, or None if it doesn't exist. Used to look
+    up a parent issue's title when recording a sub-feature (memory.py's
+    record_shipped, sub_feature_of) -- the sub-feature's Project board is
+    the parent's, titled after the parent, so a fresh board needs the
+    parent's actual title, not the sub-feature's own."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    resp = httpx.get(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}", headers=_headers(repo_url), timeout=15
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
 def create_issue(repo_url: str, title: str, body: str, labels: list[str] | None = None) -> dict:
     """Returns the created issue's JSON (number, html_url, etc.) -- callers
     that need to track it back to a known_bug/feature_queue entry should

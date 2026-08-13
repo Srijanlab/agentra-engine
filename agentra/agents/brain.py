@@ -304,8 +304,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         "If this brief comes from check_backlog's known bugs or feature queue (not your own "
         "idea), pass its id in resolves_id with the matching resolves_origin -- otherwise it "
         "never gets cleared and will keep resurfacing every future cycle. Leave both empty "
-        "strings for your own autonomous ideas.",
-        {"feature_brief": str, "resolves_origin": str, "resolves_id": str},
+        "strings for your own autonomous ideas. If a feature is too large for one call, split "
+        "it: the result of each call names an issue number ('issue #N') -- pass that number in "
+        "sub_feature_of on every following call for the same feature, so each part lands as a "
+        "linked sub-issue on the same board instead of a separate one. Leave sub_feature_of "
+        "empty for a single-call, self-contained feature (the common case).",
+        {"feature_brief": str, "resolves_origin": str, "resolves_id": str, "sub_feature_of": str},
     )
     async def implement_feature(args):
         if stop := session.check_hard_stop():
@@ -354,15 +358,18 @@ def _tools_for(session: OrchestratorSession) -> list:
             pass  # dashboard's shipped list just shows no artifact link -- not worth failing the cycle over
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
+        sub_feature_of = args.get("sub_feature_of") or ""
         # record_shipped closes a GitHub 'enhancement' issue as the shipped record,
         # stamping run_id/commit_sha into it -- the originating feature_queue issue
-        # itself when this resolves one (so there's exactly one issue, not a
-        # duplicate), otherwise a fresh issue created and closed immediately.
-        session.mem.record_shipped(
+        # itself when this resolves one, a linked sub-issue of sub_feature_of's
+        # parent when this is one part of a larger feature, otherwise a fresh issue
+        # created and closed immediately.
+        issue_number = session.mem.record_shipped(
             feature_name,
             commit_sha=commit_sha,
             run_id=session.run_id,
             resolves_id=resolves_id if resolves_origin == "feature_queue" else None,
+            sub_feature_of=sub_feature_of or None,
         )
         session.mem.append_documentation(
             f"Shipped **{feature_name}**"
@@ -375,11 +382,28 @@ def _tools_for(session: OrchestratorSession) -> list:
             )
             session.mem.clear_known_bug(resolves_id, resolution_note)
         session.current_feature = feature_name
+        # The parent id a follow-up sub_feature_of call should reference: the same
+        # parent this call itself was a part of, the feature_queue issue this
+        # resolved, or (a fresh top-level feature) the issue just created -- so a
+        # multi-part feature always accumulates under its first-ever issue number.
+        parent_for_next = sub_feature_of or (resolves_id if resolves_origin == "feature_queue" else "") or (
+            str(issue_number) if issue_number else ""
+        )
+        next_part_hint = (
+            f" If more parts remain for this feature, call implement_feature again with "
+            f"sub_feature_of={parent_for_next!r}."
+            if parent_for_next
+            else ""
+        )
+        issue_note = f" (issue #{issue_number})" if issue_number else ""
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": f"Implemented and committed {feature_name!r}. Call run_local_tests before deploy_pre_prod.",
+                    "text": (
+                        f"Implemented and committed {feature_name!r}{issue_note}. "
+                        f"Call run_local_tests before deploy_pre_prod.{next_part_hint}"
+                    ),
                 }
             ]
         }

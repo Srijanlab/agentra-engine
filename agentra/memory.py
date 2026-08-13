@@ -324,39 +324,76 @@ class Memory:
         commit_sha: str | None = None,
         run_id: str | None = None,
         resolves_id: str | None = None,
-    ) -> None:
+        sub_feature_of: str | None = None,
+    ) -> int | None:
         """Records a shipped feature as a closed GitHub 'enhancement' issue --
         the same ledger feature_queue() reads (open) and shipped_features()
         reads (closed), so "pending" vs. "shipped" is just an issue's state,
-        never two things to keep in sync. If `resolves_id` names the
-        feature_queue issue this feature came from, that issue is closed as
-        the shipped record; otherwise (a self-initiated idea, or one
-        resolving a known_bug -- callers close that separately via
-        clear_known_bug) a fresh issue is opened and closed immediately, so
-        every shipped feature ends up with exactly one audit-trail issue."""
+        never two things to keep in sync.
+
+        Exactly one of resolves_id/sub_feature_of should be set, or neither:
+        - resolves_id: the feature_queue issue this feature came from --
+          that issue is closed as the shipped record itself.
+        - sub_feature_of: a parent issue this is one PART of a larger
+          feature being built across multiple implement_feature calls
+          (agents/brain.py) -- a fresh issue is created and closed, but
+          linked as a GitHub-native sub-issue of the parent (see
+          github_issues.create_sub_issue) and added to the PARENT's
+          Project board rather than getting a board of its own.
+        - neither: a self-contained, self-initiated feature -- a fresh
+          issue is opened and closed immediately, same as sub_feature_of
+          but with no parent.
+
+        Returns the shipped feature's own issue number (whichever of the
+        three paths above produced it), or None if recording failed --
+        callers that support multi-part features surface this back to the
+        caller so a follow-up call can reference it as sub_feature_of for
+        the next part. Every shipped feature ends up with exactly one
+        audit-trail issue either way."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_shipped: %s has no github.com remote -- shipped feature %r was NOT recorded anywhere", self.repo, feature)
-            return
+            return None
         note = f"Shipped as {feature!r}" + (f" (run {run_id})" if run_id else "") + (f" (commit {commit_sha})" if commit_sha else "") + "."
         body_suffix = "---\n" + (f"Shipped-Run-ID: {run_id}\n" if run_id else "") + (f"Shipped-Commit: {commit_sha}\n" if commit_sha else "")
         try:
             from agentra.connectors import github_issues
 
-            if resolves_id and resolves_id.isdigit():
+            if sub_feature_of and sub_feature_of.isdigit():
+                parent_number = int(sub_feature_of)
+                issue = github_issues.create_sub_issue(
+                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL]
+                )
+                issue_number = issue["number"]
+                github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                board_issue_number = parent_number
+                parent = github_issues.get_issue(repo_url, parent_number)
+                board_title = parent["title"] if parent else feature
+            elif resolves_id and resolves_id.isdigit():
                 issue_number = int(resolves_id)
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                board_issue_number = issue_number
+                board_title = feature
             else:
                 issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL])
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                board_issue_number = issue_number
+                board_title = feature
         except Exception:
             logger.error("record_shipped: failed to record shipped feature %r on %s", feature, repo_url, exc_info=True)
-            return
+            return None
 
         from agentra.connectors import github_projects
 
-        github_projects.add_item_to_feature_project(repo_url, issue_number, title=feature, status="Done")
+        github_projects.add_item_to_feature_project(
+            repo_url,
+            board_issue_number,
+            title=board_title,
+            issue_number=issue_number if sub_feature_of else None,
+            status="Done",
+        )
+        return issue_number
 
     def released_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, ts, release_run_id} -- the

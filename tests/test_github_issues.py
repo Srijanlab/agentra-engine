@@ -26,6 +26,32 @@ def _fake_response(json_data, status_code=200):
     return resp
 
 
+def test_get_issue_returns_the_issue_json(monkeypatch):
+    def fake_get(url, headers, timeout):
+        assert url == "https://api.github.com/repos/acme/app/issues/7"
+        return _fake_response({"number": 7, "title": "Parent feature"})
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    result = github_issues.get_issue("https://github.com/acme/app.git", 7)
+
+    assert result == {"number": 7, "title": "Parent feature"}
+
+
+def test_get_issue_returns_none_on_404(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return _fake_response({}, status_code=404)
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    assert github_issues.get_issue("https://github.com/acme/app.git", 999) is None
+
+
+def test_get_issue_rejects_non_github_url():
+    with pytest.raises(github_issues.GitHubIssuesError):
+        github_issues.get_issue("git@gitlab.com:acme/app.git", 1)
+
+
 def test_create_issue_posts_to_the_right_repo_with_labels(monkeypatch):
     captured = {}
 

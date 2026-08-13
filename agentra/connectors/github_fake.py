@@ -103,6 +103,10 @@ class FakeGitHubBackend:
             self._save()
         return sub_issue
 
+    def get_issue(self, repo_url: str, issue_number: int) -> dict | None:
+        issue = self.issues[repo_url].get(issue_number)
+        return dict(issue) if issue else None
+
     def list_open_issues(self, repo_url: str, labels: list[str] | None = None) -> list[dict]:
         results = [i for i in self.issues[repo_url].values() if i["state"] == "open"]
         if labels:
@@ -182,6 +186,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
     patches = [
         (github_issues, "create_issue", backend.create_issue),
         (github_issues, "create_sub_issue", backend.create_sub_issue),
+        (github_issues, "get_issue", backend.get_issue),
         (github_issues, "list_open_issues", backend.list_open_issues),
         (github_issues, "list_closed_issues", backend.list_closed_issues),
         (github_issues, "close_issue", backend.close_issue),

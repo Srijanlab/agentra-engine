@@ -52,6 +52,14 @@ def test_create_sub_issue_links_under_its_parent():
     assert backend.issues["https://github.com/acme/app.git"][parent["number"]]["sub_issue_numbers"] == [sub["number"]]
 
 
+def test_get_issue_returns_the_issue_or_none():
+    backend = github_fake.FakeGitHubBackend()
+    created = backend.create_issue("https://github.com/acme/app.git", "A feature", "")
+
+    assert backend.get_issue("https://github.com/acme/app.git", created["number"])["title"] == "A feature"
+    assert backend.get_issue("https://github.com/acme/app.git", 999) is None
+
+
 def test_variables_are_namespaced_by_repo_url():
     backend = github_fake.FakeGitHubBackend()
 
