@@ -138,7 +138,7 @@ def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(m
         if "owner { id }" in query:
             return {"repository": {"id": "REPO_1", "owner": {"id": "OWNER_1"}}}
         if "createProjectV2(input:" in query:
-            assert variables == {"ownerId": "OWNER_1", "title": github_projects._PROJECT_TITLE}
+            assert variables == {"ownerId": "OWNER_1", "title": "app Features"}
             return {
                 "createProjectV2": {
                     "projectV2": {"id": "PVT_1", "number": 7, "url": "https://github.com/orgs/acme/projects/7"}
