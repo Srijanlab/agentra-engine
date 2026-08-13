@@ -84,7 +84,12 @@ locals {
       mkfs.ext4 -F "$DEVICE"
     fi
     mkdir -p "$MOUNT"
-    mount "$DEVICE" "$MOUNT"
+    # Idempotent: google_metadata_script_runner startup (a manual re-run
+    # without a reboot -- e.g. to pick up a metadata-only startup-script
+    # change) hits a bare `mount` unconditionally and fails outright with
+    # "already mounted" -- confirmed live -- aborting the whole script
+    # before any of the docker steps below ever run.
+    mountpoint -q "$MOUNT" || mount "$DEVICE" "$MOUNT"
     mkdir -p "$MOUNT/claude" "$MOUNT/agentra-home" "$MOUNT/repos"
     # agentuser inside the container is uid 1000 (Dockerfile's useradd
     # default) -- chown from the host side since these dirs are freshly
@@ -113,6 +118,13 @@ locals {
 
     docker rm -f agentra 2>/dev/null || true
     docker pull "$IMAGE"
+    # Every redeploy pulls a fresh :staging image without ever removing the
+    # previous one -- confirmed live: 18 accumulated images (~15GB, 91%
+    # reclaimable) filled the 16GB /var partition solid and failed a
+    # redeploy outright ("no space left on device") partway through
+    # `docker pull`. -a also clears images with no running container (the
+    # just-superseded previous :staging layers), not just dangling ones.
+    docker image prune -af 2>/dev/null || true
     docker run -d --name agentra --restart=always \
       -v "$MOUNT/claude:/home/agentuser/.claude" \
       -v "$MOUNT/agentra-home:/home/agentuser/.agentra" \
