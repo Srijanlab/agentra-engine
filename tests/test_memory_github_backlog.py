@@ -14,8 +14,20 @@ are monkeypatched -- no real GitHub API traffic.
 import subprocess
 from pathlib import Path
 
-from agentra.connectors import github_issues
+import pytest
+
+from agentra.connectors import github_issues, github_projects
 from agentra.memory import Memory
+
+
+@pytest.fixture(autouse=True)
+def _stub_project_sync(monkeypatch):
+    # record_feature_request also adds the new issue to the app's GitHub
+    # Project (see memory.py/github_projects.py) -- stubbed to a no-op here
+    # so these Issues-focused tests don't also need a fake Project backend.
+    # test_github_projects.py covers github_projects.py itself; a couple of
+    # tests below assert this gets called with the right arguments.
+    monkeypatch.setattr(github_projects, "add_item_to_project", lambda *a, **k: None)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -213,6 +225,20 @@ def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):
 
     assert created["title"] == "Add keyboard shortcuts"
     assert created["labels"] == ["enhancement"]
+
+
+def test_record_feature_request_adds_the_new_issue_to_the_project_as_todo(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(github_issues, "create_issue", lambda *a, **k: {"number": 11})
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects, "add_item_to_project", lambda repo_url, issue_number, status="Todo": project_calls.append((issue_number, status))
+    )
+
+    mem.record_feature_request("Add keyboard shortcuts")
+
+    assert project_calls == [(11, "Todo")]
 
 
 def test_clear_feature_request_closes_the_github_issue(tmp_path, monkeypatch):

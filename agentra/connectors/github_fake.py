@@ -1,8 +1,13 @@
-"""In-memory fake for github_issues/github_variables -- used by dev_seed.py
-(AGENTRA_DEV_MODE has no real GitHub App credentials, but known_bugs/
-feature_queue/objective/environments are GitHub-only now, with no local
-file fallback) and by tests that need a real create -> list -> close
-round-trip without a live GitHub API call.
+"""In-memory fake for github_issues/github_variables/github_projects --
+used by dev_seed.py (AGENTRA_DEV_MODE has no real GitHub App credentials,
+but known_bugs/feature_queue/objective/environments/Projects are
+GitHub-only now, with no local file fallback) and by tests that need a
+real create -> list -> close round-trip without a live GitHub API call.
+
+github_projects.py talks GraphQL, not the REST shape the rest of this
+module fakes -- rather than faking individual GraphQL mutations, its two
+public functions (ensure_project/add_item_to_project) are faked directly
+at the same level github_issues.create_issue etc. already are.
 """
 
 from __future__ import annotations
@@ -29,9 +34,12 @@ class FakeGitHubBackend:
     own .agentra/ -- that's the real "no local file" boundary this fake
     doesn't cross)."""
 
+    _STATUS_OPTIONS = ["Todo", "In Progress", "Done"]
+
     def __init__(self, persist_path: Path | None = None) -> None:
         self.issues: dict[str, dict[int, dict]] = defaultdict(dict)
         self.variables: dict[str, dict[str, str]] = defaultdict(dict)
+        self.projects: dict[str, dict] = {}
         self._next_issue_number: dict[str, int] = defaultdict(lambda: 1)
         self._persist_path = persist_path
         if persist_path and persist_path.exists():
@@ -39,6 +47,7 @@ class FakeGitHubBackend:
                 data = json.loads(persist_path.read_text())
                 self.issues = defaultdict(dict, {k: {int(n): v for n, v in issues.items()} for k, issues in data.get("issues", {}).items()})
                 self.variables = defaultdict(dict, data.get("variables", {}))
+                self.projects = data.get("projects", {})
                 self._next_issue_number = defaultdict(lambda: 1, data.get("next_issue_number", {}))
             except Exception:
                 pass  # corrupt/partial fixture state -- start fresh rather than crash dev mode
@@ -49,7 +58,12 @@ class FakeGitHubBackend:
         self._persist_path.parent.mkdir(parents=True, exist_ok=True)
         self._persist_path.write_text(
             json.dumps(
-                {"issues": self.issues, "variables": self.variables, "next_issue_number": self._next_issue_number},
+                {
+                    "issues": self.issues,
+                    "variables": self.variables,
+                    "projects": self.projects,
+                    "next_issue_number": self._next_issue_number,
+                },
                 indent=2,
             )
         )
@@ -94,6 +108,26 @@ class FakeGitHubBackend:
         self.variables[repo_url][name] = value
         self._save()
 
+    def ensure_project(self, repo_url: str) -> dict | None:
+        project = self.projects.get(repo_url)
+        if project is None:
+            project = {
+                "project_id": f"PVT_fake_{repo_url}",
+                "status_field_id": "PVTSSF_fake_status",
+                "status_options": {name: f"OPT_fake_{name.lower().replace(' ', '_')}" for name in self._STATUS_OPTIONS},
+                "items": {},
+            }
+            self.projects[repo_url] = project
+            self._save()
+        return {k: v for k, v in project.items() if k != "items"}
+
+    def add_item_to_project(self, repo_url: str, issue_number: int, status: str = "Todo") -> None:
+        project = self.ensure_project(repo_url)
+        if project is None or status not in project["status_options"]:
+            return
+        self.projects[repo_url]["items"][str(issue_number)] = status
+        self._save()
+
 
 def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_path: Path | None = None) -> FakeGitHubBackend:
     """Patches the github_issues/github_variables modules in place with
@@ -109,7 +143,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
     meant to live for the whole `agentra dev` process. Without this, a
     test-only direct assignment would permanently mutate these modules
     for every test file that runs afterward in the same pytest process."""
-    from agentra.connectors import github_issues, github_variables
+    from agentra.connectors import github_issues, github_projects, github_variables
 
     backend = backend or FakeGitHubBackend(persist_path=persist_path)
     patches = [
@@ -119,6 +153,8 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "close_issue", backend.close_issue),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
+        (github_projects, "ensure_project", backend.ensure_project),
+        (github_projects, "add_item_to_project", backend.add_item_to_project),
     ]
     for module, attr, fn in patches:
         if monkeypatch is not None:
