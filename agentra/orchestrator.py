@@ -115,7 +115,7 @@ async def run_cycle(
         if not impl.ok:
             mem.record_failure(run_id, "implementation", impl.text)
             return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
-        # record_shipped closes a GitHub 'enhancement' issue as the shipped record --
+        # record_shipped closes a GitHub 'feature'-labeled issue as the shipped record --
         # the originating feature_queue issue itself if this opportunity came from
         # there (resolves_id), otherwise a fresh one. A known_bug-origin opportunity
         # still needs its own bug issue cleared separately, since that's a different

@@ -2,7 +2,7 @@
 section of architecture/documentation.md that a shipped feature gets
 appended to (agents/brain.py's implement_feature tool, orchestrator.py's
 run_cycle), distinct from record_shipped()'s structured record (a closed
-GitHub 'enhancement' issue) that shipped_features() reads back.
+GitHub 'feature'-labeled issue) that shipped_features() reads back.
 """
 
 from pathlib import Path

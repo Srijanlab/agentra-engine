@@ -383,7 +383,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         resolves_id = args.get("resolves_id") or ""
         sub_feature_of = args.get("sub_feature_of") or ""
         more_parts_expected = bool(args.get("more_parts_expected"))
-        # record_shipped closes a GitHub 'enhancement' issue as the shipped record,
+        # record_shipped closes a GitHub 'feature'-labeled issue as the shipped record,
         # stamping run_id/commit_sha into it -- the originating feature_queue issue
         # itself when this resolves one, a linked sub-issue of a multi-part
         # feature's (left-open-until-done) parent, or a fresh issue created and

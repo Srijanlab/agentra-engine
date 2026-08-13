@@ -21,8 +21,10 @@ objective/environments -- GitHub Issues/Actions Variables directly, with no
 local mirror at all (this module's own _repo_url() requires a github.com
 remote; there is deliberately no local-file fallback if GitHub is
 unreachable or unconfigured, a known availability tradeoff -- see
-known_bugs()'s own docstring). A shipped feature is a closed 'enhancement'
-issue (record_shipped()/shipped_features()), so the whole feature lifecycle
+known_bugs()'s own docstring). A shipped feature is a closed 'feature'-
+labeled issue (record_shipped()/shipped_features()) -- its individual parts,
+if it has any, are separate 'story'-labeled sub-issues, only the whole
+feature's own issue carries 'feature' -- so the whole feature lifecycle
 -- requested, in progress, shipped -- lives as one GitHub Issue with a
 run_id/commit_sha trail, not a JSON ledger duplicating it. That same Issue
 also gets its own dedicated GitHub Project board, titled after the feature
@@ -121,22 +123,23 @@ def _ensure_gitignore(root: Path) -> None:
     gitignore.write_text(_GITIGNORE_CONTENT)
 
 
-# ── GitHub Issues as the authoritative backlog (Phase 2) ──────────────────────
+# ── GitHub Issues as the authoritative backlog ─────────────────────────────
 # known_bugs()/feature_queue() read live from GitHub Issues (labels "bug" and
-# "enhancement") when the target repo's remote is on github.com and the
-# GitHub App is installed with Issues access -- falling back to the local
-# known_bugs.json/feature_queue.json mirror otherwise (App not configured,
-# not installed on this repo, network/rate-limit failure, or a non-GitHub
-# remote). This means a human filing or closing an issue directly on GitHub
-# is picked up/dropped by Discovery Agent automatically, without going
-# through agentra's dashboard at all -- the actual point of making GitHub
-# authoritative. record_known_bug/record_feature_request still also write
-# the local JSON mirror on every call (cheap, and the one thing that keeps
-# working if GitHub is ever unreachable) with the created issue's number as
-# external_id, so clear_known_bug/clear_feature_request can close the right
-# issue later even if a caller only has the local record.
+# "feature") when the target repo's remote is on github.com and the GitHub
+# App is installed with Issues access -- [] (empty, GitHub unreachable/
+# unconfigured/App not installed) otherwise, no local fallback at all. This
+# means a human filing or closing an issue directly on GitHub is picked
+# up/dropped by Discovery Agent automatically, without going through
+# agentra's dashboard at all -- the actual point of making GitHub
+# authoritative.
 _BUG_LABEL = "bug"
-_FEATURE_LABEL = "enhancement"
+_FEATURE_LABEL = "feature"
+# A multi-part feature's individual pieces (record_shipped's sub_feature_of/
+# more_parts_expected paths) are labeled "story", not "feature" -- the parent
+# tracking issue (or a simple, single-call feature) is the only thing labeled
+# "feature", so feature_queue()/shipped_features() (both filtered to
+# _FEATURE_LABEL) only ever surface whole features, never individual parts.
+_STORY_LABEL = "story"
 
 # ── Failure triage: replaces the old write-only memory/failures/*.md ledger
 # (confirmed nothing in this codebase ever read it back). A permanent
@@ -189,7 +192,7 @@ def _github_feature_to_dict(issue: dict) -> dict:
     }
 
 
-# Shipped features are closed 'enhancement' issues too -- record_shipped()
+# Shipped features are closed 'feature'-labeled issues too -- record_shipped()
 # stamps run_id/commit_sha into the issue body as structured lines right
 # before closing it, so shipped_features() can parse them back out of the
 # same list call, no per-issue follow-up request needed.
@@ -297,7 +300,7 @@ class Memory:
 
     def shipped_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, run_id, ts, external_id}. A
-        shipped feature IS a closed GitHub issue labeled 'enhancement' --
+        shipped feature IS a closed GitHub issue labeled 'feature' --
         commit_sha/run_id are parsed back out of the closing body stamp
         record_shipped() writes; there is no local shipped.json anymore
         (see record_shipped's docstring for why one ledger is enough).
@@ -329,7 +332,8 @@ class Memory:
         more_parts_expected: bool = False,
     ) -> dict | None:
         """Records a shipped feature (or one part of one) as a closed
-        GitHub 'enhancement' issue -- the same ledger feature_queue() reads
+        GitHub 'feature'-labeled issue (a part is 'story'-labeled instead --
+        see sub_feature_of below) -- the same ledger feature_queue() reads
         (open) and shipped_features() reads (closed), so "pending" vs.
         "shipped" is just an issue's state, never two things to keep in
         sync.
@@ -368,7 +372,7 @@ class Memory:
             if sub_feature_of and sub_feature_of.isdigit():
                 parent_number = int(sub_feature_of)
                 issue = github_issues.create_sub_issue(
-                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL]
+                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_STORY_LABEL]
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
@@ -392,7 +396,7 @@ class Memory:
                     )
                     parent_number = parent_issue["number"]
                 issue = github_issues.create_sub_issue(
-                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL]
+                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_STORY_LABEL]
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
@@ -598,7 +602,7 @@ class Memory:
             return []
 
     def in_progress_features(self) -> list[dict]:
-        """Open 'enhancement' issues that already have at least one
+        """Open 'feature'-labeled issues that already have at least one
         sub-issue -- a multi-part feature record_shipped started (via
         sub_feature_of/more_parts_expected) but hasn't yet signaled
         complete. A plain not-yet-started feature_queue entry has zero

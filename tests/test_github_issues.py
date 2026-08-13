@@ -214,10 +214,10 @@ def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch
 
     monkeypatch.setattr(github_issues.httpx, "post", fake_post)
 
-    result = github_issues.list_in_progress_features("https://github.com/acme/app.git", labels=["enhancement"])
+    result = github_issues.list_in_progress_features("https://github.com/acme/app.git", labels=["feature"])
 
     assert captured["url"] == "https://api.github.com/graphql"
-    assert captured["variables"] == {"owner": "acme", "name": "app", "labels": ["enhancement"]}
+    assert captured["variables"] == {"owner": "acme", "name": "app", "labels": ["feature"]}
     assert result == [
         {
             "number": 10,

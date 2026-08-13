@@ -1,9 +1,10 @@
 """GitHub Projects v2 (GraphQL) -- the board "feature mapped to project,
 bug mapped to issue" refers to. Every feature already gets a real GitHub
 Issue (memory.py's record_feature_request/record_shipped, label
-"enhancement") -- this module layers a Project board on top of that same
-Issue, not a second, independent store of what a feature is. known_bugs
-stay Issues-only; nothing here ever touches them.
+"feature" for the whole feature/parent, "story" for an individual
+multi-part piece) -- this module layers a Project board on top of that
+same Issue, not a second, independent store of what a feature is.
+known_bugs stay Issues-only; nothing here ever touches them.
 
 One Project PER FEATURE, not per app/repo -- titled after the feature
 itself (e.g. "Promotion capability with human in loop for testing report

@@ -229,7 +229,7 @@ def test_clear_known_bug_with_non_numeric_id_does_not_call_github(tmp_path, monk
     mem.clear_known_bug("run-abc")  # must not raise
 
 
-# ── feature_queue() mirrors the same behavior with the "enhancement" label ──
+# ── feature_queue() mirrors the same behavior with the "feature" label ──
 
 
 def test_feature_queue_reads_from_github(tmp_path, monkeypatch):
@@ -245,7 +245,7 @@ def test_feature_queue_reads_from_github(tmp_path, monkeypatch):
 
     queue = mem.feature_queue()
 
-    assert captured["labels"] == ["enhancement"]
+    assert captured["labels"] == ["feature"]
     assert queue == [{"description": "Add dark mode", "source": "github", "external_id": "5", "html_url": None}]
 
 
@@ -278,7 +278,7 @@ def test_in_progress_features_reads_from_github(tmp_path, monkeypatch):
 
     result = mem.in_progress_features()
 
-    assert captured["labels"] == ["enhancement"]
+    assert captured["labels"] == ["feature"]
     assert result == [
         {
             "description": "Big feature",
@@ -312,7 +312,7 @@ def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):
     mem.record_feature_request("Add keyboard shortcuts")
 
     assert created["title"] == "Add keyboard shortcuts"
-    assert created["labels"] == ["enhancement"]
+    assert created["labels"] == ["feature"]
 
 
 def test_record_feature_request_adds_the_new_issue_to_the_project_as_todo(tmp_path, monkeypatch):

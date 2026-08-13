@@ -4,10 +4,12 @@ plumbing, just a new use of the token git_ops.py already mints for pushes.
 
 GitHub Issues is the sole backlog store now (see memory.py's known_bugs()/
 feature_queue()/shipped_features() -- no local .agentra/*.json mirror). A
-shipped feature is a closed issue labeled "enhancement" too: record_shipped()
+shipped feature is a closed issue labeled "feature" too: record_shipped()
 either closes an existing feature_queue issue or opens-and-immediately-closes
 a fresh one, so "what's pending" and "what shipped" are just open vs. closed
-issues under the same label, with no separate ledger to keep in sync.
+issues under the same label, with no separate ledger to keep in sync. A
+multi-part feature's individual pieces (create_sub_issue) are labeled
+"story" instead -- only the whole feature's own issue carries "feature".
 
 Requires the GitHub App to actually be installed with Issues read/write
 permission on the target repo (confirmed granted, per the user) -- raises
@@ -266,7 +268,7 @@ def close_issue(
 def list_closed_issues(repo_url: str, labels: list[str] | None = None, limit: int = 30) -> list[dict]:
     """Closed issues only, newest-closed first, optionally filtered to any of
     `labels`. Used by memory.py's shipped_features() -- a shipped feature is
-    a closed 'enhancement'-labeled issue, so this is that ledger's only read
+    a closed 'feature'-labeled issue, so this is that ledger's only read
     path, no local mirror involved."""
     owner_repo = _owner_repo_or_raise(repo_url)
     params: dict[str, str | int] = {

@@ -1,5 +1,5 @@
 """Regression tests for Memory.shipped_features()/record_shipped(): a
-shipped feature is a closed GitHub 'enhancement' issue -- there is no
+shipped feature is a closed GitHub 'feature'-labeled issue -- there is no
 local shipped.json anymore. record_shipped() either closes the
 feature_queue issue it resolves (resolves_id) or opens-and-immediately-
 closes a fresh one, stamping run_id/commit_sha into the issue body so
@@ -122,7 +122,7 @@ def test_record_shipped_creates_and_closes_a_fresh_issue_for_a_self_initiated_fe
     result = mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
 
     assert created["title"] == "Dark mode"
-    assert created["labels"] == ["enhancement"]
+    assert created["labels"] == ["feature"]
     assert closed["issue_number"] == 99
     assert "run42" in closed["comment"]
     assert "abc1234" in closed["comment"]
@@ -203,7 +203,7 @@ def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path,
 
     result = mem.record_shipped("Part two", commit_sha="cafe123", run_id="run9", sub_feature_of="10")
 
-    assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["enhancement"]}
+    assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["story"]}
     # Lands on the PARENT's board (feature_issue_number=10, the parent's own
     # title), as an additional item (issue_number=55), not a board of its own.
     assert project_calls == [(10, "Big feature", 55, "Done")]
