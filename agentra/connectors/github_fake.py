@@ -6,8 +6,10 @@ real create -> list -> close round-trip without a live GitHub API call.
 
 github_projects.py talks GraphQL, not the REST shape the rest of this
 module fakes -- rather than faking individual GraphQL mutations, its two
-public functions (ensure_project/add_item_to_project) are faked directly
-at the same level github_issues.create_issue etc. already are.
+public functions (ensure_feature_project/add_item_to_feature_project) are
+faked directly at the same level github_issues.create_issue etc. already
+are. Projects are keyed by "{repo_url}#{feature_issue_number}" -- one per
+feature, not one per repo.
 """
 
 from __future__ import annotations
@@ -132,24 +134,31 @@ class FakeGitHubBackend:
         self.variables[repo_url][name] = value
         self._save()
 
-    def ensure_project(self, repo_url: str) -> dict | None:
-        project = self.projects.get(repo_url)
+    def ensure_feature_project(self, repo_url: str, feature_issue_number: int, title: str) -> dict | None:
+        key = f"{repo_url}#{feature_issue_number}"
+        project = self.projects.get(key)
         if project is None:
             project = {
-                "project_id": f"PVT_fake_{repo_url}",
+                "project_id": f"PVT_fake_{key}",
+                "url": f"{_repo_https_url(repo_url)}/projects/fake-{feature_issue_number}",
+                "title": title,
                 "status_field_id": "PVTSSF_fake_status",
                 "status_options": {name: f"OPT_fake_{name.lower().replace(' ', '_')}" for name in self._STATUS_OPTIONS},
                 "items": {},
             }
-            self.projects[repo_url] = project
+            self.projects[key] = project
             self._save()
         return {k: v for k, v in project.items() if k != "items"}
 
-    def add_item_to_project(self, repo_url: str, issue_number: int, status: str = "Todo") -> None:
-        project = self.ensure_project(repo_url)
+    def add_item_to_feature_project(
+        self, repo_url: str, feature_issue_number: int, title: str, issue_number: int | None = None, status: str = "Todo"
+    ) -> None:
+        target_issue_number = feature_issue_number if issue_number is None else issue_number
+        project = self.ensure_feature_project(repo_url, feature_issue_number, title)
         if project is None or status not in project["status_options"]:
             return
-        self.projects[repo_url]["items"][str(issue_number)] = status
+        key = f"{repo_url}#{feature_issue_number}"
+        self.projects[key]["items"][str(target_issue_number)] = status
         self._save()
 
 
@@ -178,8 +187,8 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "close_issue", backend.close_issue),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
-        (github_projects, "ensure_project", backend.ensure_project),
-        (github_projects, "add_item_to_project", backend.add_item_to_project),
+        (github_projects, "ensure_feature_project", backend.ensure_feature_project),
+        (github_projects, "add_item_to_feature_project", backend.add_item_to_feature_project),
     ]
     for module, attr, fn in patches:
         if monkeypatch is not None:

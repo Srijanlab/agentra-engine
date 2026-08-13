@@ -25,10 +25,11 @@ known_bugs()'s own docstring). A shipped feature is a closed 'enhancement'
 issue (record_shipped()/shipped_features()), so the whole feature lifecycle
 -- requested, in progress, shipped -- lives as one GitHub Issue with a
 run_id/commit_sha trail, not a JSON ledger duplicating it. That same Issue
-also gets a card on the app's GitHub Project board (connectors/
-github_projects.py, "Todo" on record_feature_request, "Done" on
-record_shipped) -- "feature mapped to project, bug mapped to issue": bugs
-stay Issues-only, features get both. Getting real data INTO the backlog
+also gets its own dedicated GitHub Project board, titled after the feature
+itself (connectors/github_projects.py, "Todo" on record_feature_request,
+"Done" on record_shipped) -- "feature mapped to project, bug mapped to
+issue": bugs stay Issues-only, features get both, one Project per feature.
+Getting real data INTO the backlog
 (customer feedback from whatever database a given app uses) is the job of
 a per-app adapter command
 (EnvironmentConfig.feedback_fetch_command, invoked by orchestrator.py/
@@ -355,7 +356,7 @@ class Memory:
 
         from agentra.connectors import github_projects
 
-        github_projects.add_item_to_project(repo_url, issue_number, status="Done")
+        github_projects.add_item_to_feature_project(repo_url, issue_number, title=feature, status="Done")
 
     def released_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, ts, release_run_id} -- the
@@ -519,7 +520,7 @@ class Memory:
 
         from agentra.connectors import github_projects
 
-        github_projects.add_item_to_project(repo_url, issue["number"], status="Todo")
+        github_projects.add_item_to_feature_project(repo_url, issue["number"], title=description, status="Todo")
 
     def clear_feature_request(self, external_id: str, resolution_note: str | None = None) -> None:
         if not external_id.isdigit():
