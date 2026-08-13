@@ -27,6 +27,7 @@ than hoping a better-worded prompt fixes it.
 import subprocess
 from pathlib import Path
 
+from agentra.agents import git_ops
 from agentra.agents.base import AgentResult, run_agent
 from agentra.environments import EnvironmentConfig
 
@@ -60,15 +61,18 @@ End your response with a fenced ```json block shaped like:
 
 
 def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: str) -> None:
-    # Explicit refspec, not just `fetch origin <branch>` -- a single-branch clone (the
-    # server/clone-on-start path, see docker-entrypoint.sh) has its fetch refspec
-    # restricted to whatever branch it cloned, so fetching a different branch by name
-    # alone can succeed without ever creating refs/remotes/origin/<branch> locally,
-    # and the checkout below then fails with "origin/<branch> is not a commit".
-    subprocess.run(
-        ["git", "-C", str(repo), "fetch", "origin", f"+{pre_prod_branch}:refs/remotes/origin/{pre_prod_branch}"],
-        check=True, capture_output=True, text=True,
-    )
+    # git_ops.fetch_ref, not a hand-rolled subprocess call -- confirmed live (4
+    # consecutive autonomous-cycle failures, GitHub issues #7-#10, after this repo
+    # moved to an org, Srijanlab/srijanlab-agentra): a bare `git fetch` here relied
+    # entirely on the ambient GIT_ASKPASS/GITHUB_TOKEN static PAT, bypassing the
+    # GitHub App installation-token path every other git operation in this codebase
+    # (git_ops.py, deployment.py) already goes through -- and that static PAT was
+    # never scoped to the new org, so the fetch 403'd outright. fetch_ref does the
+    # exact same explicit-refspec fetch (a single-branch clone's restricted fetch
+    # refspec means fetching by branch name alone can silently never create
+    # refs/remotes/origin/<branch> locally, leaving the checkout below failing with
+    # "origin/<branch> is not a commit") but with the App token injected first.
+    git_ops.fetch_ref(repo, pre_prod_branch)
     # codebase.py's understand_codebase step (run just before this, in both
     # orchestrator.py and brain.py) writes .agentra/memory/... as plain files.
     # Whether those paths are tracked differs by branch -- e.g. committed on
@@ -121,6 +125,12 @@ async def run(
 ) -> AgentResult:
     try:
         _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch)
+    except git_ops.GitOpError as exc:
+        return AgentResult(
+            ok=False,
+            text=f"Could not create feature branch {feature_branch!r} from {env.pre_prod_branch!r}: {exc}",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
         return AgentResult(
