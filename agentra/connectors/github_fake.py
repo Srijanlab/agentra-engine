@@ -92,6 +92,15 @@ class FakeGitHubBackend:
         self._save()
         return dict(self.issues[repo_url][number])
 
+    def create_sub_issue(
+        self, repo_url: str, parent_issue_number: int, title: str, body: str, labels: list[str] | None = None
+    ) -> dict:
+        sub_issue = self.create_issue(repo_url, title, body, labels=labels)
+        if parent_issue_number in self.issues[repo_url]:
+            self.issues[repo_url][parent_issue_number].setdefault("sub_issue_numbers", []).append(sub_issue["number"])
+            self._save()
+        return sub_issue
+
     def list_open_issues(self, repo_url: str, labels: list[str] | None = None) -> list[dict]:
         results = [i for i in self.issues[repo_url].values() if i["state"] == "open"]
         if labels:
@@ -163,6 +172,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
     backend = backend or FakeGitHubBackend(persist_path=persist_path)
     patches = [
         (github_issues, "create_issue", backend.create_issue),
+        (github_issues, "create_sub_issue", backend.create_sub_issue),
         (github_issues, "list_open_issues", backend.list_open_issues),
         (github_issues, "list_closed_issues", backend.list_closed_issues),
         (github_issues, "close_issue", backend.close_issue),

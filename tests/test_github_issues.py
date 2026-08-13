@@ -127,3 +127,66 @@ def test_close_issue_with_comment_posts_comment_then_closes(monkeypatch):
 def test_close_issue_rejects_non_github_url():
     with pytest.raises(github_issues.GitHubIssuesError):
         github_issues.close_issue("git@gitlab.com:acme/app.git", 1)
+
+
+def test_create_sub_issue_creates_and_links_under_parent(monkeypatch):
+    posts = []
+
+    def fake_post(url, headers, json, timeout):
+        posts.append((url, json))
+        if url == "https://api.github.com/repos/acme/app/issues":
+            return _fake_response(
+                {"number": 43, "node_id": "SUB_NODE", "html_url": "https://github.com/acme/app/issues/43"}
+            )
+        if url == "https://api.github.com/graphql":
+            assert json["variables"] == {"issueId": "PARENT_NODE", "subIssueId": "SUB_NODE"}
+            return _fake_response({"data": {"addSubIssue": {"subIssue": {"id": "SUB_NODE"}}}})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    def fake_get(url, headers, timeout):
+        assert url == "https://api.github.com/repos/acme/app/issues/10"
+        return _fake_response({"node_id": "PARENT_NODE"})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    result = github_issues.create_sub_issue("https://github.com/acme/app.git", 10, "Sub task", "details")
+
+    assert result["number"] == 43
+    assert len(posts) == 2
+
+
+def test_create_sub_issue_still_returns_the_issue_if_linking_fails(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        if url == "https://api.github.com/repos/acme/app/issues":
+            return _fake_response({"number": 43, "node_id": "SUB_NODE"})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    def fake_get(url, headers, timeout):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    result = github_issues.create_sub_issue("https://github.com/acme/app.git", 10, "Sub task", "details")
+
+    assert result["number"] == 43
+
+
+def test_create_sub_issue_still_returns_the_issue_on_a_graphql_error(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        if url == "https://api.github.com/repos/acme/app/issues":
+            return _fake_response({"number": 43, "node_id": "SUB_NODE"})
+        if url == "https://api.github.com/graphql":
+            return _fake_response({"errors": [{"message": "not accessible"}]})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    def fake_get(url, headers, timeout):
+        return _fake_response({"node_id": "PARENT_NODE"})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    result = github_issues.create_sub_issue("https://github.com/acme/app.git", 10, "Sub task", "details")
+
+    assert result["number"] == 43
