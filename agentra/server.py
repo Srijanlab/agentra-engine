@@ -40,12 +40,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agentra import environments, registry
+from agentra.agents import catalog as agents_catalog
 from agentra.agents import deployment
 from agentra.agents.brain import run_autonomous_cycle
 from agentra.connectors import github_app
@@ -172,6 +173,18 @@ def _run_log_path(run_key: str) -> Path | None:
     return Memory(repo).log_root / f"{run_key}.log"
 
 
+def _run_screenshot_path(run_key: str) -> Path | None:
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
+    if run is None:
+        return None
+    repo = registry.get_app_repo(run["app"])
+    if repo is None:
+        return None
+    from agentra.agents.testing import screenshot_path
+
+    return screenshot_path(repo, run_key)
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "apps_registered": len(registry.list_apps())}
@@ -234,6 +247,25 @@ async def stream_run_logs(run_key: str) -> StreamingResponse:
         raise HTTPException(status_code=409, detail="local checkout for this run is missing and could not be recovered")
 
     async def event_stream():
+        # A redeploy re-clones every registered app's checkout fresh
+        # (REPOS_ROOT is documented VM-local-only), which wipes
+        # .agentra/logs/ immediately since it's deliberately gitignored --
+        # so any run whose log isn't sitting on THIS instance's disk is
+        # either genuinely still in flight elsewhere (impossible in this
+        # single-VM deployment) or its only copy now lives in Firestore's
+        # run_logs mirror (memory.py's log()). One-shot dump from there,
+        # not live-tailed, since a log missing locally can only mean the
+        # run already finished before the most recent redeploy.
+        if not log_path.exists():
+            db = registry.firestore_client()
+            if db is not None:
+                doc = db.collection("run_logs").document(run_key).get()
+                if doc.exists:
+                    for line in doc.to_dict().get("lines", []):
+                        yield f"data: {json.dumps({'line': line})}\n\n"
+                    yield "event: done\ndata: {}\n\n"
+                    return
+
         offset = 0
         terminal_cycles = 0
         while True:
@@ -258,6 +290,25 @@ async def stream_run_logs(run_key: str) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/runs/{run_key}/screenshot")
+async def get_run_screenshot(run_key: str) -> FileResponse:
+    """The Testing Agent's pre-prod screenshot (agents/testing.py's
+    run_pre_prod, agents/screenshot.py) for a human reviewing this run to
+    see the actual live page, not just its written report. VM-local only
+    (test_artifacts/ is gitignored, same tier per-run logs used to be
+    before their Firestore mirror) -- lost on the next redeploy, unlike
+    logs; a real follow-up would give this the same durability treatment.
+    404 if this run never captured one (screenshot failed, or predates
+    this feature)."""
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run_key")
+    path = _run_screenshot_path(run_key)
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="no screenshot captured for this run")
+    return FileResponse(path, media_type="image/png")
 
 
 @app.get("/runs")
@@ -318,6 +369,14 @@ async def list_agent_steps(app_name: str | None = None, limit: int = 100) -> dic
     OrchestratorSession.note(), made structured and durable -- see
     registry.record_agent_step)."""
     return {"steps": registry.list_agent_steps(app=app_name, limit=limit)}
+
+
+@app.get("/agents/metadata")
+async def list_agent_metadata() -> dict:
+    """Static per-agent profile for the dashboard's Agent card: skills,
+    tools, and each tool's permission tier (agents/catalog.py) -- not run
+    history, so it's populated even for an agent that's never executed."""
+    return {"agents": agents_catalog.AGENT_METADATA, "permission_model_note": agents_catalog.PERMISSION_MODEL_NOTE}
 
 
 # ── Connectors: TASK-016 follow-up. GitHub App status, so "is agentra
@@ -647,6 +706,16 @@ async def get_app_loops(name: str) -> dict:
     return {"loops": registry.list_loops(name)}
 
 
+@app.get("/loops")
+async def get_all_loops() -> dict:
+    """Same grouped-by-loop view as /apps/{name}/loops, across every
+    registered app -- lets the dashboard's "All apps" filter show the same
+    structure (objective header, agent totals, collapsible runs) the
+    per-app view already does, instead of a flatter, differently-shaped
+    timeline."""
+    return {"loops": registry.list_loops(None)}
+
+
 class BacklogRequestPayload(BaseModel):
     type: str = "feature_request"
     description: str
@@ -739,6 +808,204 @@ async def trigger_daily_standup() -> dict:
     return {"triggered": True, "reports": reports}
 
 
+_STANDUP_MENTION_PATTERN = re.compile(r"@(\w+)")
+
+
+def _route_standup_message(text: str) -> str:
+    """Which agent a human's standup-channel message is addressed to --
+    @mention by id or label's first word, case-insensitive (e.g. "@testing"
+    or "@Testing" both match the testing agent). Defaults to the
+    Orchestrator when nothing matches, since deciding who should actually
+    field an unaddressed question is exactly its job."""
+    from agentra.standup import AGENT_LABELS
+
+    match = _STANDUP_MENTION_PATTERN.search(text)
+    if not match:
+        return "orchestrator"
+    mentioned = match.group(1).lower()
+    for agent_id, label in AGENT_LABELS.items():
+        if mentioned == agent_id or mentioned == label.split()[0].lower():
+            return agent_id
+    return "orchestrator"
+
+
+@app.websocket("/apps/{app_name}/standup/live")
+async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
+    """The live, multi-agent standup channel -- the interactive replacement
+    for the old static written report as the dashboard's primary standup
+    experience. The POST/GET report endpoints above are untouched (the
+    daily-cron path and historical record still want a durable markdown
+    snapshot); this is a different, live view of the same underlying data.
+
+    On connect: replays today's channel if it already has messages,
+    otherwise generates the opening burst -- generate_standup_updates() is
+    the exact same single cheap LLM call the written report is built from,
+    just posted as one message per agent instead of one combined blob, so
+    this costs nothing extra over what standups already cost. Then listens
+    for human messages, routes each to whichever agent it's @mentioned (or
+    the Orchestrator if unaddressed), and streams that agent's reply back
+    token-by-token via stream_chat_turn -- the same session-resume/
+    grounding/safety-hook machinery 1:1 chat uses, just under a separate
+    per-day session namespace (standup:{date}:{agent_id}) so this
+    conversation doesn't bleed into unrelated 1:1 Q&A with the same agent,
+    and starts fresh each new standup rather than accumulating forever."""
+    await websocket.accept()
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        await websocket.close(code=1008, reason=f"app {app_name!r} not registered")
+        return
+
+    mem = Memory(repo)
+    date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+    existing = mem.get_standup_channel_messages(date_str)
+    if existing:
+        # Replayed history on reconnect -- no "fresh" flag, so the
+        # frontend shows it instantly instead of re-running the
+        # one-agent-at-a-time reveal pacing a human already sat through
+        # once already today.
+        for msg in existing:
+            await websocket.send_json({"type": "message", **msg})
+    else:
+        from agentra.standup import generate_standup_updates
+
+        updates = await generate_standup_updates(repo, app_name, mem)
+        for agent_id, text in updates.items():
+            msg = mem.record_standup_channel_message(date_str, agent_id, text)
+            await websocket.send_json({"type": "message", "fresh": True, **msg})
+
+    # Marks the end of the opening burst specifically (not history replay,
+    # which the frontend already knows is complete once the socket opens
+    # with no further sends expected). The dashboard's "All apps" view
+    # needs this to know when it's safe to merge every app's per-agent
+    # updates into one combined bubble per agent role -- without an
+    # explicit signal it would have to guess "how many messages is enough"
+    # per app, which breaks the moment an app's actual agent roster ever
+    # differs from another's.
+    await websocket.send_json({"type": "burst_complete"})
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            human_text = (data.get("message") or "").strip()
+            if not human_text:
+                continue
+
+            human_msg = mem.record_standup_channel_message(date_str, "human", human_text)
+            await websocket.send_json({"type": "message", **human_msg})
+
+            agent_id = _route_standup_message(human_text)
+            session_key = f"standup:{date_str}:{agent_id}"
+            resume_session_id = mem.get_agent_session_id(session_key)
+            system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
+
+            from agentra.agents.base import extract_json_block, stream_chat_turn
+
+            await websocket.send_json({"type": "start", "sender": agent_id})
+            full_text = ""
+            session_id: str | None = None
+            async for event in stream_chat_turn(
+                prompt=human_text,
+                system_prompt=system_prompt,
+                cwd=repo,
+                allowed_tools=["Read", "Grep", "Glob"],
+                max_turns=10,
+                agent_label=_chat_agent_label(agent_id),
+                resume=resume_session_id,
+            ):
+                if event["type"] == "delta":
+                    full_text += event["text"]
+                    await websocket.send_json({"type": "delta", "sender": agent_id, "text": event["text"]})
+                else:
+                    full_text = event["text"] or full_text
+                    session_id = event["session_id"]
+
+            json_data = extract_json_block(full_text)
+            if json_data and "work_update" in json_data:
+                mem.record_work_update(agent_id, json_data["work_update"])
+                full_text = re.sub(r"```json\s*.*?\s*```", "", full_text, flags=re.DOTALL).strip()
+
+            if session_id:
+                mem.set_agent_session_id(session_key, session_id)
+            agent_msg = mem.record_standup_channel_message(date_str, agent_id, full_text)
+            # "replacing_stream" tells the frontend to collapse the
+            # delta-built bubble into this authoritative final version
+            # (full_text can differ from the raw concatenated deltas -- the
+            # work_update JSON block strip above, same as 1:1 chat).
+            await websocket.send_json({"type": "message", "replacing_stream": True, **agent_msg})
+
+            def _persist_channel_in_background() -> None:
+                error = registry.persist_agentra_dir(
+                    repo, _app_branch(app_name), f"agentra: standup channel for {app_name!r}"
+                )
+                if error:
+                    _server_log("standup", f"app={app_name!r} channel message saved locally but failed to push: {error}")
+
+            asyncio.get_running_loop().run_in_executor(None, _persist_channel_in_background)
+    except WebSocketDisconnect:
+        pass
+
+
+# Neural2 (1M free chars/month, permanent -- not the 90-day new-customer
+# trial) reads noticeably more naturally than the browser's own
+# speechSynthesis, which is what this replaces. One distinct voice per
+# agent, same "who's speaking" cue the text-side avatar/label already
+# gives -- arbitrary assignment (there's no canonical "testing agent
+# voice"), just needs to be consistent and distinct per agent, not
+# meaningfully matched to personality.
+AGENT_VOICES = {
+    "orchestrator": "en-US-Neural2-D",
+    "codebase": "en-US-Neural2-A",
+    "discovery": "en-US-Neural2-C",
+    "implementation": "en-US-Neural2-I",
+    "testing": "en-US-Neural2-E",
+    "deployment": "en-US-Neural2-J",
+    "feedback": "en-US-Neural2-F",
+    "prod_debug": "en-US-Neural2-G",
+    "custom": "en-US-Neural2-H",
+}
+
+
+class TtsPayload(BaseModel):
+    text: str
+    agent_id: str = "custom"
+
+
+@app.post("/tts")
+async def text_to_speech(payload: TtsPayload) -> Response:
+    """Agent voice output, real synthesized speech instead of the browser's
+    own speechSynthesis -- returns raw MP3 bytes the dashboard plays
+    directly via an <audio> element; nothing this ephemeral needs a
+    separate upload/storage round-trip. Runs in a thread (the client
+    library's synthesize_speech is synchronous, blocking gRPC) so it
+    doesn't stall the event loop other requests are sharing.
+
+    503 (not 500) on any failure -- most likely cause in practice is ADC
+    not being configured in whatever environment this runs in (e.g. local
+    dev without `gcloud auth application-default login`), which is a
+    "voice isn't available right now" condition for the human, not a
+    server bug to alarm over."""
+    from google.cloud import texttospeech
+
+    voice_name = AGENT_VOICES.get(payload.agent_id, AGENT_VOICES["custom"])
+
+    def _synthesize() -> bytes:
+        client = texttospeech.TextToSpeechClient()
+        response = client.synthesize_speech(
+            input=texttospeech.SynthesisInput(text=payload.text),
+            voice=texttospeech.VoiceSelectionParams(language_code="en-US", name=voice_name),
+            audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3),
+        )
+        return response.audio_content
+
+    try:
+        audio = await asyncio.get_running_loop().run_in_executor(None, _synthesize)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"text-to-speech unavailable: {exc}") from exc
+
+    return Response(content=audio, media_type="audio/mpeg")
+
+
 class ChatPayload(BaseModel):
     message: str
 
@@ -829,66 +1096,153 @@ async def get_agent_chat(app_name: str, agent_id: str) -> dict:
     messages = mem.get_agent_chat_messages(agent_id)
     return {"messages": messages}
 
-@app.post("/apps/{app_name}/agents/{agent_id}/chat")
-async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) -> dict:
-    repo = registry.get_app_repo(app_name)
-    if repo is None:
-        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
-    
-    mem = Memory(repo)
-    mem.record_agent_chat_message(agent_id, "human", payload.message)
-    
-    from agentra.agents.base import run_agent, extract_json_block
-    system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
-    
-    history = mem.get_agent_chat_messages(agent_id)
-    recent_history = history[-6:-1]
-    history_str = ""
-    for msg in recent_history:
-        history_str += f"{msg['sender'].capitalize()}: {msg['text']}\n"
-    
-    prompt = f"Chat history:\n{history_str}Human: {payload.message}\nAgent:"
-    
-    agent_label = agent_id.capitalize() + " Agent"
+def _chat_agent_label(agent_id: str) -> str:
     if agent_id == "orchestrator":
-        agent_label = "Orchestrator"
-    elif agent_id == "prod_debug":
-        agent_label = "Production Debugging Agent"
-    elif agent_id == "feedback":
-        agent_label = "Analytics Feedback Agent"
-    elif agent_id == "custom":
-        agent_label = "Custom Agent"
-        
-    result = await run_agent(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        cwd=repo,
-        allowed_tools=[],
-        max_turns=1,
-        agent_label=agent_label,
-    )
-    
-    response_text = result.text or "(no response)"
+        return "Orchestrator"
+    if agent_id == "prod_debug":
+        return "Production Debugging Agent"
+    if agent_id == "feedback":
+        return "Analytics Feedback Agent"
+    if agent_id == "custom":
+        return "Custom Agent"
+    return agent_id.capitalize() + " Agent"
+
+
+# Shared by both the buffered and streaming chat endpoints -- the raw text
+# a turn produced needs the exact same treatment either way (strip the
+# work_update JSON block, persist the work update, record the chat message,
+# push it durable in the background), so this is the one place that logic
+# lives rather than two copies that could quietly drift.
+def _finalize_chat_turn(
+    mem: "Memory", repo: Path, app_name: str, agent_id: str, raw_text: str, session_id: str | None,
+) -> tuple[str, str | None]:
+    from agentra.agents.base import extract_json_block
+
+    response_text = raw_text or "(no response)"
     json_data = extract_json_block(response_text)
     work_update = None
     if json_data and "work_update" in json_data:
         work_update = json_data["work_update"]
         mem.record_work_update(agent_id, work_update)
-        import re
         response_text = re.sub(r"```json\s*.*?\s*```", "", response_text, flags=re.DOTALL).strip()
 
+    if session_id:
+        mem.set_agent_session_id(agent_id, session_id)
     mem.record_agent_chat_message(agent_id, "agent", response_text)
 
-    error = registry.persist_agentra_dir(
-        repo, _app_branch(app_name), f"agentra: chat with {agent_id!r} for {app_name!r}"
-    )
-    if error:
-        _server_log("chat", f"app={app_name!r} agent={agent_id!r} chat saved locally but failed to push: {error}")
+    def _persist_chat_in_background() -> None:
+        error = registry.persist_agentra_dir(
+            repo, _app_branch(app_name), f"agentra: chat with {agent_id!r} for {app_name!r}"
+        )
+        if error:
+            _server_log("chat", f"app={app_name!r} agent={agent_id!r} chat saved locally but failed to push: {error}")
 
-    return {
-        "response": response_text,
-        "work_update": work_update
-    }
+    # Was a blocking git push (commit + push to GitHub) on the critical path
+    # of every single chat message -- the human waited on a full network
+    # round-trip to GitHub for even a one-word reply. Local writes
+    # (mem.record_agent_chat_message above) already happened synchronously;
+    # this only pushes them durable, which doesn't need to block the
+    # response the human is waiting on. Same fire-and-forget shape
+    # elsewhere in this file wouldn't apply here since those callers don't
+    # have a human staring at a spinner.
+    asyncio.get_running_loop().run_in_executor(None, _persist_chat_in_background)
+
+    return response_text, work_update
+
+
+@app.post("/apps/{app_name}/agents/{agent_id}/chat")
+async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) -> dict:
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+
+    mem = Memory(repo)
+    mem.record_agent_chat_message(agent_id, "human", payload.message)
+
+    from agentra.agents.base import run_agent
+    system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
+
+    # Was reconstructing the last 5 messages as a "Human: ...\nAgent: ..."
+    # text blob and sending it fresh every turn -- a crude, lossy substitute
+    # for what run_agent's resume= now does properly: continue the actual
+    # prior CLI session (full context, tool-use history, everything),
+    # keyed per (app, agent_id) same as the chat history itself. None on the
+    # first message of a conversation -- run_agent starts a fresh session
+    # same as any other caller, and stores the new one below either way.
+    resume_session_id = mem.get_agent_session_id(agent_id)
+
+    result = await run_agent(
+        prompt=payload.message,
+        system_prompt=system_prompt,
+        cwd=repo,
+        # Read-only grounding -- was allowed_tools=[], which made every chat
+        # answer a context-blind guess from a 5-message text blob alone, no
+        # way to actually check current codebase/state before answering.
+        # Not Bash/Write/Edit: this is casual Q&A, not a work session, and
+        # the safety hooks (agents/safety.py, applied automatically by
+        # run_agent to every caller) only gate those tools anyway --
+        # Read/Grep/Glob were never the risk surface.
+        allowed_tools=["Read", "Grep", "Glob"],
+        # max_turns=1 couldn't fit a tool call *and* a response in the same
+        # turn (tool-use -> tool-result -> answer is normally 2+ turns) --
+        # was effectively forcing every answer to skip grounding regardless
+        # of the tools available. Confirmed live: even 5 wasn't always
+        # enough for a genuinely investigative question ("is everything
+        # green?" needing several file/log lookups) -- 10 without turning a
+        # chat reply into a full agent cycle; _friendly_error_text covers
+        # the rare case that's still not enough.
+        max_turns=10,
+        agent_label=_chat_agent_label(agent_id),
+        resume=resume_session_id,
+    )
+
+    response_text, work_update = _finalize_chat_turn(mem, repo, app_name, agent_id, result.text, result.session_id)
+    return {"response": response_text, "work_update": work_update}
+
+
+@app.post("/apps/{app_name}/agents/{agent_id}/chat/stream")
+async def post_agent_chat_stream(app_name: str, agent_id: str, payload: ChatPayload) -> StreamingResponse:
+    """Streaming sibling of POST .../chat -- same grounding/resume/persist
+    behavior, but the response arrives as SSE text deltas instead of one
+    buffered JSON blob, so the dashboard can render tokens as they're
+    generated instead of a multi-second blank wait. POST (not GET, so not a
+    plain EventSource on the frontend -- fetch()'s streaming body reader
+    works the same over POST) since the human's message is the request
+    body, same as the non-streaming endpoint."""
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
+
+    mem = Memory(repo)
+    mem.record_agent_chat_message(agent_id, "human", payload.message)
+
+    from agentra.agents.base import stream_chat_turn
+    system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
+    resume_session_id = mem.get_agent_session_id(agent_id)
+
+    async def event_stream():
+        async for event in stream_chat_turn(
+            prompt=payload.message,
+            system_prompt=system_prompt,
+            cwd=repo,
+            allowed_tools=["Read", "Grep", "Glob"],
+            max_turns=10,
+            agent_label=_chat_agent_label(agent_id),
+            resume=resume_session_id,
+        ):
+            if event["type"] == "delta":
+                yield f"data: {json.dumps({'delta': event['text']})}\n\n"
+            else:
+                response_text, work_update = _finalize_chat_turn(
+                    mem, repo, app_name, agent_id, event["text"], event["session_id"]
+                )
+                yield f"data: {json.dumps({'done': True, 'response': response_text, 'work_update': work_update})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 @app.get("/apps/{app_name}/work-updates")
 async def get_work_updates(app_name: str) -> dict:
@@ -932,6 +1286,7 @@ async def _run_autonomous_background(
                     "actions": report.actions,
                     "final_message": report.final_message,
                     "cost_usd": report.cost_usd,
+                    "feature": report.feature,
                 },
             )
             _server_log(
@@ -1019,7 +1374,10 @@ def _new_run_key(app_name: str, source: str, objective: str) -> str:
 
 
 class ScheduledTrigger(BaseModel):
-    app: str
+    # Optional: the VM's local trigger loop (compute.tf) posts one shared
+    # tick with no app at all, meant to cover every registered app off a
+    # single cron -- see trigger_scheduled below for the fan-out.
+    app: str | None = None
     objective: str | None = None
     feature: str | None = None
     skip_deploy: bool = False
@@ -1065,7 +1423,20 @@ async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
     app (e.g. hourly) -- enforce_schedule=True means each app only
     actually dispatches once its own configured schedule_hours has
     elapsed since its last scheduled run, so one tick serves every app on
-    its own cadence without a GCP Scheduler job per app."""
+    its own cadence without a GCP Scheduler job per app.
+
+    payload.app is optional specifically so the VM's local trigger loop
+    (compute.tf) can post one bare tick and have it fan out to every
+    registered app here, instead of the loop needing to know the app
+    roster itself -- previously the loop hardcoded a single app name, so
+    any other registered app silently never got scheduled."""
+    if payload.app is None:
+        results = {}
+        for app_name in registry.list_apps():
+            results[app_name] = await _dispatch_cycle(
+                app_name, "scheduled", None, None, False, enforce_schedule=True
+            )
+        return {"apps": results}
     return await _dispatch_cycle(
         payload.app, "scheduled", payload.objective, payload.feature, payload.skip_deploy, enforce_schedule=True
     )

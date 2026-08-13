@@ -57,6 +57,24 @@ def test_scheduled_trigger_respects_per_app_schedule_hours(tmp_path, monkeypatch
     }
 
 
+def test_scheduled_trigger_with_no_app_fans_out_to_every_registered_app(tmp_path, monkeypatch):
+    # Regression for the VM trigger-loop bug: compute.tf's local cron used
+    # to hardcode {"app":"agentra"}, so any other registered app was never
+    # scheduled at all. The loop now posts a bare {} tick and this
+    # endpoint must cover every app in the registry itself.
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path, name="myapp")
+    _register_tmp_app(tmp_path, name="otherapp")
+
+    response = TestClient(server.app).post("/trigger/scheduled", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body["apps"].keys()) == {"myapp", "otherapp"}
+    assert body["apps"]["myapp"]["triggered"] is True
+    assert body["apps"]["otherapp"]["triggered"] is True
+
+
 def test_on_demand_run_bypasses_schedule_gate(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path)

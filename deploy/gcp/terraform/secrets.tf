@@ -1,7 +1,14 @@
 # TASK-013: same value that was sitting as a loose, untracked
 # .claude_oauth_token file at the repo root -- read once during setup,
-# migrated here, and the loose file removed from the working tree. See
-# docs/deployment.md for the token rotation procedure (it expires).
+# migrated here, and the loose file removed from the working tree.
+#
+# No longer read by anything after the Cloud Run -> VM migration
+# (cloudrun.tf) -- the VM authenticates via an interactive `claude auth
+# login` session on its persistent disk instead. Kept declared anyway
+# (human call, not an oversight): it's a ready-to-use fallback auth path
+# for compute.tf's VM too, exactly like it was for Cloud Run -- add a
+# CLAUDE_CODE_OAUTH_TOKEN env block reading this secret to the VM's docker
+# run command if the login-session path ever needs a fallback.
 resource "google_secret_manager_secret" "claude_code_oauth_token" {
   project   = var.project_id
   secret_id = "agentra-claude-code-oauth-token"
@@ -37,8 +44,8 @@ resource "google_secret_manager_secret_version" "github_token" {
   secret_data = var.github_token
 }
 
-# Runtime identity (default compute SA -- cloudrun.tf doesn't set a
-# dedicated one) needs to read both secrets.
+# Runtime identity (default compute SA -- used by both cloudrun.tf and
+# compute.tf, neither sets a dedicated one) needs to read these.
 resource "google_secret_manager_secret_iam_member" "claude_token_access" {
   project   = var.project_id
   secret_id = google_secret_manager_secret.claude_code_oauth_token.secret_id

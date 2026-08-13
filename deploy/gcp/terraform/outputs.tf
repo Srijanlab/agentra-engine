@@ -1,11 +1,3 @@
-output "scheduler_job_name" {
-  value = google_cloud_scheduler_job.daily_cycle.name
-}
-
-output "standup_job_name" {
-  value = google_cloud_scheduler_job.daily_standup.name
-}
-
 output "pubsub_topic" {
   value = google_pubsub_topic.work_queue.id
 }

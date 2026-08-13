@@ -230,9 +230,8 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def understand_codebase(_args):
         if stop := session.check_hard_stop():
             return stop
-        cb = await codebase.run(session.repo)
+        cb = await codebase.run_cached(session.repo, session.mem)
         session.cost_usd += cb.cost_usd
-        session.mem.write("architecture", "codebase", cb.text)
         if cb.ok:
             session.cb_summary = cb.text
             session.record_success("understand_codebase")
@@ -486,7 +485,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Call deploy_pre_prod first — no live URL to verify yet."}],
                 "is_error": True,
             }
-        test = await testing.run_pre_prod(session.repo, session.cb_summary or "", session.pre_prod_url)
+        test = await testing.run_pre_prod(session.repo, session.cb_summary or "", session.pre_prod_url, session.run_id)
         session.cost_usd += test.cost_usd
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
@@ -657,6 +656,13 @@ class AutonomousCycleReport:
     actions: list[str]
     final_message: str
     cost_usd: float
+    # session.current_feature, if implement_feature was ever called this
+    # cycle -- None for cycles that never got past discovery/check_backlog
+    # (e.g. nothing due, or the whole cycle was read-only investigation).
+    # The dashboard shows this instead of the app's static objective, which
+    # is the same multi-sentence mission statement for every run of an app
+    # and says nothing about what THIS run actually did.
+    feature: str | None = None
 
 
 async def run_autonomous_cycle(
@@ -773,5 +779,9 @@ async def run_autonomous_cycle(
     print(f"[agentra] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
 
     return AutonomousCycleReport(
-        run_id=run_id, actions=session.actions, final_message=final_text, cost_usd=session.cost_usd
+        run_id=run_id,
+        actions=session.actions,
+        final_message=final_text,
+        cost_usd=session.cost_usd,
+        feature=session.current_feature,
     )

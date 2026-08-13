@@ -13,43 +13,23 @@ resource "google_pubsub_topic" "work_queue" {
   name    = "agentra-work-queue"
 }
 
-resource "google_service_account" "pubsub_invoker" {
-  project      = var.project_id
-  account_id   = "agentra-pubsub-invoker"
-  display_name = "Pub/Sub push -> agentra orchestrator invoker"
-}
-
-# Standard pattern for Pub/Sub -> Cloud Run push auth: the push subscription
-# itself needs to be allowed to mint OIDC tokens as this service account.
-resource "google_service_account_iam_member" "pubsub_invoker_token_creator" {
-  service_account_id = google_service_account.pubsub_invoker.name
-  role                = "roles/iam.serviceAccountTokenCreator"
-  member              = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
-}
-
-resource "google_pubsub_subscription" "work_queue_push" {
+# PULL, not push (was push+OIDC to Cloud Run's own URI -- see compute.tf's
+# top comment for why Cloud Run is going away). Cloud Run's push model
+# needed the OIDC dance because *something* had to authenticate an inbound
+# request; a VM doesn't have that problem; compute.tf's agentra-pubsub-pull
+# container just pulls with the instance's own service account credentials
+# and forwards each message to http://localhost:8080/trigger/queue. No
+# public ingress needed for this path at all.
+resource "google_pubsub_subscription" "work_queue_pull" {
   project = var.project_id
-  name    = "agentra-work-queue-push"
+  name    = "agentra-work-queue-pull"
   topic   = google_pubsub_topic.work_queue.name
 
-  push_config {
-    push_endpoint = "${google_cloud_run_v2_service.agentra.uri}/trigger/queue"
-    oidc_token {
-      service_account_email = google_service_account.pubsub_invoker.email
-    }
-  }
-
-  # Pub/Sub retries on any non-2xx from the push endpoint; trigger_queue()
-  # in server.py always returns 200 (even for a malformed/invalid message --
-  # see its docstring on why acking-without-processing is correct there), so
-  # this ack deadline mainly covers ordinary transient failures (a cold
-  # start, a brief Cloud Run hiccup).
   ack_deadline_seconds = 30
+}
 
-  retry_policy {
-    minimum_backoff = "10s"
-    maximum_backoff = "300s"
-  }
-
-  depends_on = [google_cloud_run_v2_service_iam_member.invoker_pubsub]
+resource "google_project_iam_member" "vm_pubsub_subscriber" {
+  project = var.project_id
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }

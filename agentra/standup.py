@@ -66,16 +66,30 @@ def _format_input(
     return "\n".join(lines)
 
 
-async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24) -> str:
-    """Generate and persist today's standup for one app. Returns the
-    generated report text (also written to .agentra/standups/<date>.md)."""
-    if mem is None:
-        mem = Memory(repo)
+AGENT_LABELS = {
+    "orchestrator": "Orchestrator",
+    "codebase": "Codebase Agent",
+    "discovery": "Discovery Agent",
+    "implementation": "Implementation Agent",
+    "testing": "Testing Agent",
+    "deployment": "Deployment Agent",
+    "feedback": "Analytics Feedback Agent",
+    "prod_debug": "Production Debugging Agent",
+}
 
+
+async def generate_standup_updates(
+    repo: Path, app_name: str, mem: Memory, window_hours: int = 24
+) -> dict[str, str]:
+    """The one LLM call this whole module makes: turns real logged
+    activity/backlog into a {agent_id: "Yesterday: ... Today: ..."} dict,
+    one entry per agent. Split out from run_standup (which turns this into
+    a persisted markdown report) so server.py's live standup channel can
+    post each agent's line as its own message without a second LLM call or
+    a copy of this prompt-building logic."""
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=window_hours)
     yesterday_lines = mem.recent_log_lines(since)
-    
-    # Filter work updates in last 24h
+
     all_work_updates = mem.get_work_updates()
     work_updates = []
     for wu in all_work_updates:
@@ -86,76 +100,59 @@ async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, wind
                     work_updates.append(wu)
             except Exception:
                 pass
-                
+
     known_bugs = mem.known_bugs()
     feature_queue = mem.feature_queue()
     objective = mem.get_objective()
 
-    import json
     from agentra.agents.base import extract_json_block
 
     if not yesterday_lines and not work_updates and not known_bugs and not feature_queue and not objective:
         # Nothing at all to report -- don't spend an LLM call manufacturing
         # prose around an empty project. Same rule the model itself is
         # given below: no activity/backlog means say so plainly.
-        report = (
-            "Yesterday: No activity in the last 24 hours.\n\n"
-            "Today: No open bugs, feature requests, or objective set."
-        )
-        updates_json = {
-            "orchestrator": "Yesterday: No activity. Today: Idle.",
-            "codebase": "Yesterday: No activity. Today: Idle.",
-            "discovery": "Yesterday: No activity. Today: Idle.",
-            "implementation": "Yesterday: No activity. Today: Idle.",
-            "testing": "Yesterday: No activity. Today: Idle.",
-            "deployment": "Yesterday: No activity. Today: Idle.",
-            "feedback": "Yesterday: No activity. Today: Idle.",
-            "prod_debug": "Yesterday: No activity. Today: Idle."
-        }
-    else:
-        prompt = _format_input(app_name, yesterday_lines, work_updates, known_bugs, feature_queue, objective)
-        result = await run_agent(
-            prompt=prompt,
-            system_prompt=STANDUP_SYSTEM_PROMPT,
-            cwd=repo,
-            allowed_tools=[],
-            max_turns=1,
-        )
-        
-        json_data = extract_json_block(result.text) if result.ok and result.text else None
-        
-        if json_data and "updates" in json_data:
-            updates_json = json_data["updates"]
-            # Convert updates_json to markdown
-            lines = [f"# Daily Standup - {app_name}", ""]
-            agent_mapping = {
-                "orchestrator": "Orchestrator",
-                "codebase": "Codebase Agent",
-                "discovery": "Discovery Agent",
-                "implementation": "Implementation Agent",
-                "testing": "Testing Agent",
-                "deployment": "Deployment Agent",
-                "feedback": "Analytics Feedback Agent",
-                "prod_debug": "Production Debugging Agent"
-            }
-            for agent_id, text in updates_json.items():
-                label = agent_mapping.get(agent_id, agent_id.capitalize())
-                lines.append(f"## {label}")
-                lines.append(text)
-                lines.append("")
-            report = "\n".join(lines).strip()
-        else:
-            report = result.text if result.ok and result.text else f"(standup generation failed: {result.text or 'no output'})"
-            updates_json = {
-                "orchestrator": report
-            }
+        return {agent_id: "Yesterday: No activity. Today: Idle." for agent_id in AGENT_LABELS}
+
+    prompt = _format_input(app_name, yesterday_lines, work_updates, known_bugs, feature_queue, objective)
+    result = await run_agent(
+        prompt=prompt,
+        system_prompt=STANDUP_SYSTEM_PROMPT,
+        cwd=repo,
+        allowed_tools=[],
+        max_turns=1,
+    )
+
+    json_data = extract_json_block(result.text) if result.ok and result.text else None
+    if json_data and "updates" in json_data:
+        return json_data["updates"]
+
+    # Model didn't return the expected shape -- surface whatever it said
+    # under the Orchestrator rather than silently dropping it.
+    return {"orchestrator": result.text if result.ok and result.text else f"(standup generation failed: {result.text or 'no output'})"}
+
+
+async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24) -> str:
+    """Generate and persist today's standup for one app. Returns the
+    generated report text (also written to .agentra/standups/<date>.md)."""
+    if mem is None:
+        mem = Memory(repo)
+
+    updates_json = await generate_standup_updates(repo, app_name, mem, window_hours)
+
+    lines = [f"# Daily Standup - {app_name}", ""]
+    for agent_id, text in updates_json.items():
+        lines.append(f"## {AGENT_LABELS.get(agent_id, agent_id.capitalize())}")
+        lines.append(text)
+        lines.append("")
+    report = "\n".join(lines).strip()
 
     date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
     mem.record_standup(date_str, report)
-    
+
+    import json
     json_path = mem.standups_root / f"{date_str}.json"
     json_path.write_text(json.dumps(updates_json, indent=2))
-    
+
     return report
 
 
