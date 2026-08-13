@@ -67,6 +67,19 @@ MAX_CYCLE_COST_USD = 3.0
 STAGNATION_WINDOW = 5
 
 
+def _actionable_bugs(bugs: list[dict]) -> list[dict]:
+    """Filters out bugs labeled need_human -- a deterministic filter rather
+    than a prose instruction, same rationale as the rest of this module's
+    breakers: don't rely on the model reliably choosing to skip something
+    it can see. A bug tagged blocking_agentra too never reaches this filter
+    in practice -- run_autonomous_cycle refuses to even start a cycle while
+    one is open (see blocking_bugs()/OrchestratorSession's construction
+    below) -- but the check_backlog/discover_opportunities filter applies
+    to any need_human bug, blocking or not, since blocking_agentra can be
+    cleared before need_human is."""
+    return [b for b in bugs if not b.get("needs_human")]
+
+
 def _tool_call_hash(tool_name: str, args: dict) -> str:
     """Stable hash of (tool_name, args) -- stable meaning deterministic across processes
     and Python runs (unlike the builtin hash() of a str/tuple, which is salted per
@@ -253,7 +266,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         "feature; (3) the feature request queue -- customer/admin submitted, "
         "outranks your own ideation; (4) only if all three are empty, call "
         "discover_opportunities to ideate something new. Also shows what's already "
-        "shipped, so you don't repeat it.",
+        "shipped, so you don't repeat it. Bugs labeled need_human are left out of "
+        "the list below on purpose -- they're not something to attempt.",
         {},
     )
     async def check_backlog(_args):
@@ -261,7 +275,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         shipped = [f["feature"] for f in session.mem.shipped_features()]
         in_progress = session.mem.in_progress_features()
-        bugs = session.mem.known_bugs()
+        bugs = _actionable_bugs(session.mem.known_bugs())
         queue = session.mem.feature_queue()
         text = (
             f"In-progress multi-part features (resume these first): {json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
@@ -291,7 +305,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.cb_summary,
             session.analytics_summary,
             [f["feature"] for f in session.mem.shipped_features()],
-            session.mem.known_bugs(),
+            _actionable_bugs(session.mem.known_bugs()),
             session.mem.feature_queue(),
         )
         session.cost_usd += disc.cost_usd
@@ -756,6 +770,24 @@ async def run_autonomous_cycle(
         agent="cycle",
     )
 
+    # Deterministic pre-flight, not a prompt instruction the model has to remember to
+    # check: an open bug labeled both "bug" and "blocking_agentra" means agentra
+    # diagnosed its OWN further progress as blocked on something only a human can
+    # fix (see memory.py's cannot_be_fixed_by_agentra/blocking_bugs). Setting
+    # hard_stop_reason before any tool call happens makes every tool refuse via
+    # check_hard_stop() immediately, and skipping query() entirely below means this
+    # costs nothing -- confirmed live, without this 4 consecutive cycles each spent a
+    # full run's turns/cost retrying the identical unfixable "403 Write access to
+    # repository not granted" failure before a human ever saw it.
+    blocking = mem.blocking_bugs()
+    if blocking:
+        refs = ", ".join(f"#{b['external_id']}" for b in blocking)
+        session.hard_stop_reason = (
+            f"Blocked: {len(blocking)} open bug(s) labeled blocking_agentra ({refs}) need a human before "
+            "agentra can make further progress. See the issue(s) for diagnosis -- not retrying."
+        )
+        session.note(f"autonomous cycle blocked by open blocking_agentra bug(s): {refs}", agent="cycle", ok=False)
+
     tools = _tools_for(session)
     server = create_sdk_mcp_server(name="agentra_brain", tools=tools)
     allowed_tools = [f"mcp__agentra_brain__{t.name}" for t in tools]
@@ -777,27 +809,28 @@ async def run_autonomous_cycle(
     )
 
     print(f"[agentra] run {run_id} starting | objective={objective!r}", flush=True)
-    final_text = ""
-    try:
-        with run_log_scope(lambda line: mem.log(run_id, line)):
-            async for message in query(prompt=single_prompt_stream(prompt), options=options):
-                # Explicit logger (not log_claude_message's own _RUN_LOGGER fallback) so
-                # this top-level orchestrator turn's own lines get the same "[Label] ..."
-                # prefix agents/base.py::run_agent gives every nested specialized-agent
-                # call -- otherwise these lines would be the one unlabeled gap in an
-                # otherwise fully agent-tagged live log.
-                log_claude_message(message, lambda line: mem.log(run_id, f"[Orchestrator] {line}"))
-                if isinstance(message, ResultMessage):
-                    final_text = message.result or ""
-                    session.cost_usd += message.total_cost_usd or 0.0
-    except Exception as exc:
-        # Same rationale as agents/base.py's run_agent: an SDK/CLI-subprocess-level
-        # exception here has nothing to do with the actual orchestration work, and
-        # should be recorded as a failed run rather than crash the whole process with
-        # an unhandled traceback.
-        final_text = f"autonomous cycle raised: {exc}"
-        session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
-        mem.record_failure(run_id, "autonomous-cycle", final_text)
+    final_text = session.hard_stop_reason or ""
+    if not session.hard_stop_reason:
+        try:
+            with run_log_scope(lambda line: mem.log(run_id, line)):
+                async for message in query(prompt=single_prompt_stream(prompt), options=options):
+                    # Explicit logger (not log_claude_message's own _RUN_LOGGER fallback) so
+                    # this top-level orchestrator turn's own lines get the same "[Label] ..."
+                    # prefix agents/base.py::run_agent gives every nested specialized-agent
+                    # call -- otherwise these lines would be the one unlabeled gap in an
+                    # otherwise fully agent-tagged live log.
+                    log_claude_message(message, lambda line: mem.log(run_id, f"[Orchestrator] {line}"))
+                    if isinstance(message, ResultMessage):
+                        final_text = message.result or ""
+                        session.cost_usd += message.total_cost_usd or 0.0
+        except Exception as exc:
+            # Same rationale as agents/base.py's run_agent: an SDK/CLI-subprocess-level
+            # exception here has nothing to do with the actual orchestration work, and
+            # should be recorded as a failed run rather than crash the whole process with
+            # an unhandled traceback.
+            final_text = f"autonomous cycle raised: {exc}"
+            session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
+            mem.record_failure(run_id, "autonomous-cycle", final_text)
 
     if session.stagnation_detected:
         # Don't rely solely on the model having actually followed the "summarize and end

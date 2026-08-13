@@ -593,6 +593,20 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
 
+    # Eager, unlike Project provisioning below -- these labels are repo-wide,
+    # one-time setup (not per-feature), and every create_issue call this app
+    # ever makes silently drops any label GitHub doesn't already recognize
+    # (see github_issues.ensure_labels' docstring), so waiting until the
+    # first bug/feature would mean the first several went out unlabeled with
+    # no error to notice. Best-effort: a failure here (e.g. the App lacks
+    # repo admin permission) just logs, same as push_warning below.
+    try:
+        from agentra.connectors import github_issues
+
+        github_issues.ensure_labels(payload.repo_url)
+    except Exception as exc:
+        _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
+
     # No Project provisioning here at all -- a Project belongs to a feature,
     # not an app (see github_projects.py's module docstring), so there's
     # nothing app-level to create at onboarding. Each feature's own board

@@ -9,7 +9,7 @@ just logged, since a retry next cycle -- not a backlog entry -- is the fix.
 
 from unittest.mock import MagicMock
 
-from agentra.memory import Memory, is_transient_failure
+from agentra.memory import Memory, cannot_be_fixed_by_agentra, is_transient_failure
 
 
 def test_is_transient_failure_detects_known_patterns():
@@ -39,8 +39,14 @@ def test_record_failure_files_a_known_bug_for_a_real_defect(tmp_path, monkeypatc
     mem = Memory(tmp_path)
     recorded = {}
 
-    def fake_record_known_bug(run_id, severity, diagnosis, proposed_fix, source="prod-monitoring", external_id=None):
-        recorded.update(run_id=run_id, severity=severity, diagnosis=diagnosis, proposed_fix=proposed_fix, source=source)
+    def fake_record_known_bug(
+        run_id, severity, diagnosis, proposed_fix, source="prod-monitoring", external_id=None,
+        needs_human=False, blocking_agentra=False,
+    ):
+        recorded.update(
+            run_id=run_id, severity=severity, diagnosis=diagnosis, proposed_fix=proposed_fix, source=source,
+            needs_human=needs_human, blocking_agentra=blocking_agentra,
+        )
 
     monkeypatch.setattr(mem, "record_known_bug", fake_record_known_bug)
 
@@ -51,3 +57,34 @@ def test_record_failure_files_a_known_bug_for_a_real_defect(tmp_path, monkeypatc
     assert recorded["diagnosis"] == "testing failed during an autonomous cycle"
     assert "test_login" in recorded["proposed_fix"]
     assert recorded["source"] == "autonomous-failure"
+    assert recorded["needs_human"] is False
+    assert recorded["blocking_agentra"] is False
+
+
+def test_cannot_be_fixed_by_agentra_detects_auth_and_permission_failures():
+    assert cannot_be_fixed_by_agentra("403 Write access to repository not granted")
+    assert cannot_be_fixed_by_agentra("Error: 401 Unauthorized")
+    assert cannot_be_fixed_by_agentra("git push failed: permission denied")
+
+
+def test_cannot_be_fixed_by_agentra_false_for_an_ordinary_bug():
+    assert not cannot_be_fixed_by_agentra("TypeError: cannot read property 'x' of undefined at line 42")
+    assert not cannot_be_fixed_by_agentra("3 tests failed: test_login, test_logout, test_signup")
+
+
+def test_record_failure_flags_an_unfixable_failure_as_needing_a_human_and_blocking(tmp_path, monkeypatch):
+    mem = Memory(tmp_path)
+    recorded = {}
+
+    def fake_record_known_bug(
+        run_id, severity, diagnosis, proposed_fix, source="prod-monitoring", external_id=None,
+        needs_human=False, blocking_agentra=False,
+    ):
+        recorded.update(needs_human=needs_human, blocking_agentra=blocking_agentra)
+
+    monkeypatch.setattr(mem, "record_known_bug", fake_record_known_bug)
+
+    mem.record_failure("run1", "implement_feature", "403 Write access to repository not granted")
+
+    assert recorded["needs_human"] is True
+    assert recorded["blocking_agentra"] is True

@@ -147,6 +147,15 @@ class FakeGitHubBackend:
             self.issues[repo_url][issue_number].setdefault("comments", []).append(comment)
             self._save()
 
+    def ensure_labels(self, repo_url: str) -> None:
+        pass  # fake backend doesn't validate label existence at all -- nothing to ensure
+
+    def add_labels(self, repo_url: str, issue_number: int, labels: list[str]) -> None:
+        if issue_number in self.issues[repo_url]:
+            existing = self.issues[repo_url][issue_number]["labels"]
+            self.issues[repo_url][issue_number]["labels"] = existing + [l for l in labels if l not in existing]
+            self._save()
+
     def close_issue(
         self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
     ) -> None:
@@ -223,6 +232,8 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_in_progress_features", backend.list_in_progress_features),
         (github_issues, "close_issue", backend.close_issue),
         (github_issues, "add_comment", backend.add_comment),
+        (github_issues, "add_labels", backend.add_labels),
+        (github_issues, "ensure_labels", backend.ensure_labels),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
         (github_projects, "ensure_feature_project", backend.ensure_feature_project),

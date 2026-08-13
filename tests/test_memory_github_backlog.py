@@ -72,8 +72,53 @@ def test_known_bugs_reads_from_github(tmp_path, monkeypatch):
             "source": "github",
             "external_id": "7",
             "html_url": "https://github.com/acme/app/issues/7",
+            "needs_human": False,
+            "blocking_agentra": False,
         }
     ]
+
+
+def test_known_bugs_surfaces_need_human_and_blocking_agentra_labels(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [
+            {
+                "number": 7,
+                "title": "403 Write access to repository not granted",
+                "body": "...",
+                "labels": [{"name": "bug"}, {"name": "need_human"}, {"name": "blocking_agentra"}],
+            }
+        ],
+    )
+
+    bugs = mem.known_bugs()
+
+    assert bugs[0]["needs_human"] is True
+    assert bugs[0]["blocking_agentra"] is True
+
+
+def test_blocking_bugs_filters_to_only_blocking_agentra(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [
+            {"number": 5, "title": "Cosmetic bug", "labels": [{"name": "bug"}]},
+            {
+                "number": 7,
+                "title": "403 Write access to repository not granted",
+                "labels": [{"name": "bug"}, {"name": "need_human"}, {"name": "blocking_agentra"}],
+            },
+        ],
+    )
+
+    blocking = mem.blocking_bugs()
+
+    assert [b["external_id"] for b in blocking] == ["7"]
 
 
 def test_known_bugs_returns_empty_without_a_github_remote(tmp_path):
@@ -114,6 +159,49 @@ def test_record_known_bug_creates_a_github_issue(tmp_path, monkeypatch):
 
     assert created["title"] == "Checkout crashes"
     assert created["labels"] == ["bug"]
+
+
+def test_record_known_bug_adds_need_human_and_blocking_agentra_labels(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    created = {}
+
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda repo_url, title, body, labels=None: created.update(labels=labels) or {"number": 99}
+    )
+
+    mem.record_known_bug(
+        "run1", "high", "403 Write access to repository not granted", "grant App write access",
+        needs_human=True, blocking_agentra=True,
+    )
+
+    assert created["labels"] == ["bug", "need_human", "blocking_agentra"]
+
+
+def test_record_known_bug_adds_labels_to_an_existing_duplicate_instead_of_a_fresh_issue(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [{"number": 7, "title": "403 Write access to repository not granted", "body": "..."}],
+    )
+    monkeypatch.setattr(github_issues, "add_comment", lambda *a, **k: None)
+    labeled = {}
+    monkeypatch.setattr(
+        github_issues, "add_labels", lambda repo_url, issue_number, labels: labeled.update(issue_number=issue_number, labels=labels)
+    )
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not file a duplicate"))
+    )
+
+    mem.record_known_bug(
+        "run2", "high", "403 Write access to repository not granted", "grant App write access",
+        needs_human=True, blocking_agentra=True,
+    )
+
+    assert labeled == {"issue_number": 7, "labels": ["need_human", "blocking_agentra"]}
 
 
 def test_record_known_bug_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):

@@ -141,6 +141,23 @@ _FEATURE_LABEL = "feature"
 # _FEATURE_LABEL) only ever surface whole features, never individual parts.
 _STORY_LABEL = "story"
 
+# A bug agentra diagnosed as something it cannot fix by retrying or writing
+# different code -- a credential/permission problem, an external outage, a
+# decision only a human can make -- gets both of these on top of "bug"
+# (see cannot_be_fixed_by_agentra below and record_known_bug's needs_human/
+# blocking_agentra params). need_human means "don't attempt this one, it
+# needs a human" -- check_backlog/discover_opportunities filter it out of
+# what's offered as workable. blocking_agentra means "agentra's own further
+# progress is blocked until a human acts" -- run_autonomous_cycle refuses to
+# even start an autonomous cycle while one is open (see blocking_bugs()
+# below), rather than let it keep retrying variations of a fix that can
+# never work. Confirmed live: 4 consecutive cycles each burned cost trying a
+# different angle on the identical "403 Write access to repository not
+# granted" failure -- this label pair is what should have made cycle 2 stop
+# and wait for a human instead of trying again.
+_NEED_HUMAN_LABEL = "need_human"
+_BLOCKING_AGENTRA_LABEL = "blocking_agentra"
+
 # ── Failure triage: replaces the old write-only memory/failures/*.md ledger
 # (confirmed nothing in this codebase ever read it back). A permanent
 # failure (a real defect in the work attempted) gets filed via
@@ -164,6 +181,28 @@ def is_transient_failure(text: str) -> bool:
     return any(p.search(text) for p in _TRANSIENT_FAILURE_PATTERNS)
 
 
+# Auth/permission failures specifically: no brief, no retry, no different code
+# can fix these -- the fix is always a human granting/rotating something
+# outside the repo. Distinct from _TRANSIENT_FAILURE_PATTERNS above (those
+# resolve themselves on retry; these never do without human action), and from
+# an ordinary bug (those a future implement_feature call CAN fix). Deliberately
+# narrow/conservative: a false negative just means a fixable-looking bug gets
+# retried normally (today's behavior); a false positive would wrongly halt the
+# whole orchestrator, so this only matches the unambiguous cases.
+_UNFIXABLE_BY_AGENTRA_PATTERNS = [
+    re.compile(r"\b401\b"),
+    re.compile(r"\b403\b"),
+    re.compile(r"unauthorized", re.IGNORECASE),
+    re.compile(r"permission denied", re.IGNORECASE),
+    re.compile(r"access.{0,20}not granted", re.IGNORECASE),
+    re.compile(r"write access.{0,20}not granted", re.IGNORECASE),
+]
+
+
+def cannot_be_fixed_by_agentra(text: str) -> bool:
+    return any(p.search(text) for p in _UNFIXABLE_BY_AGENTRA_PATTERNS)
+
+
 def _github_bug_to_dict(issue: dict) -> dict:
     # run_id set to the same value as external_id (not None): discovery.py's
     # prompt tells the LLM to reference a known_bug by its run_id
@@ -172,6 +211,7 @@ def _github_bug_to_dict(issue: dict) -> dict:
     # so giving both fields the issue number keeps that resolution path
     # working for GitHub-sourced bugs without having to change discovery.py.
     issue_number = str(issue["number"])
+    label_names = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
     return {
         "run_id": issue_number,
         "severity": "medium",
@@ -180,6 +220,8 @@ def _github_bug_to_dict(issue: dict) -> dict:
         "source": "github",
         "external_id": issue_number,
         "html_url": issue.get("html_url"),
+        "needs_human": _NEED_HUMAN_LABEL in label_names,
+        "blocking_agentra": _BLOCKING_AGENTRA_LABEL in label_names,
     }
 
 
@@ -530,11 +572,22 @@ class Memory:
         proposed_fix: str,
         source: str = "prod-monitoring",
         external_id: str | None = None,
+        needs_human: bool = False,
+        blocking_agentra: bool = False,
     ) -> None:
+        """needs_human/blocking_agentra: set when the caller already knows
+        agentra cannot fix this itself (see cannot_be_fixed_by_agentra) --
+        stamped onto the GitHub issue as the "need_human"/"blocking_agentra"
+        labels (on top of "bug"), which check_backlog/discover_opportunities
+        and run_autonomous_cycle's pre-flight check read back. If a similar
+        bug is already open, these are added to THAT issue instead (GitHub's
+        add-labels endpoint is additive) -- the original occurrence might not
+        have been recognized as unfixable, but a later one can be."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_known_bug: %s has no github.com remote -- bug %r was NOT recorded anywhere", self.repo, diagnosis)
             return
+        extra_labels = ([_NEED_HUMAN_LABEL] if needs_human else []) + ([_BLOCKING_AGENTRA_LABEL] if blocking_agentra else [])
         try:
             from agentra.connectors import github_issues
 
@@ -543,6 +596,8 @@ class Memory:
                 github_issues.add_comment(
                     repo_url, int(duplicate_of), f"Still occurring (run {run_id}, source: {source}).\n\n{diagnosis}"
                 )
+                if extra_labels:
+                    github_issues.add_labels(repo_url, int(duplicate_of), extra_labels)
                 logger.info(
                     "record_known_bug: run %s matched existing open bug #%s -- commented instead of filing a duplicate",
                     run_id, duplicate_of,
@@ -552,7 +607,7 @@ class Memory:
             body = f"Severity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL])
+            github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL, *extra_labels])
         except Exception:
             logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
 
@@ -580,9 +635,18 @@ class Memory:
         if is_transient_failure(text):
             self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
             return
+        unfixable = cannot_be_fixed_by_agentra(text)
         self.record_known_bug(
-            run_id, severity, f"{step_name} failed during an autonomous cycle", text[:2000], source="autonomous-failure"
+            run_id, severity, f"{step_name} failed during an autonomous cycle", text[:2000], source="autonomous-failure",
+            needs_human=unfixable, blocking_agentra=unfixable,
         )
+
+    def blocking_bugs(self) -> list[dict]:
+        """Open bugs labeled both "bug" and "blocking_agentra" -- see the
+        label constants' docstring above. run_autonomous_cycle checks this
+        before starting an autonomous cycle at all; non-empty means agentra
+        should not attempt anything else until a human resolves it."""
+        return [b for b in self.known_bugs() if b.get("blocking_agentra")]
 
     # ── Queue: feature requests, from customers or added by an admin. Considered
     # by Discovery Agent above its own autonomous ideation, below real signals. ──

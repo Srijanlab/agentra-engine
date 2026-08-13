@@ -230,6 +230,58 @@ def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch
     ]
 
 
+def test_ensure_labels_creates_only_the_missing_ones(monkeypatch):
+    created = []
+
+    def fake_get(url, headers, params, timeout):
+        assert url == "https://api.github.com/repos/acme/app/labels"
+        return _fake_response([{"name": "bug"}, {"name": "story"}, {"name": "unrelated-label"}])
+
+    def fake_post(url, headers, json, timeout):
+        created.append(json["name"])
+        return _fake_response({"name": json["name"]}, status_code=201)
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.ensure_labels("https://github.com/acme/app.git")
+
+    assert sorted(created) == ["blocking_agentra", "feature", "need_human"]
+
+
+def test_ensure_labels_tolerates_a_concurrent_create(monkeypatch):
+    def fake_get(url, headers, params, timeout):
+        return _fake_response([])
+
+    def fake_post(url, headers, json, timeout):
+        return _fake_response({"message": "already_exists"}, status_code=422)
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.ensure_labels("https://github.com/acme/app.git")  # must not raise
+
+
+def test_add_labels_posts_the_given_labels(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, json=json)
+        return _fake_response({})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.add_labels("https://github.com/acme/app.git", 7, ["need_human", "blocking_agentra"])
+
+    assert captured["url"] == "https://api.github.com/repos/acme/app/issues/7/labels"
+    assert captured["json"] == {"labels": ["need_human", "blocking_agentra"]}
+
+
+def test_add_labels_rejects_non_github_url():
+    with pytest.raises(github_issues.GitHubIssuesError):
+        github_issues.add_labels("git@gitlab.com:acme/app.git", 1, ["bug"])
+
+
 def test_create_sub_issue_creates_and_links_under_parent(monkeypatch):
     posts = []
 

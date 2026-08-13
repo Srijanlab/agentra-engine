@@ -208,6 +208,66 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
     ]
 
 
+# agentra's whole label-based backlog/triage system (memory.py's _BUG_LABEL/
+# _FEATURE_LABEL/_STORY_LABEL/_NEED_HUMAN_LABEL/_BLOCKING_AGENTRA_LABEL)
+# only works if these names actually exist as real labels on the target
+# repo -- create_issue's `labels` silently drops any name GitHub doesn't
+# already recognize (see its own docstring), so a repo onboarded without
+# them never gets labeled at all, no error, just a silent gap. The agentra
+# repo itself has these because the user created them by hand; every other
+# app onboarded through /apps would not, without ensure_labels below.
+_LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
+    "bug": ("d73a4a", "Something isn't working"),
+    "feature": ("a2eeef", "A whole feature -- may have multiple 'story' sub-issues"),
+    "story": ("c5def5", "One part of a multi-part feature"),
+    "need_human": ("fbca04", "Needs a human decision or action -- agentra should not attempt this"),
+    "blocking_agentra": ("b60205", "Blocks agentra's own further progress until a human resolves it"),
+}
+
+
+def ensure_labels(repo_url: str) -> None:
+    """Creates whichever of _LABEL_DEFINITIONS don't already exist on the
+    target repo -- idempotent (skips ones already present), called once at
+    app registration (server.py's register_app). Best-effort by design,
+    same as every other secondary setup step at registration (e.g.
+    _apply_app_config's push): a repo that already has these labels (or
+    that this fails against, e.g. an App without repo admin permission)
+    just falls back to today's behavior, not a registration failure."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    headers = _headers(repo_url)
+    resp = httpx.get(f"{GITHUB_API}/repos/{owner_repo}/labels", headers=headers, params={"per_page": 100}, timeout=15)
+    resp.raise_for_status()
+    existing = {lbl["name"] for lbl in resp.json()}
+    for name, (color, description) in _LABEL_DEFINITIONS.items():
+        if name in existing:
+            continue
+        create_resp = httpx.post(
+            f"{GITHUB_API}/repos/{owner_repo}/labels",
+            headers=headers,
+            json={"name": name, "color": color, "description": description},
+            timeout=15,
+        )
+        if create_resp.status_code != 422:  # 422 = already exists (a concurrent create) -- fine, not an error
+            create_resp.raise_for_status()
+
+
+def add_labels(repo_url: str, issue_number: int, labels: list[str]) -> None:
+    """Adds `labels` to an existing issue without touching whichever labels
+    it already carries (GitHub's add-labels endpoint is additive, not a
+    replace) -- used when a bug recurs and duplicate suppression comments on
+    the existing issue instead of filing a fresh one (memory.py's
+    record_known_bug): the ORIGINAL report might not have been recognized as
+    needing a human/blocking agentra, but a later occurrence can be."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    resp = httpx.post(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/labels",
+        headers=_headers(repo_url),
+        json={"labels": labels},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def add_comment(repo_url: str, issue_number: int, comment: str) -> None:
     """Posts a comment without changing the issue's state -- for a bug
     that's still occurring (memory.py's record_known_bug duplicate
