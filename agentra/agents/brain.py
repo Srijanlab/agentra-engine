@@ -352,16 +352,14 @@ def _tools_for(session: OrchestratorSession) -> list:
                 commit_sha = head.stdout.strip()
         except Exception:
             pass  # dashboard's shipped list just shows no artifact link -- not worth failing the cycle over
-        session.mem.record_shipped(feature_name, commit_sha=commit_sha)
-        # Work updates were previously only ever recorded from the chat
-        # endpoint (server.py), which requires a human-composed
-        # work_update JSON field none of the 8 specialized agents'
-        # prompts actually produce during a normal cycle -- the
-        # "autonomously" half of recording work updates never actually
-        # fired. Reuses impl's own feature description rather than
-        # requiring every agent prompt to be rewritten to emit a
-        # work_update field.
-        session.mem.record_work_update("implementation", f"Implemented: {feature_name}")
+        session.mem.record_shipped(feature_name, commit_sha=commit_sha, run_id=session.run_id)
+        # Deliberately NOT also recording a work_update here anymore: a
+        # shipped feature already lands in shipped.json (with run_id) and
+        # documentation.md's changelog below -- a third copy in
+        # work_updates.json was pure duplication nobody was reading
+        # differently. work_updates.json is now only for the one thing
+        # nothing else captures: a chat reply's own extracted summary
+        # (server.py's _finalize_chat_turn).
         session.mem.append_documentation(
             f"Shipped **{feature_name}**"
             + (f" (commit `{commit_sha[:7]}`)" if commit_sha else "")
@@ -370,7 +368,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
         if resolves_id:
-            resolution_note = f"Resolved by agentra: shipped as {feature_name!r}" + (
+            resolution_note = f"Resolved by agentra: shipped as {feature_name!r} (run {session.run_id})" + (
                 f" (commit {commit_sha})" if commit_sha else ""
             )
             if resolves_origin == "known_bug":
@@ -756,12 +754,13 @@ async def run_autonomous_cycle(
         final_text = f"{final_text}\n\n{stagnation_note}" if final_text else stagnation_note
         session.note("stagnation breaker: cycle terminated early, no progress", agent="cycle", ok=False)
 
-    if final_text:
-        # Cycle-level work update, distinct from implement_feature's own
-        # "implementation" work_update above -- gives the standup/chat
-        # surfaces something to show for triage/investigation-only cycles
-        # too, not just ones that shipped a feature.
-        mem.record_work_update("orchestrator", final_text[:2000])
+    # Deliberately not also recording final_text as a work_update: the run's
+    # own log already captures this cycle blow-by-blow (mem.log() calls
+    # throughout, Firestore-mirrored), and standup.py's
+    # generate_standup_updates() already reads recent_log_lines() as its
+    # "yesterday" input independent of work_updates.json -- so an
+    # investigation-only cycle that shipped nothing still leaves a real
+    # trace without a second, redundant copy of the same narrative here.
 
     # Persist unconditionally (not just when a deploy happened): commit_and_push
     # is a no-op when nothing under .agentra/ is dirty, so this is always safe,

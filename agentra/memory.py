@@ -269,26 +269,31 @@ class Memory:
         return self.log(run_id, format_safety_denial_line(tool_name, pattern, detail))
 
     def shipped_features(self) -> list[dict]:
-        """Each entry: {feature, commit_sha, ts} -- commit_sha links the
-        dashboard's Shipped list to the actual artifact (a GitHub commit
-        URL, built client-side from the app's repo_url + this sha) instead
-        of just a description with nothing to click through to. Normalizes
-        older shipped.json files (a plain list[str], from before commit_sha
-        was tracked) into the same shape with commit_sha=None, so existing
-        repos don't need a migration."""
+        """Each entry: {feature, commit_sha, run_id, ts} -- commit_sha links
+        the dashboard's Shipped list to the actual artifact (a GitHub commit
+        URL, built client-side from the app's repo_url + this sha), run_id
+        links it back to the exact run/agent-steps/log that produced it.
+        Normalizes older shipped.json entries (a plain list[str] from before
+        commit_sha was tracked, or a dict from before run_id was) into the
+        same shape with missing fields set to None, so existing repos don't
+        need a migration."""
         if not self.shipped_path.exists():
             return []
         raw = json.loads(self.shipped_path.read_text())
         return [
-            {"feature": e, "commit_sha": None, "ts": None} if isinstance(e, str) else e
+            {"feature": e, "commit_sha": None, "run_id": None, "ts": None}
+            if isinstance(e, str)
+            else {"run_id": None, **e}
             for e in raw
         ]
 
-    def record_shipped(self, feature: str, commit_sha: str | None = None) -> None:
+    def record_shipped(self, feature: str, commit_sha: str | None = None, run_id: str | None = None) -> None:
         features = self.shipped_features()
         if any(f["feature"] == feature for f in features):
             return
-        features.append({"feature": feature, "commit_sha": commit_sha, "ts": dt.datetime.now(dt.timezone.utc).isoformat()})
+        features.append(
+            {"feature": feature, "commit_sha": commit_sha, "run_id": run_id, "ts": dt.datetime.now(dt.timezone.utc).isoformat()}
+        )
         self.shipped_path.write_text(json.dumps(features, indent=2))
 
     def released_features(self) -> list[dict]:
