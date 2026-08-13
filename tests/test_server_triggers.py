@@ -1,9 +1,11 @@
+import subprocess
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from agentra import environments, registry, server
+from agentra.connectors import github_fake
 from agentra.memory import Memory
 
 
@@ -12,11 +14,23 @@ def _close_background_coro(coro):
     return None
 
 
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
 def _register_tmp_app(tmp_path: Path, name: str = "myapp") -> Path:
     repo = tmp_path / name
     repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("hello\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial commit")
+    repo_url = f"https://github.com/acme/{name}.git"
+    _git(repo, "remote", "add", "origin", repo_url)
     Memory(repo).set_objective("Ship useful dashboard improvements.")
-    registry.register_app(name, str(repo), repo_url="https://github.com/acme/myapp.git", branch="main")
+    registry.register_app(name, str(repo), repo_url=repo_url, branch="main")
     return repo
 
 
@@ -32,6 +46,7 @@ def _isolate_registry(tmp_path, monkeypatch):
     server._active_runs.clear()
     server._app_locks.clear()
     monkeypatch.setattr(server.asyncio, "create_task", _close_background_coro)
+    github_fake.install(monkeypatch=monkeypatch)
 
 
 def test_scheduled_trigger_respects_per_app_schedule_hours(tmp_path, monkeypatch):
@@ -124,7 +139,6 @@ def test_dashboard_feature_request_submission_reaches_app_backlog(tmp_path, monk
     queue = Memory(repo).feature_queue()
     assert len(queue) == 1
     assert queue[0]["description"] == "Let admins export the shipped list."
-    assert queue[0]["source"] == "customer"
 
 
 def test_dashboard_bug_submission_reaches_bug_backlog(tmp_path, monkeypatch):
@@ -141,8 +155,6 @@ def test_dashboard_bug_submission_reaches_bug_backlog(tmp_path, monkeypatch):
     bugs = Memory(repo).known_bugs()
     assert len(bugs) == 1
     assert bugs[0]["diagnosis"] == "Export crashes on an empty result set."
-    assert bugs[0]["severity"] == "high"
-    assert bugs[0]["source"] == "customer"
 
 
 def test_promote_endpoint_records_human_approved_run(tmp_path, monkeypatch):

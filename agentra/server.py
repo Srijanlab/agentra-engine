@@ -392,6 +392,18 @@ async def list_agent_metadata() -> dict:
 # dev_seed.py's fixture data -- only takes effect when a real App genuinely
 # isn't configured, so it can never mask a real misconfiguration.
 DEV_MODE = os.environ.get("AGENTRA_DEV_MODE") == "1"
+if DEV_MODE:
+    # known_bugs/feature_queue/objective/environments are GitHub-only now
+    # (memory.py/environments.py), and dev mode never has real GitHub App
+    # credentials -- fake the backend here too, not just in dev_seed.py's
+    # seed script, since this server process is what actually serves every
+    # dashboard read/write after seeding. Persisted under AGENTRA_HOME so
+    # it survives across dev_seed.py's separate seed-then-serve processes
+    # (dev.sh's documented workflow) -- never under a target repo's own
+    # .agentra/, which stays genuinely GitHub-only.
+    from agentra.connectors import github_fake
+
+    github_fake.install(persist_path=registry.AGENTRA_HOME / "dev_github_fake.json")
 _DEV_INSTALLATION = {"account": "dev-local", "type": "User", "repository_selection": "all"}
 _DEV_REPOS = [
     {

@@ -1,9 +1,9 @@
-"""Regression tests for Memory.get_objective()/set_objective()'s two-way
-sync with a single GitHub Actions Variable (AGENTRA_OBJECTIVE) -- same
-hybrid pattern as environments.py's config sync and memory.py's
-known_bugs/feature_queue GitHub Issues sync. The dashboard's PATCH
-/apps/{name} (server.py's _apply_app_config) calls set_objective()
-directly, so this is the entire sync surface.
+"""Regression tests for Memory.get_objective()/set_objective(): a single
+GitHub Actions Variable (AGENTRA_OBJECTIVE) is the ONLY store -- no local
+objective.yaml at all, a deliberate availability tradeoff (see memory.py's
+module comment). A repo with no github.com remote, or an unreachable
+GitHub API, simply has no objective -- get returns None, set is a no-op
+(logged as an error, since there's nowhere else for it to go).
 """
 
 import subprocess
@@ -30,29 +30,28 @@ def _init_repo(path: Path, remote: str | None = "https://github.com/acme/app.git
     return path
 
 
-def test_get_objective_prefers_github_variable_over_local_yaml(tmp_path, monkeypatch):
+def test_get_objective_reads_from_github(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
-    monkeypatch.setattr(github_variables, "set_variable", lambda *a, **k: None)
-    mem = Memory(repo)
-    mem.set_objective("local objective")
+    monkeypatch.setattr(github_variables, "list_variables", lambda repo_url: {"AGENTRA_OBJECTIVE": "Ship the dashboard"})
 
-    monkeypatch.setattr(github_variables, "list_variables", lambda repo_url: {"AGENTRA_OBJECTIVE": "github objective"})
-
-    assert mem.get_objective() == "github objective"
+    assert Memory(repo).get_objective() == "Ship the dashboard"
 
 
-def test_get_objective_falls_back_to_local_yaml_when_github_unreachable(tmp_path, monkeypatch):
+def test_get_objective_returns_none_without_a_github_remote(tmp_path):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+
+    assert Memory(repo).get_objective() is None
+
+
+def test_get_objective_returns_none_when_github_unreachable(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
-    monkeypatch.setattr(github_variables, "set_variable", lambda *a, **k: None)
-    mem = Memory(repo)
-    mem.set_objective("local objective")
 
     def _raise(repo_url):
         raise github_variables.GitHubVariablesError("boom")
 
     monkeypatch.setattr(github_variables, "list_variables", _raise)
 
-    assert mem.get_objective() == "local objective"
+    assert Memory(repo).get_objective() is None
 
 
 def test_set_objective_pushes_to_github(tmp_path, monkeypatch):
@@ -61,29 +60,17 @@ def test_set_objective_pushes_to_github(tmp_path, monkeypatch):
 
     monkeypatch.setattr(github_variables, "set_variable", lambda repo_url, name, value: pushed.update({name: value}))
 
-    mem = Memory(repo)
-    mem.set_objective("Ship the new dashboard.")
+    Memory(repo).set_objective("Ship the new dashboard.")
 
     assert pushed == {"AGENTRA_OBJECTIVE": "Ship the new dashboard."}
 
 
-def test_set_objective_still_writes_local_file_when_github_push_fails(tmp_path, monkeypatch):
-    repo = _init_repo(tmp_path / "repo")
-
-    def _raise(repo_url, name, value):
-        raise github_variables.GitHubVariablesError("boom")
-
-    monkeypatch.setattr(github_variables, "set_variable", _raise)
-
-    mem = Memory(repo)
-    mem.set_objective("Ship the new dashboard.")
-
-    assert mem.objective_path.exists()
-
-
-def test_get_objective_without_a_github_remote_uses_local_yaml_only(tmp_path, monkeypatch):
+def test_set_objective_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo", remote=None)
-    mem = Memory(repo)
-    mem.set_objective("local-only objective")
 
-    assert mem.get_objective() == "local-only objective"
+    def fail_set(*a, **k):
+        raise AssertionError("should not attempt a GitHub call with no remote")
+
+    monkeypatch.setattr(github_variables, "set_variable", fail_set)
+
+    Memory(repo).set_objective("Ship the new dashboard.")  # must not raise

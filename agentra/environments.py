@@ -61,20 +61,17 @@ class EnvironmentConfig:
 
     @property
     def path_hint(self) -> str:
-        return ".agentra/environments.yaml"
+        return "GitHub Actions repo variables (AGENTRA_*)"
 
 
-def config_path(repo: Path) -> Path:
-    return repo / ".agentra" / "environments.yaml"
-
-
-# GitHub Actions repository Variables as the authoritative store for this
-# config when the target repo has a github.com remote and the App has the
-# Variables permission -- one variable per field so each is individually
-# browsable/editable in GitHub's own UI (Settings -> Secrets and variables
-# -> Actions -> Variables), not one opaque blob. Local environments.yaml
-# stays the fallback/durable-if-GitHub-is-unreachable copy, same hybrid
-# pattern as memory.py's known_bugs/feature_queue GitHub Issues sync.
+# GitHub Actions repository Variables are the ONLY store for this config --
+# no local file, no fallback. One variable per field so each is
+# individually browsable/editable in GitHub's own UI (Settings -> Secrets
+# and variables -> Actions -> Variables), not one opaque blob. A repo with
+# no github.com remote, or an unreachable/unconfigured GitHub App, simply
+# cannot have its environment configured at all -- a deliberate
+# availability tradeoff (see memory.py's module docstring for the same
+# choice applied to known_bugs/feature_queue/objective).
 _GITHUB_VARIABLE_NAMES = {
     "local_branch": "AGENTRA_LOCAL_BRANCH",
     "pre_prod_branch": "AGENTRA_PRE_PROD_BRANCH",
@@ -114,86 +111,47 @@ def _coerce(field: str, raw: str):
 
 
 def load(repo: Path) -> EnvironmentConfig | None:
-    path = config_path(repo)
-    local_exists = path.exists()
-    data: dict = {}
-    if local_exists:
-        try:
-            import yaml
-
-            data = yaml.safe_load(path.read_text()) or {}
-        except ImportError:
-            data = _naive_yaml_load(path.read_text())
-
-    found_on_github = False
     repo_url = _repo_url(repo)
-    if repo_url:
-        try:
-            from agentra.connectors import github_variables
+    if not repo_url:
+        logger.error("environments.load: %s has no github.com remote -- no environment config is visible at all", repo)
+        return None
+    data: dict = {}
+    found_anything = False
+    try:
+        from agentra.connectors import github_variables
 
-            remote_vars = github_variables.list_variables(repo_url)
-            for field, var_name in _GITHUB_VARIABLE_NAMES.items():
-                if var_name not in remote_vars:
-                    continue
-                coerced = _coerce(field, remote_vars[var_name])
-                if coerced is not None:
-                    data[field] = coerced
-                    found_on_github = True
-        except Exception:
-            logger.warning("environments.load: GitHub Variables unavailable for %s, using local mirror", repo_url, exc_info=True)
+        remote_vars = github_variables.list_variables(repo_url)
+        for field, var_name in _GITHUB_VARIABLE_NAMES.items():
+            if var_name not in remote_vars:
+                continue
+            coerced = _coerce(field, remote_vars[var_name])
+            if coerced is not None:
+                data[field] = coerced
+                found_anything = True
+    except Exception:
+        logger.error("environments.load: GitHub Variables unavailable for %s -- environment config is unreadable until it recovers", repo_url, exc_info=True)
+        return None
 
-    if not local_exists and not found_on_github:
+    if not found_anything:
         return None
     return EnvironmentConfig(**data)
 
 
-def save(repo: Path, config: EnvironmentConfig) -> Path:
-    path = config_path(repo)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import yaml
-
-        path.write_text(yaml.safe_dump(asdict(config), sort_keys=False))
-    except ImportError:
-        path.write_text(_naive_yaml_dump(asdict(config)))
-
+def save(repo: Path, config: EnvironmentConfig) -> None:
     repo_url = _repo_url(repo)
-    if repo_url:
-        try:
-            from agentra.connectors import github_variables
+    if not repo_url:
+        logger.error("environments.save: %s has no github.com remote -- environment config was NOT saved anywhere", repo)
+        return
+    try:
+        from agentra.connectors import github_variables
 
-            data = asdict(config)
-            for field, var_name in _GITHUB_VARIABLE_NAMES.items():
-                value = data[field]
-                str_value = ("true" if value else "false") if field in _BOOL_FIELDS else str(value)
-                github_variables.set_variable(repo_url, var_name, str_value)
-        except Exception:
-            logger.warning("environments.save: failed to sync to GitHub Variables for %s, local file still saved", repo_url, exc_info=True)
-    return path
-
-
-def _naive_yaml_dump(data: dict) -> str:
-    lines = []
-    for key, value in data.items():
-        if isinstance(value, bool):
-            value = "true" if value else "false"
-        lines.append(f"{key}: {value}")
-    return "\n".join(lines) + "\n"
-
-
-def _naive_yaml_load(text: str) -> dict:
-    data: dict = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        value = value.strip()
-        if value in ("true", "false"):
-            data[key.strip()] = value == "true"
-        else:
-            data[key.strip()] = value
-    return data
+        data = asdict(config)
+        for field, var_name in _GITHUB_VARIABLE_NAMES.items():
+            value = data[field]
+            str_value = ("true" if value else "false") if field in _BOOL_FIELDS else str(value)
+            github_variables.set_variable(repo_url, var_name, str_value)
+    except Exception:
+        logger.error("environments.save: failed to save to GitHub Variables for %s -- environment config was NOT saved anywhere", repo_url, exc_info=True)
 
 
 def detect(repo: Path) -> EnvironmentConfig:

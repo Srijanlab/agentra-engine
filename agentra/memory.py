@@ -5,9 +5,13 @@ features, metrics, failures. Lives at <repo>/.agentra/memory/ so it travels
 with the repo and accumulates across runs.
 
 App-agnostic by design: everything here is plain JSON/YAML files agentra
-owns and reads/writes itself. Getting real data INTO these files (customer
-feedback from whatever database a given app uses, an objective set via
-whatever admin UI a given app has) is the job of a per-app adapter command
+owns and reads/writes itself, or -- for known_bugs/feature_queue/objective/
+environments -- GitHub Issues/Actions Variables directly, with no local
+mirror at all (repos.py's _repo_url() requires a github.com remote; there
+is deliberately no local-file fallback if GitHub is unreachable or
+unconfigured, a known availability tradeoff -- see known_bugs()'s own
+docstring). Getting real data INTO the backlog (customer feedback from
+whatever database a given app uses) is the job of a per-app adapter command
 (EnvironmentConfig.feedback_fetch_command, invoked by orchestrator.py/
 brain.py) -- agentra's own code never talks to Firestore/Postgres/anything
 app-specific directly.
@@ -19,18 +23,16 @@ On first use, Memory writes a .agentra/.gitignore into the target repo so that:
   Committed (audit trail, config)       Not committed (noisy per-run data)
   ──────────────────────────────────    ────────────────────────────────────
   memory/  (architecture, decisions,    logs/  (verbose timestamped traces)
-           features, metrics, failures)
+           features, metrics, failures) test_artifacts/ (pre-prod screenshots)
   shipped.json
   released.json
-  known_bugs.json
-  feature_queue.json
-  objective.yaml
   feedback_sync_state.json
-  environments.yaml
   codebase_spec_commit.json
 
 This means the memory system travels with the repo across clones, CI runners,
-and contributors, while run logs stay local.
+and contributors, while run logs stay local. known_bugs.json/feature_queue.json/
+objective.yaml/environments.yaml no longer exist as local files at all --
+GitHub Issues/Variables are their only home now.
 """
 
 import datetime as dt
@@ -175,9 +177,6 @@ class Memory:
         self.log_root = self.root / "logs"
         self.shipped_path = self.root / "shipped.json"
         self.released_path = self.root / "released.json"
-        self.known_bugs_path = self.root / "known_bugs.json"
-        self.feature_queue_path = self.root / "feature_queue.json"
-        self.objective_path = self.root / "objective.yaml"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
         self.codebase_spec_commit_path = self.root / "codebase_spec_commit.json"
         self.standups_root = self.root / "standups"
@@ -339,20 +338,17 @@ class Memory:
 
     def known_bugs(self) -> list[dict]:
         repo_url = self._repo_url()
-        if repo_url:
-            try:
-                from agentra.connectors import github_issues
-
-                issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL])
-                return [_github_bug_to_dict(i) for i in issues]
-            except Exception:
-                logger.warning("known_bugs: GitHub Issues unavailable for %s, using local mirror", repo_url, exc_info=True)
-        return self._local_known_bugs()
-
-    def _local_known_bugs(self) -> list[dict]:
-        if not self.known_bugs_path.exists():
+        if not repo_url:
+            logger.error("known_bugs: %s has no github.com remote -- no bug backlog is visible at all", self.repo)
             return []
-        return json.loads(self.known_bugs_path.read_text())
+        try:
+            from agentra.connectors import github_issues
+
+            issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL])
+            return [_github_bug_to_dict(i) for i in issues]
+        except Exception:
+            logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
+            return []
 
     def record_known_bug(
         self,
@@ -363,55 +359,36 @@ class Memory:
         source: str = "prod-monitoring",
         external_id: str | None = None,
     ) -> None:
-        bugs = self._local_known_bugs()
-        if external_id and any(b.get("external_id") == external_id for b in bugs):
-            return  # already recorded -- feedback_fetch_command may return it again
-
         repo_url = self._repo_url()
-        if repo_url and external_id is None:
-            try:
-                from agentra.connectors import github_issues
+        if not repo_url:
+            logger.error("record_known_bug: %s has no github.com remote -- bug %r was NOT recorded anywhere", self.repo, diagnosis)
+            return
+        try:
+            from agentra.connectors import github_issues
 
-                body = f"Severity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
-                created = github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL])
-                external_id = str(created["number"])
-            except Exception:
-                logger.warning("record_known_bug: failed to create a GitHub issue for %s, recording locally only", repo_url, exc_info=True)
-
-        bugs.append(
-            {
-                "run_id": run_id,
-                "severity": severity,
-                "diagnosis": diagnosis,
-                "proposed_fix": proposed_fix,
-                "source": source,
-                "external_id": external_id,
-            }
-        )
-        self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
+            body = f"Severity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
+            if external_id:
+                body += f"\n\nExternal-ID: {external_id}"
+            github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL])
+        except Exception:
+            logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
 
     def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
-        # Match on either run_id or external_id -- a bug entry can carry both (this repo's
-        # own known_bugs.json has both for a human-sourced entry), and an LLM resolving it
-        # from check_backlog's raw JSON dump has no way to know which one is "the" id without
-        # this being lenient. Confirmed live: an autonomous cycle passed external_id while
-        # this only matched run_id, so the clear silently no-op'd and the bug never left the
-        # backlog despite the agent believing it had resolved it.
-        #
         # resolution_note: what actually shipped to fix this (feature name + commit) --
         # callers that know it should pass it, so the closed GitHub issue itself carries
         # a real "shipped" record instead of a content-free "Resolved by agentra."
+        if not id_.isdigit():
+            logger.warning("clear_known_bug: %r is not a GitHub issue number, nothing to close", id_)
+            return
         repo_url = self._repo_url()
-        if repo_url and id_.isdigit():
-            try:
-                from agentra.connectors import github_issues
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
 
-                github_issues.close_issue(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
-            except Exception:
-                logger.warning("clear_known_bug: failed to close GitHub issue #%s on %s", id_, repo_url, exc_info=True)
-
-        bugs = [b for b in self._local_known_bugs() if b.get("run_id") != id_ and b.get("external_id") != id_]
-        self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
+            github_issues.close_issue(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
+        except Exception:
+            logger.warning("clear_known_bug: failed to close GitHub issue #%s on %s", id_, repo_url, exc_info=True)
 
     def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
         """The one place a failed agent turn's full output should be
@@ -429,20 +406,17 @@ class Memory:
 
     def feature_queue(self) -> list[dict]:
         repo_url = self._repo_url()
-        if repo_url:
-            try:
-                from agentra.connectors import github_issues
-
-                issues = github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL])
-                return [_github_feature_to_dict(i) for i in issues]
-            except Exception:
-                logger.warning("feature_queue: GitHub Issues unavailable for %s, using local mirror", repo_url, exc_info=True)
-        return self._local_feature_queue()
-
-    def _local_feature_queue(self) -> list[dict]:
-        if not self.feature_queue_path.exists():
+        if not repo_url:
+            logger.error("feature_queue: %s has no github.com remote -- no feature backlog is visible at all", self.repo)
             return []
-        return json.loads(self.feature_queue_path.read_text())
+        try:
+            from agentra.connectors import github_issues
+
+            issues = github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL])
+            return [_github_feature_to_dict(i) for i in issues]
+        except Exception:
+            logger.error("feature_queue: GitHub Issues unavailable for %s -- feature backlog is unreadable until it recovers", repo_url, exc_info=True)
+            return []
 
     def record_feature_request(
         self,
@@ -450,35 +424,33 @@ class Memory:
         source: str = "customer",
         external_id: str | None = None,
     ) -> None:
-        queue = self._local_feature_queue()
-        if external_id and any(f.get("external_id") == external_id for f in queue):
-            return
-
         repo_url = self._repo_url()
-        if repo_url and external_id is None:
-            try:
-                from agentra.connectors import github_issues
+        if not repo_url:
+            logger.error("record_feature_request: %s has no github.com remote -- feature %r was NOT recorded anywhere", self.repo, description)
+            return
+        try:
+            from agentra.connectors import github_issues
 
-                created = github_issues.create_issue(repo_url, description, f"Source: {source}", labels=[_FEATURE_LABEL])
-                external_id = str(created["number"])
-            except Exception:
-                logger.warning("record_feature_request: failed to create a GitHub issue for %s, recording locally only", repo_url, exc_info=True)
-
-        queue.append({"description": description, "source": source, "external_id": external_id})
-        self.feature_queue_path.write_text(json.dumps(queue, indent=2))
+            body = f"Source: {source}"
+            if external_id:
+                body += f"\n\nExternal-ID: {external_id}"
+            github_issues.create_issue(repo_url, description, body, labels=[_FEATURE_LABEL])
+        except Exception:
+            logger.error("record_feature_request: failed to create a GitHub issue on %s -- feature %r was NOT recorded anywhere", repo_url, description, exc_info=True)
 
     def clear_feature_request(self, external_id: str, resolution_note: str | None = None) -> None:
+        if not external_id.isdigit():
+            logger.warning("clear_feature_request: %r is not a GitHub issue number, nothing to close", external_id)
+            return
         repo_url = self._repo_url()
-        if repo_url and external_id.isdigit():
-            try:
-                from agentra.connectors import github_issues
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
 
-                github_issues.close_issue(repo_url, int(external_id), comment=resolution_note or "Resolved by agentra.")
-            except Exception:
-                logger.warning("clear_feature_request: failed to close GitHub issue #%s on %s", external_id, repo_url, exc_info=True)
-
-        queue = [f for f in self._local_feature_queue() if f.get("external_id") != external_id]
-        self.feature_queue_path.write_text(json.dumps(queue, indent=2))
+            github_issues.close_issue(repo_url, int(external_id), comment=resolution_note or "Resolved by agentra.")
+        except Exception:
+            logger.warning("clear_feature_request: failed to close GitHub issue #%s on %s", external_id, repo_url, exc_info=True)
 
     # ── Settings: the current objective. Read by default so --objective becomes
     # optional; `agentra objective set/show` manages this file directly. ──────
@@ -486,54 +458,29 @@ class Memory:
     _OBJECTIVE_VARIABLE = "AGENTRA_OBJECTIVE"
 
     def get_objective(self) -> str | None:
-        objective = None
-        if self.objective_path.exists():
-            try:
-                import yaml
-
-                data = yaml.safe_load(self.objective_path.read_text()) or {}
-            except ImportError:
-                data = {}
-                for line in self.objective_path.read_text().splitlines():
-                    if line.startswith("objective:"):
-                        data["objective"] = line.split(":", 1)[1].strip().strip('"')
-            objective = data.get("objective")
-
         repo_url = self._repo_url()
-        if repo_url:
-            try:
-                from agentra.connectors import github_variables
-
-                remote_vars = github_variables.list_variables(repo_url)
-                if self._OBJECTIVE_VARIABLE in remote_vars:
-                    objective = remote_vars[self._OBJECTIVE_VARIABLE]
-            except Exception:
-                logger.warning("get_objective: GitHub Variables unavailable for %s, using local mirror", repo_url, exc_info=True)
-        return objective
-
-    def set_objective(self, objective: str) -> Path:
-        content = {
-            "objective": objective,
-            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        }
+        if not repo_url:
+            logger.error("get_objective: %s has no github.com remote -- no objective is configured", self.repo)
+            return None
         try:
-            import yaml
+            from agentra.connectors import github_variables
 
-            self.objective_path.write_text(yaml.safe_dump(content, sort_keys=False))
-        except ImportError:
-            self.objective_path.write_text(
-                f'objective: "{objective}"\nupdated_at: "{content["updated_at"]}"\n'
-            )
+            return github_variables.list_variables(repo_url).get(self._OBJECTIVE_VARIABLE)
+        except Exception:
+            logger.error("get_objective: GitHub Variables unavailable for %s -- objective is unreadable until it recovers", repo_url, exc_info=True)
+            return None
 
+    def set_objective(self, objective: str) -> None:
         repo_url = self._repo_url()
-        if repo_url:
-            try:
-                from agentra.connectors import github_variables
+        if not repo_url:
+            logger.error("set_objective: %s has no github.com remote -- objective was NOT saved anywhere", self.repo)
+            return
+        try:
+            from agentra.connectors import github_variables
 
-                github_variables.set_variable(repo_url, self._OBJECTIVE_VARIABLE, objective)
-            except Exception:
-                logger.warning("set_objective: failed to sync to GitHub Variables for %s, local file still saved", repo_url, exc_info=True)
-        return self.objective_path
+            github_variables.set_variable(repo_url, self._OBJECTIVE_VARIABLE, objective)
+        except Exception:
+            logger.error("set_objective: failed to save to GitHub Variables for %s -- objective was NOT saved anywhere", repo_url, exc_info=True)
 
     # ── Feedback sync checkpoint: how far feedback_fetch_command has been read,
     # so each cycle only asks for what's new since last time. ────────────────
