@@ -7,6 +7,7 @@ round-trip without a live GitHub API call.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -68,9 +69,22 @@ class FakeGitHubBackend:
             results = [i for i in results if any(label in i["labels"] for label in labels)]
         return [dict(i) for i in results]
 
-    def close_issue(self, repo_url: str, issue_number: int, comment: str | None = None) -> None:
+    def list_closed_issues(self, repo_url: str, labels: list[str] | None = None, limit: int = 30) -> list[dict]:
+        results = [i for i in self.issues[repo_url].values() if i["state"] == "closed"]
+        if labels:
+            results = [i for i in results if any(label in i["labels"] for label in labels)]
+        results.sort(key=lambda i: i.get("closed_at") or "", reverse=True)
+        return [dict(i) for i in results[:limit]]
+
+    def close_issue(
+        self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
+    ) -> None:
         if issue_number in self.issues[repo_url]:
-            self.issues[repo_url][issue_number]["state"] = "closed"
+            issue = self.issues[repo_url][issue_number]
+            issue["state"] = "closed"
+            issue["closed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            if body_suffix:
+                issue["body"] = (issue.get("body") or "").rstrip() + "\n\n" + body_suffix
             self._save()
 
     def list_variables(self, repo_url: str) -> dict[str, str]:
@@ -101,6 +115,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
     patches = [
         (github_issues, "create_issue", backend.create_issue),
         (github_issues, "list_open_issues", backend.list_open_issues),
+        (github_issues, "list_closed_issues", backend.list_closed_issues),
         (github_issues, "close_issue", backend.close_issue),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),

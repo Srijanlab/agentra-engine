@@ -227,26 +227,6 @@ def extract_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
-def label_to_id(label: str) -> str:
-    if "Codebase" in label:
-        return "codebase"
-    if "Discovery" in label:
-        return "discovery"
-    if "Implementation" in label:
-        return "implementation"
-    if "Testing" in label:
-        return "testing"
-    if "Deployment" in label:
-        return "deployment"
-    if "Feedback" in label:
-        return "feedback"
-    if "Production Debugging" in label:
-        return "prod_debug"
-    if "Custom" in label:
-        return "custom"
-    return "orchestrator"
-
-
 async def run_agent(
     *,
     prompt: str,
@@ -342,14 +322,6 @@ async def run_agent(
         turns=result_msg.num_turns,
         session_id=result_msg.session_id,
     )
-    if res.ok and res.json_data and "work_update" in res.json_data:
-        try:
-            from agentra.memory import Memory
-            mem = Memory(cwd)
-            agent_id = label_to_id(agent_label or "Agent")
-            mem.record_work_update(agent_id, res.json_data["work_update"])
-        except Exception:
-            pass
     return res
 
 
@@ -377,10 +349,7 @@ async def stream_chat_turn(
     already streaming partial output to a human would mean silently
     discarding what they saw and restarting mid-conversation, more
     confusing than just surfacing the error -- callers that hit this can
-    just send another message, same as any other chat failure. Also no
-    work_update auto-persistence here (server.py's caller already does its
-    own post-processing on the final "done" event, same as it does for
-    run_agent's return value)."""
+    just send another message, same as any other chat failure."""
     options = ClaudeAgentOptions(
         cwd=str(cwd),
         system_prompt=system_prompt,

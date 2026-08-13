@@ -229,15 +229,15 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
 
 
 def persist_audit_trail(repo: Path, branch: str) -> str | None:
-    """Commit and push any dirty .agentra/ bookkeeping (shipped.json, known_bugs.json,
-    feature_queue.json, memory/*) onto `branch`, which the caller must already have merged
-    and pushed to (i.e. call this right after a successful deploy_pre_prod/promote_prod).
+    """Commit and push any dirty .agentra/ bookkeeping (released.json, memory/*,
+    feedback_sync_state.json, codebase_spec_commit.json) onto `branch`, which the
+    caller must already have merged and pushed to (i.e. call this right after a
+    successful deploy_pre_prod/promote_prod). shipped/known_bugs/feature_queue
+    live on GitHub Issues now (see memory.py), not in this directory at all.
 
-    Without this, Memory.record_shipped/write calls only ever land in the working copy --
-    nothing ever committed them, so a fresh checkout (the next scheduled CI run) starts with
-    an empty shipped/known_bugs/feature_queue every time, and check_backlog has nothing to
-    report regardless of what was actually built. Confirmed live: shipped.json existed
-    locally after a real, successful cycle but was never present on origin/beta at all.
+    Without this, Memory.write() calls only ever land in the working copy --
+    nothing ever committed them, so a fresh checkout (the next scheduled CI run)
+    starts with an empty memory/ every time.
 
     Scoped to .agentra/ only -- same "always safe to clear/commit" reasoning as
     implementation.py's _checkout_feature_branch applies here to committing, not just

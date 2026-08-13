@@ -16,13 +16,17 @@ fresh by whichever agent is responsible for that fact, or read by every
 downstream agent as shared context.
 
 App-agnostic by design: everything here is plain JSON/YAML files agentra
-owns and reads/writes itself, or -- for known_bugs/feature_queue/objective/
-environments -- GitHub Issues/Actions Variables directly, with no local
-mirror at all (this module's own _repo_url() requires a github.com remote;
-there is deliberately no local-file fallback if GitHub is unreachable or
-unconfigured, a known availability tradeoff -- see known_bugs()'s own
-docstring). Getting real data INTO the backlog (customer feedback from
-whatever database a given app uses) is the job of a per-app adapter command
+owns and reads/writes itself, or -- for known_bugs/feature_queue/shipped/
+objective/environments -- GitHub Issues/Actions Variables directly, with no
+local mirror at all (this module's own _repo_url() requires a github.com
+remote; there is deliberately no local-file fallback if GitHub is
+unreachable or unconfigured, a known availability tradeoff -- see
+known_bugs()'s own docstring). A shipped feature is a closed 'enhancement'
+issue (record_shipped()/shipped_features()), so the whole feature lifecycle
+-- requested, in progress, shipped -- lives as one GitHub Issue with a
+run_id/commit_sha trail, not a JSON ledger duplicating it. Getting real data
+INTO the backlog (customer feedback from whatever database a given app
+uses) is the job of a per-app adapter command
 (EnvironmentConfig.feedback_fetch_command, invoked by orchestrator.py/
 brain.py) -- agentra's own code never talks to Firestore/Postgres/anything
 app-specific directly.
@@ -34,18 +38,17 @@ On first use, Memory writes a .agentra/.gitignore into the target repo so that:
   Committed (audit trail, config)       Not committed (noisy per-run data)
   ──────────────────────────────────    ────────────────────────────────────
   memory/architecture/                  logs/  (verbose timestamped traces)
-  shipped.json                          test_artifacts/ (pre-prod screenshots)
-  released.json
+  released.json                         test_artifacts/ (pre-prod screenshots)
   feedback_sync_state.json
   codebase_spec_commit.json
 
 This means the memory system travels with the repo across clones, CI runners,
 and contributors, while run logs stay local. known_bugs.json/feature_queue.json/
-objective.yaml/environments.yaml no longer exist as local files at all --
-GitHub Issues/Variables are their only home now. Agent chat history, the live
-standup channel, and session continuity moved out entirely too -- see
-chat_store.py -- they were never a fit for a customer's own git history in
-the first place.
+shipped.json/work_updates.json/objective.yaml/environments.yaml no longer exist
+as local files at all -- GitHub Issues/Variables are their only home now. Agent
+chat history, the live standup channel, and session continuity moved out
+entirely too -- see chat_store.py -- they were never a fit for a customer's own
+git history in the first place.
 """
 
 import datetime as dt
@@ -92,11 +95,7 @@ test_artifacts/
 
 # ── tracked (listed for clarity; git tracks everything not ignored) ───────────
 # memory/
-# shipped.json
 # released.json
-# known_bugs.json
-# feature_queue.json
-# objective.yaml
 # feedback_sync_state.json
 # environments.yaml
 """
@@ -182,17 +181,36 @@ def _github_feature_to_dict(issue: dict) -> dict:
     }
 
 
+# Shipped features are closed 'enhancement' issues too -- record_shipped()
+# stamps run_id/commit_sha into the issue body as structured lines right
+# before closing it, so shipped_features() can parse them back out of the
+# same list call, no per-issue follow-up request needed.
+_SHIPPED_RUN_ID_RE = re.compile(r"^Shipped-Run-ID: (.+)$", re.MULTILINE)
+_SHIPPED_COMMIT_RE = re.compile(r"^Shipped-Commit: (.+)$", re.MULTILINE)
+
+
+def _github_shipped_to_dict(issue: dict) -> dict:
+    body = issue.get("body") or ""
+    run_id_m = _SHIPPED_RUN_ID_RE.search(body)
+    commit_m = _SHIPPED_COMMIT_RE.search(body)
+    return {
+        "feature": issue["title"],
+        "commit_sha": commit_m.group(1) if commit_m else None,
+        "run_id": run_id_m.group(1) if run_id_m else None,
+        "ts": issue.get("closed_at"),
+        "external_id": str(issue["number"]),
+    }
+
+
 class Memory:
     def __init__(self, repo: Path):
         self.repo = repo
         self.root = repo / ".agentra"
         self.memory_root = self.root / "memory"
         self.log_root = self.root / "logs"
-        self.shipped_path = self.root / "shipped.json"
         self.released_path = self.root / "released.json"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
         self.codebase_spec_commit_path = self.root / "codebase_spec_commit.json"
-        self.work_updates_path = self.root / "work_updates.json"
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -269,32 +287,61 @@ class Memory:
         return self.log(run_id, format_safety_denial_line(tool_name, pattern, detail))
 
     def shipped_features(self) -> list[dict]:
-        """Each entry: {feature, commit_sha, run_id, ts} -- commit_sha links
-        the dashboard's Shipped list to the actual artifact (a GitHub commit
-        URL, built client-side from the app's repo_url + this sha), run_id
-        links it back to the exact run/agent-steps/log that produced it.
-        Normalizes older shipped.json entries (a plain list[str] from before
-        commit_sha was tracked, or a dict from before run_id was) into the
-        same shape with missing fields set to None, so existing repos don't
-        need a migration."""
-        if not self.shipped_path.exists():
+        """Each entry: {feature, commit_sha, run_id, ts, external_id}. A
+        shipped feature IS a closed GitHub issue labeled 'enhancement' --
+        commit_sha/run_id are parsed back out of the closing body stamp
+        record_shipped() writes; there is no local shipped.json anymore
+        (see record_shipped's docstring for why one ledger is enough).
+        commit_sha links the dashboard's Shipped list to the actual
+        artifact (a GitHub commit URL, built client-side from the app's
+        repo_url + this sha); run_id links it back to the exact
+        run/agent-steps/log that produced it; external_id is the GitHub
+        issue number, for building a direct link to the audit trail."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("shipped_features: %s has no github.com remote -- shipped history is unreadable", self.repo)
             return []
-        raw = json.loads(self.shipped_path.read_text())
-        return [
-            {"feature": e, "commit_sha": None, "run_id": None, "ts": None}
-            if isinstance(e, str)
-            else {"run_id": None, **e}
-            for e in raw
-        ]
+        try:
+            from agentra.connectors import github_issues
 
-    def record_shipped(self, feature: str, commit_sha: str | None = None, run_id: str | None = None) -> None:
-        features = self.shipped_features()
-        if any(f["feature"] == feature for f in features):
+            issues = github_issues.list_closed_issues(repo_url, labels=[_FEATURE_LABEL])
+            return [_github_shipped_to_dict(i) for i in issues]
+        except Exception:
+            logger.error("shipped_features: GitHub Issues unavailable for %s -- shipped history is unreadable until it recovers", repo_url, exc_info=True)
+            return []
+
+    def record_shipped(
+        self,
+        feature: str,
+        commit_sha: str | None = None,
+        run_id: str | None = None,
+        resolves_id: str | None = None,
+    ) -> None:
+        """Records a shipped feature as a closed GitHub 'enhancement' issue --
+        the same ledger feature_queue() reads (open) and shipped_features()
+        reads (closed), so "pending" vs. "shipped" is just an issue's state,
+        never two things to keep in sync. If `resolves_id` names the
+        feature_queue issue this feature came from, that issue is closed as
+        the shipped record; otherwise (a self-initiated idea, or one
+        resolving a known_bug -- callers close that separately via
+        clear_known_bug) a fresh issue is opened and closed immediately, so
+        every shipped feature ends up with exactly one audit-trail issue."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("record_shipped: %s has no github.com remote -- shipped feature %r was NOT recorded anywhere", self.repo, feature)
             return
-        features.append(
-            {"feature": feature, "commit_sha": commit_sha, "run_id": run_id, "ts": dt.datetime.now(dt.timezone.utc).isoformat()}
-        )
-        self.shipped_path.write_text(json.dumps(features, indent=2))
+        note = f"Shipped as {feature!r}" + (f" (run {run_id})" if run_id else "") + (f" (commit {commit_sha})" if commit_sha else "") + "."
+        body_suffix = "---\n" + (f"Shipped-Run-ID: {run_id}\n" if run_id else "") + (f"Shipped-Commit: {commit_sha}\n" if commit_sha else "")
+        try:
+            from agentra.connectors import github_issues
+
+            if resolves_id and resolves_id.isdigit():
+                github_issues.close_issue(repo_url, int(resolves_id), comment=note, body_suffix=body_suffix)
+            else:
+                issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL])
+                github_issues.close_issue(repo_url, issue["number"], comment=note, body_suffix=body_suffix)
+        except Exception:
+            logger.error("record_shipped: failed to record shipped feature %r on %s", feature, repo_url, exc_info=True)
 
     def released_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, ts, release_run_id} -- the
@@ -524,16 +571,19 @@ class Memory:
     def set_codebase_spec_commit(self, commit_sha: str) -> None:
         self.codebase_spec_commit_path.write_text(json.dumps({"commit_sha": commit_sha}, indent=2))
 
-    # ── Standups: TASK-019. "Yesterday" comes from these -- the one place in
-    # .agentra/ with real per-event timestamps (shipped/known_bugs/feature_queue
-    # are point-in-time snapshots, not event logs). "Today" is just the current
-    # backlog (known_bugs/feature_queue/objective), read directly by the caller. ──
+    # ── Standups: TASK-019. "Yesterday" comes from these -- the run logs are
+    # the one place with real per-event timestamps that isn't GitHub itself
+    # (known_bugs/feature_queue are point-in-time snapshots of open issues,
+    # not event logs; shipped_features() does carry a real closed_at per
+    # entry now, via GitHub). "Today" is just the current backlog
+    # (known_bugs/feature_queue/objective), read directly by the caller. ──
 
     def recent_log_lines(self, since: dt.datetime) -> list[str]:
         """Every timestamped line across all run logs at or after `since`,
         oldest first. The run logs are the only append-only, per-event
-        record in .agentra/ -- shipped_features()/known_bugs() are current
-        snapshots with no history of *when* an entry was added."""
+        record in .agentra/ itself -- known_bugs()/feature_queue() are
+        current snapshots of GitHub's open issues, with no history of
+        *when* an entry was added."""
         lines: list[str] = []
         if not self.log_root.is_dir():
             return lines
@@ -557,23 +607,6 @@ class Memory:
     # as git-committed files under the target repo's own .agentra/, which
     # was never the right home for agentra's own operational chat state.
 
-    def get_work_updates(self) -> list[dict]:
-        if not self.work_updates_path.exists():
-            return []
-        try:
-            return json.loads(self.work_updates_path.read_text())
-        except Exception:
-            return []
-
-    def record_work_update(self, agent_id: str, description: str) -> None:
-        updates = self.get_work_updates()
-        updates.append({
-            "agent_id": agent_id,
-            "description": description,
-            "ts": dt.datetime.now(dt.timezone.utc).isoformat()
-        })
-        self.work_updates_path.write_text(json.dumps(updates, indent=2))
-
     def append_documentation(self, entry: str) -> None:
         """Appends one dated line to architecture/documentation.md's
         running changelog, instead of overwriting the whole file the way
@@ -581,13 +614,10 @@ class Memory:
         architecture description (human-edited via the dashboard's Edit
         App modal), the changelog lives below it as its own section so
         recording a shipped feature here never clobbers that description.
-
-        Deliberately separate from record_work_update: that's a
-        structured per-agent ledger the dashboard's "Latest Work Done"
-        card reads (JSON, one entry replaces nothing, all history kept)
-        -- this is the human-readable prose trail of what actually
-        shipped, meant to accumulate as living documentation rather than
-        an array nobody browses as JSON."""
+        This is the human-readable prose trail of what actually shipped,
+        meant to accumulate as living documentation -- shipped_features()
+        is the structured/queryable record of the same events, backed by
+        closed GitHub issues rather than a JSON array nobody browses."""
         existing = self.read("architecture", "documentation") or ""
         marker = "## Changelog"
         if marker not in existing:
