@@ -206,7 +206,9 @@ def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path,
     assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["story"]}
     # Lands on the PARENT's board (feature_issue_number=10, the parent's own
     # title), as an additional item (issue_number=55), not a board of its own.
-    assert project_calls == [(10, "Big feature", 55, "Done")]
+    # A second call moves the PARENT's own card too -- "Done" here since
+    # more_parts_expected defaults False (this call closed the whole feature).
+    assert project_calls == [(10, "Big feature", 55, "Done"), (10, "Big feature", None, "Done")]
     assert result == {"issue_number": 55, "board_issue_number": 10}
 
 
@@ -229,7 +231,7 @@ def test_record_shipped_with_sub_feature_of_falls_back_to_the_feature_name_when_
 
     mem.record_shipped("Part two", sub_feature_of="10")
 
-    assert project_calls == [(10, "Part two", 55, "Done")]
+    assert project_calls == [(10, "Part two", 55, "Done"), (10, "Part two", None, "Done")]
 
 
 def test_record_shipped_sub_feature_of_with_more_parts_expected_leaves_the_parent_open(tmp_path, monkeypatch):
@@ -238,13 +240,23 @@ def test_record_shipped_sub_feature_of_with_more_parts_expected_leaves_the_paren
 
     monkeypatch.setattr(github_issues, "create_sub_issue", lambda *a, **k: {"number": 55, "title": "Part two"})
     monkeypatch.setattr(github_issues, "get_issue", lambda repo_url, issue_number: {"title": "Big feature"})
-    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, issue_number, status)
+        ),
+    )
     closed = []
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
 
     mem.record_shipped("Part two", sub_feature_of="10", more_parts_expected=True)
 
     assert closed == [55]  # only the sub-issue -- the parent (#10) stays open
+    # The parent's own card moves to "In Progress" -- real work has started
+    # (see memory.py's parent_status), distinct from the sub-issue's own "Done".
+    assert project_calls == [(10, 55, "Done"), (10, None, "In Progress")]
 
 
 def test_record_shipped_sub_feature_of_without_more_parts_closes_the_parent_too(tmp_path, monkeypatch):
@@ -253,7 +265,14 @@ def test_record_shipped_sub_feature_of_without_more_parts_closes_the_parent_too(
 
     monkeypatch.setattr(github_issues, "create_sub_issue", lambda *a, **k: {"number": 55, "title": "Final part"})
     monkeypatch.setattr(github_issues, "get_issue", lambda repo_url, issue_number: {"title": "Big feature"})
-    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, issue_number, status)
+        ),
+    )
     closed = []
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
 
@@ -261,6 +280,8 @@ def test_record_shipped_sub_feature_of_without_more_parts_closes_the_parent_too(
 
     # Sub-issue closed first, then the parent -- marking the whole feature done.
     assert closed == [55, 10]
+    # The parent's own card moves to "Done" too, alongside the issue closing.
+    assert project_calls == [(10, 55, "Done"), (10, None, "Done")]
 
 
 def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp_path, monkeypatch):
@@ -279,7 +300,7 @@ def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp
         github_projects,
         "add_item_to_feature_project",
         lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
-            (feature_issue_number, issue_number)
+            (feature_issue_number, issue_number, status)
         ),
     )
     closed = []
@@ -289,7 +310,11 @@ def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp
 
     assert created_issues == ["Big new feature"]  # the fresh parent, never closed
     assert closed == [21]  # only the first part's sub-issue
-    assert project_calls == [(20, 21)]
+    # First call marks the just-shipped part "Done"; second moves the fresh
+    # parent's own card off "Todo" to "In Progress" -- this is what fixes
+    # in_progress_features() from surfacing a feature that's merely been
+    # split into parts but has nothing shipped yet (see memory.py).
+    assert project_calls == [(20, 21, "Done"), (20, None, "In Progress")]
     assert result == {"issue_number": 21, "board_issue_number": 20}
 
 
@@ -306,7 +331,14 @@ def test_record_shipped_starts_a_multi_part_feature_using_the_feature_queue_issu
         "create_sub_issue",
         lambda repo_url, parent, title, body, labels=None: sub_issue_calls.update(parent=parent) or {"number": 21, "title": title},
     )
-    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, issue_number, status)
+        ),
+    )
     closed = []
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
 
@@ -314,6 +346,7 @@ def test_record_shipped_starts_a_multi_part_feature_using_the_feature_queue_issu
 
     assert sub_issue_calls == {"parent": 7}
     assert closed == [21]  # the sub-issue only -- issue #7 (the feature_queue entry) stays open
+    assert project_calls == [(7, 21, "Done"), (7, None, "In Progress")]
     assert result == {"issue_number": 21, "board_issue_number": 7}
 
 

@@ -293,6 +293,54 @@ def get_feature_project_url(repo_url: str, feature_issue_number: int) -> str | N
         return None
 
 
+def get_feature_status(repo_url: str, feature_issue_number: int) -> str | None:
+    """The feature issue's own Project card Status value ("Todo"/"In
+    Progress"/"Done"), or None if it has no board yet / the lookup failed.
+    Read-only, like get_feature_project_url -- never provisions.
+
+    Distinct from _existing_feature_project's query: that one fetches the
+    Status FIELD's available options (to resolve an option name to its id
+    for writing), not the VALUE actually set on this issue's own item.
+    Used by memory.py's in_progress_features() to tell "broken into parts,
+    already underway" from "broken into parts, nothing started yet" --
+    something subIssuesSummary.total > 0 alone can't distinguish (a feature
+    can have open sub-issues from a plan/breakdown with zero of them
+    shipped -- see record_shipped's parent_status writes, the only thing
+    that ever moves a card off its initial "Todo")."""
+    try:
+        owner, name = _owner_repo_or_raise(repo_url)
+        data = _graphql(
+            repo_url,
+            """
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issue(number: $number) {
+                  projectItems(first: 5) {
+                    nodes {
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """,
+            {"owner": owner, "name": name, "number": feature_issue_number},
+        )
+        issue = data["repository"]["issue"]
+        if issue is None:
+            return None
+        for item in issue["projectItems"]["nodes"]:
+            value = item.get("fieldValueByName")
+            if value and value.get("name"):
+                return value["name"]
+        return None
+    except Exception:
+        logger.warning("get_feature_status: lookup failed for issue #%s on %s", feature_issue_number, repo_url, exc_info=True)
+        return None
+
+
 def add_item_to_feature_project(
     repo_url: str,
     feature_issue_number: int,

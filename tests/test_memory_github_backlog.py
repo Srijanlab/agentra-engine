@@ -363,6 +363,7 @@ def test_in_progress_features_reads_from_github(tmp_path, monkeypatch):
         ]
 
     monkeypatch.setattr(github_issues, "list_in_progress_features", fake_list)
+    monkeypatch.setattr(github_projects, "get_feature_status", lambda repo_url, feature_issue_number: "In Progress")
 
     result = mem.in_progress_features()
 
@@ -383,6 +384,51 @@ def test_in_progress_features_returns_empty_without_a_github_remote(tmp_path):
     mem = Memory(repo)
 
     assert mem.in_progress_features() == []
+
+
+def test_in_progress_features_filters_out_a_feature_whose_card_is_still_todo(tmp_path, monkeypatch):
+    # The real bug this fixes: a feature can have open sub-issues (a manual
+    # breakdown/plan) with nothing actually shipped yet -- subIssuesSummary.total
+    # > 0 alone can't tell that apart from genuine progress. The Project card's
+    # own Status is the authoritative signal (see memory.py's record_shipped
+    # parent_status writes) -- still "Todo" means nothing has started.
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_in_progress_features",
+        lambda repo_url, labels=None: [
+            {
+                "number": 2, "title": "Planned but not started", "body": None,
+                "html_url": "https://github.com/acme/app/issues/2", "sub_issues_total": 2, "sub_issues_completed": 0,
+            }
+        ],
+    )
+    monkeypatch.setattr(github_projects, "get_feature_status", lambda repo_url, feature_issue_number: "Todo")
+
+    assert mem.in_progress_features() == []
+
+
+def test_in_progress_features_keeps_a_feature_with_no_board_at_all(tmp_path, monkeypatch):
+    # No Project (provisioning failed, or hasn't happened) -- fall back to the
+    # sub-issue-count signal alone rather than silently hiding real progress.
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_in_progress_features",
+        lambda repo_url, labels=None: [
+            {
+                "number": 10, "title": "Big feature", "body": None,
+                "html_url": "https://github.com/acme/app/issues/10", "sub_issues_total": 3, "sub_issues_completed": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(github_projects, "get_feature_status", lambda repo_url, feature_issue_number: None)
+
+    result = mem.in_progress_features()
+
+    assert [f["external_id"] for f in result] == ["10"]
 
 
 def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):

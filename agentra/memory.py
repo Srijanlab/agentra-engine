@@ -408,6 +408,18 @@ class Memory:
             return None
         note = f"Shipped as {feature!r}" + (f" (run {run_id})" if run_id else "") + (f" (commit {commit_sha})" if commit_sha else "") + "."
         body_suffix = "---\n" + (f"Shipped-Run-ID: {run_id}\n" if run_id else "") + (f"Shipped-Commit: {commit_sha}\n" if commit_sha else "")
+        # Set only for the sub_feature_of/more_parts_expected paths below --
+        # the parent's own board card needs an explicit status move too
+        # (separate from the sub-issue/simple-feature item's own "Done"
+        # below), since nothing else ever touches it: a feature filed via
+        # record_feature_request starts its card at "Todo" and nothing
+        # previously moved it off that once work actually began. Without
+        # this, in_progress_features() reading Status back (see below) would
+        # never see anything but "Todo" even for a feature genuinely
+        # underway -- the same gap that let issue #2's card sit at "Todo"
+        # with two open, unshipped sub-issues and no way to distinguish
+        # "planned into parts" from "actually started."
+        parent_status: str | None = None
         try:
             from agentra.connectors import github_issues
 
@@ -422,6 +434,9 @@ class Memory:
                     github_issues.close_issue(
                         repo_url, parent_number, comment=f"All parts shipped (run {run_id})." if run_id else "All parts shipped."
                     )
+                    parent_status = "Done"
+                else:
+                    parent_status = "In Progress"
                 board_issue_number = parent_number
                 parent = github_issues.get_issue(repo_url, parent_number)
                 board_title = parent["title"] if parent else feature
@@ -442,6 +457,7 @@ class Memory:
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                parent_status = "In Progress"
                 board_issue_number = parent_number
                 board_title = feature
 
@@ -470,6 +486,8 @@ class Memory:
             issue_number=issue_number if board_issue_number != issue_number else None,
             status="Done",
         )
+        if parent_status is not None:
+            github_projects.add_item_to_feature_project(repo_url, board_issue_number, title=board_title, status=parent_status)
         return {"issue_number": issue_number, "board_issue_number": board_issue_number}
 
     def released_features(self) -> list[dict]:
@@ -673,25 +691,44 @@ class Memory:
         sub-issues, so this and feature_queue() describe different things
         even though both can include the same open issue -- check_backlog
         surfaces this first so a new cycle resumes unfinished work instead
-        of abandoning it to start something else."""
+        of abandoning it to start something else.
+
+        sub_issues_total > 0 alone isn't enough, though: a feature can be
+        broken into planned sub-issues (a manual breakdown, or any path
+        other than record_shipped actually completing one) with zero of
+        them shipped -- confirmed live, issue #2 sat with two open,
+        unstarted sub-issues and nothing done, yet still got surfaced here
+        ahead of real bugs. The Project board's own Status field is the
+        authoritative "has work actually begun" signal (record_shipped
+        moves a feature's card off its initial "Todo" the moment a part
+        ships -- see parent_status there); a candidate whose card is
+        explicitly still "Todo" is filtered out. A candidate with no board
+        at all (get_feature_status returns None -- provisioning failed, or
+        hasn't happened yet) falls back to the sub-issue-count signal alone
+        rather than being silently hidden, so a Projects hiccup never masks
+        real progress."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("in_progress_features: %s has no github.com remote -- no in-progress features are visible", self.repo)
             return []
         try:
-            from agentra.connectors import github_issues
+            from agentra.connectors import github_issues, github_projects
 
             issues = github_issues.list_in_progress_features(repo_url, labels=[_FEATURE_LABEL])
-            return [
-                {
-                    "description": i["title"],
-                    "external_id": str(i["number"]),
-                    "sub_issues_total": i["sub_issues_total"],
-                    "sub_issues_completed": i["sub_issues_completed"],
-                    "html_url": i.get("html_url"),
-                }
-                for i in issues
-            ]
+            result = []
+            for i in issues:
+                if github_projects.get_feature_status(repo_url, i["number"]) == "Todo":
+                    continue
+                result.append(
+                    {
+                        "description": i["title"],
+                        "external_id": str(i["number"]),
+                        "sub_issues_total": i["sub_issues_total"],
+                        "sub_issues_completed": i["sub_issues_completed"],
+                        "html_url": i.get("html_url"),
+                    }
+                )
+            return result
         except Exception:
             logger.error("in_progress_features: GitHub Issues unavailable for %s", repo_url, exc_info=True)
             return []

@@ -205,6 +205,12 @@ class FakeGitHubBackend:
         project = self.projects.get(f"{repo_url}#{feature_issue_number}")
         return project["url"] if project else None
 
+    def get_feature_status(self, repo_url: str, feature_issue_number: int) -> str | None:
+        project = self.projects.get(f"{repo_url}#{feature_issue_number}")
+        if project is None:
+            return None
+        return project["items"].get(str(feature_issue_number))
+
 
 def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_path: Path | None = None) -> FakeGitHubBackend:
     """Patches the github_issues/github_variables modules in place with
@@ -239,6 +245,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_projects, "ensure_feature_project", backend.ensure_feature_project),
         (github_projects, "add_item_to_feature_project", backend.add_item_to_feature_project),
         (github_projects, "get_feature_project_url", backend.get_feature_project_url),
+        (github_projects, "get_feature_status", backend.get_feature_status),
     ]
     for module, attr, fn in patches:
         if monkeypatch is not None:

@@ -334,3 +334,49 @@ def test_add_item_to_feature_project_never_raises_on_an_unexpected_failure(monke
     )
 
     github_projects.add_item_to_feature_project("https://github.com/acme/app.git", 10, "My feature")  # must not raise
+
+
+# ── get_feature_status: the Status VALUE on the feature's own card, distinct ──
+# from ensure_feature_project's status_options (the field's available choices) ──
+
+
+def test_get_feature_status_returns_the_status_option_name(monkeypatch):
+    monkeypatch.setattr(
+        github_projects,
+        "_graphql",
+        lambda repo_url, query, variables: {
+            "repository": {
+                "issue": {
+                    "projectItems": {"nodes": [{"fieldValueByName": {"name": "In Progress"}}]}
+                }
+            }
+        },
+    )
+
+    assert github_projects.get_feature_status("https://github.com/acme/app.git", 10) == "In Progress"
+
+
+def test_get_feature_status_returns_none_when_the_issue_has_no_project_item(monkeypatch):
+    monkeypatch.setattr(
+        github_projects,
+        "_graphql",
+        lambda repo_url, query, variables: {"repository": {"issue": {"projectItems": {"nodes": []}}}},
+    )
+
+    assert github_projects.get_feature_status("https://github.com/acme/app.git", 10) is None
+
+
+def test_get_feature_status_returns_none_when_the_issue_does_not_exist(monkeypatch):
+    monkeypatch.setattr(
+        github_projects, "_graphql", lambda repo_url, query, variables: {"repository": {"issue": None}}
+    )
+
+    assert github_projects.get_feature_status("https://github.com/acme/app.git", 999) is None
+
+
+def test_get_feature_status_returns_none_on_graphql_error(monkeypatch):
+    monkeypatch.setattr(
+        github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(github_projects.GitHubProjectsError("boom"))
+    )
+
+    assert github_projects.get_feature_status("https://github.com/acme/app.git", 10) is None  # must not raise
