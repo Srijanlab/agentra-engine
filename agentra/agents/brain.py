@@ -233,6 +233,36 @@ class OrchestratorSession:
             print(f"[agentra] stagnation breaker tripped: {self.hard_stop_reason}", flush=True)
 
 
+def _file_incidental_findings(mem: Memory, run_id: str, data: dict, source: str) -> int:
+    """Testing Agent bug reports used to only land in the free-text `notes` field, which
+    nothing reads back -- an "also noticed X is broken" observation incidental to the
+    thing actually being verified vanished the moment the process ended, even when it
+    described a real bug (GitHub issue #6). agents/testing.py's LOCAL_SYSTEM_PROMPT and
+    PRE_PROD_SYSTEM_PROMPT both ask for these as structured `incidental_findings` entries;
+    each one is filed here via the same record_known_bug path record_failure uses for
+    outright failures, regardless of whether the overall run's status is "pass" or "fail",
+    so it surfaces in a future check_backlog/discover_opportunities call instead of being
+    lost."""
+    findings = data.get("incidental_findings") or []
+    filed = 0
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        diagnosis = (finding.get("diagnosis") or finding.get("description") or "").strip()
+        if not diagnosis:
+            continue
+        mem.record_known_bug(
+            run_id,
+            finding.get("severity") or "medium",
+            diagnosis,
+            finding.get("proposed_fix")
+            or "Not investigated further -- noticed incidentally by the Testing Agent while verifying something else.",
+            source=source,
+        )
+        filed += 1
+    return filed
+
+
 def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "understand_codebase",
@@ -475,6 +505,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         if data.get("failed_tests"):
             detail += f" failed={data['failed_tests']}"
         session.note(f"run_local_tests: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
+        # Incidental findings are filed regardless of pass/fail -- a clean overall run
+        # doesn't mean nothing was noticed (see _file_incidental_findings' docstring).
+        _file_incidental_findings(session.mem, session.run_id, data, source="testing-agent-local")
         if not passed:
             session.mem.record_failure(session.run_id, "testing", test.text)
             session.record_failure("run_local_tests")
@@ -558,6 +591,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.pre_prod_verified = passed
         detail = f"reachable={data.get('reachable', '?')} feature_verified={data.get('feature_verified', '?')}"
         session.note(f"verify_pre_prod: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
+        # Incidental findings are filed regardless of pass/fail -- see
+        # _file_incidental_findings' docstring.
+        _file_incidental_findings(session.mem, session.run_id, data, source="testing-agent-pre-prod")
         if not passed:
             session.mem.record_failure(session.run_id, "pre-prod-verification", test.text)
             session.record_failure("verify_pre_prod")
