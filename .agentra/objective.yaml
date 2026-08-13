@@ -1,6 +1,0 @@
-objective: 'Improve agentra itself: hunt down and fix known gaps in its own codebase
-  (e.g. missing test coverage, deployment mechanism mismatches, UX rough edges), propose
-  and implement small, safe, well-scoped improvements. Never touch production directly
-  -- only ever push to a feature branch off beta for review. Prefer small, verifiable
-  changes over large risky ones.'
-updated_at: '2026-08-11T08:17:15.726487+00:00'
