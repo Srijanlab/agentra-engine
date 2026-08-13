@@ -42,6 +42,16 @@ def test_closing_an_issue_only_affects_its_own_repo():
     assert len(backend.list_open_issues("https://github.com/acme/app-b.git")) == 1
 
 
+def test_create_sub_issue_links_under_its_parent():
+    backend = github_fake.FakeGitHubBackend()
+    parent = backend.create_issue("https://github.com/acme/app.git", "Big feature", "")
+
+    sub = backend.create_sub_issue("https://github.com/acme/app.git", parent["number"], "Part one", "")
+
+    assert sub["number"] == 2
+    assert backend.issues["https://github.com/acme/app.git"][parent["number"]]["sub_issue_numbers"] == [sub["number"]]
+
+
 def test_variables_are_namespaced_by_repo_url():
     backend = github_fake.FakeGitHubBackend()
 

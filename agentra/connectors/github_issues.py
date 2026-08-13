@@ -17,14 +17,19 @@ git operations do if it isn't.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from agentra.connectors.github_app import GITHUB_API, get_installation_token, owner_repo_from_url
 
+logger = logging.getLogger(__name__)
+
 
 class GitHubIssuesError(Exception):
     """The repo isn't a github.com HTTPS URL, or the Issues API call itself
-    failed (e.g. a 4xx/5xx GitHub returned)."""
+    failed (e.g. a 4xx/5xx GitHub returned), or (create_sub_issue's own
+    GraphQL call) a GraphQL-level `errors` array came back."""
 
 
 def _owner_repo_or_raise(repo_url: str) -> str:
@@ -79,6 +84,66 @@ def list_open_issues(repo_url: str, labels: list[str] | None = None) -> list[dic
     return [issue for issue in resp.json() if "pull_request" not in issue]
 
 
+def _graphql(repo_url: str, query: str, variables: dict) -> dict:
+    """GitHub's REST API has no sub-issue endpoint -- addSubIssue only
+    exists in GraphQL v4. Every other function in this module stays REST
+    (simpler, and it's all GitHub's REST Issues API already covers); this
+    is the one GraphQL escape hatch, kept local to create_sub_issue rather
+    than importing connectors/github_projects.py's own copy, so this
+    module has no dependency on that one."""
+    token = get_installation_token(repo_url)
+    resp = httpx.post(
+        f"{GITHUB_API}/graphql",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": query, "variables": variables},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("errors"):
+        raise GitHubIssuesError(f"GraphQL errors: {body['errors']}")
+    return body["data"]
+
+
+def create_sub_issue(
+    repo_url: str, parent_issue_number: int, title: str, body: str, labels: list[str] | None = None
+) -> dict:
+    """Creates a new issue and links it as a GitHub-native sub-issue of
+    parent_issue_number (GraphQL addSubIssue, confirmed live against a
+    real repo) -- GitHub then tracks a real "sub-issues progress" count on
+    the parent, visible on its Project card too if it's on one, instead of
+    agentra having to maintain that relationship itself.
+
+    The link is best-effort, same as every other secondary relationship in
+    this codebase (e.g. record_shipped's Project sync): the sub-issue
+    itself -- the primary, valuable artifact -- is always created and
+    returned even if linking it under the parent fails (logged, not
+    raised)."""
+    sub_issue = create_issue(repo_url, title, body, labels=labels)
+    try:
+        owner_repo = _owner_repo_or_raise(repo_url)
+        parent_resp = httpx.get(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{parent_issue_number}", headers=_headers(repo_url), timeout=15
+        )
+        parent_resp.raise_for_status()
+        parent_node_id = parent_resp.json()["node_id"]
+        _graphql(
+            repo_url,
+            """
+            mutation($issueId: ID!, $subIssueId: ID!) {
+              addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) {
+                subIssue { id }
+              }
+            }
+            """,
+            {"issueId": parent_node_id, "subIssueId": sub_issue["node_id"]},
+        )
+    except Exception:
+        logger.warning(
+            "create_sub_issue: created issue #%s but failed to link it under #%s on %s",
+            sub_issue["number"], parent_issue_number, repo_url, exc_info=True,
+        )
+    return sub_issue
 def close_issue(
     repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
 ) -> None:
