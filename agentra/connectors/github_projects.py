@@ -5,10 +5,12 @@ Issue (memory.py's record_feature_request/record_shipped, label
 Issue, not a second, independent store of what a feature is. known_bugs
 stay Issues-only; nothing here ever touches them.
 
-One Project per registered app, provisioned once during onboarding
-(server.py's register_app -> ensure_project) with a single "Status"
+One Project per app, provisioned lazily via ensure_project() -- not at
+onboarding, the first time add_item_to_project() actually has a feature to
+put on it (memory.py's record_feature_request/record_shipped). An app
+that never gets a feature never gets a board. Its single "Status"
 single-select field (Todo/In Progress/Done -- "just status", no
-Priority/Size/other fields). Its IDs are cached as GitHub Actions
+Priority/Size/other fields) and other IDs are cached as GitHub Actions
 Variables (AGENTRA_PROJECT_*) the same way environments.py/memory.py
 cache their own config -- no local file, and ensure_project() re-provisions
 nothing on repeat calls once those variables exist.
