@@ -93,6 +93,33 @@ def test_ensure_project_returns_cached_values_without_any_graphql_calls(monkeypa
     }
 
 
+def test_get_project_url_reads_the_cached_variable(monkeypatch):
+    monkeypatch.setattr(
+        github_projects.github_variables,
+        "list_variables",
+        lambda repo_url: {"AGENTRA_PROJECT_URL": "https://github.com/orgs/acme/projects/7"},
+    )
+
+    assert github_projects.get_project_url("https://github.com/acme/app.git") == "https://github.com/orgs/acme/projects/7"
+
+
+def test_get_project_url_returns_none_when_no_project_exists_yet(monkeypatch):
+    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
+
+    assert github_projects.get_project_url("https://github.com/acme/app.git") is None
+
+
+def test_get_project_url_never_raises_and_never_provisions(monkeypatch):
+    monkeypatch.setattr(
+        github_projects.github_variables, "list_variables", lambda repo_url: (_ for _ in ()).throw(RuntimeError("down"))
+    )
+    monkeypatch.setattr(
+        github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not provision"))
+    )
+
+    assert github_projects.get_project_url("https://github.com/acme/app.git") is None
+
+
 def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(monkeypatch):
     monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
     set_calls: dict[str, str] = {}

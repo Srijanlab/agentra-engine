@@ -194,6 +194,19 @@ def ensure_project(repo_url: str) -> dict | None:
         return None
 
 
+def get_project_url(repo_url: str) -> str | None:
+    """Read-only: the dashboard's "View Project board" link. Deliberately
+    does NOT provision a Project if one doesn't exist yet (unlike
+    ensure_project) -- this is called on every app-detail page load, and a
+    page view should never have the side effect of creating GitHub
+    infrastructure. None if there's no Project yet, no github.com remote,
+    or GitHub Variables are unreachable."""
+    try:
+        return github_variables.list_variables(repo_url).get(_VAR_PROJECT_URL)
+    except Exception:
+        return None
+
+
 def _issue_node_id(repo_url: str, issue_number: int) -> str | None:
     owner, name = _owner_repo_or_raise(repo_url)
     data = _graphql(

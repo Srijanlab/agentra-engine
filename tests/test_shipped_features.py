@@ -61,7 +61,14 @@ def test_shipped_features_reads_from_github(tmp_path, monkeypatch):
     )
 
     assert mem.shipped_features() == [
-        {"feature": "Dark mode", "commit_sha": "abc1234", "run_id": "run42", "ts": "2026-08-10T12:00:00Z", "external_id": "12"}
+        {
+            "feature": "Dark mode",
+            "commit_sha": "abc1234",
+            "run_id": "run42",
+            "ts": "2026-08-10T12:00:00Z",
+            "external_id": "12",
+            "html_url": None,
+        }
     ]
 
 
@@ -77,7 +84,14 @@ def test_shipped_features_tolerates_a_body_with_no_structured_fields(tmp_path, m
     )
 
     assert mem.shipped_features() == [
-        {"feature": "Old feature", "commit_sha": None, "run_id": None, "ts": "2026-01-01T00:00:00Z", "external_id": "3"}
+        {
+            "feature": "Old feature",
+            "commit_sha": None,
+            "run_id": None,
+            "ts": "2026-01-01T00:00:00Z",
+            "external_id": "3",
+            "html_url": None,
+        }
     ]
 
 

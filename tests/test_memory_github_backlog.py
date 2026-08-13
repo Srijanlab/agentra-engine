@@ -56,7 +56,9 @@ def test_known_bugs_reads_from_github(tmp_path, monkeypatch):
     monkeypatch.setattr(
         github_issues,
         "list_open_issues",
-        lambda repo_url, labels=None: [{"number": 7, "title": "Pagination bug", "body": "off by one"}],
+        lambda repo_url, labels=None: [
+            {"number": 7, "title": "Pagination bug", "body": "off by one", "html_url": "https://github.com/acme/app/issues/7"}
+        ],
     )
 
     bugs = mem.known_bugs()
@@ -69,6 +71,7 @@ def test_known_bugs_reads_from_github(tmp_path, monkeypatch):
             "proposed_fix": "off by one",
             "source": "github",
             "external_id": "7",
+            "html_url": "https://github.com/acme/app/issues/7",
         }
     ]
 
@@ -199,7 +202,7 @@ def test_feature_queue_reads_from_github(tmp_path, monkeypatch):
     queue = mem.feature_queue()
 
     assert captured["labels"] == ["enhancement"]
-    assert queue == [{"description": "Add dark mode", "source": "github", "external_id": "5"}]
+    assert queue == [{"description": "Add dark mode", "source": "github", "external_id": "5", "html_url": None}]
 
 
 def test_feature_queue_returns_empty_without_a_github_remote(tmp_path):
