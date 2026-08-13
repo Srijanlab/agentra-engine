@@ -149,6 +149,37 @@ def _create_status_field(repo_url: str, project_id: str) -> dict:
     return {"field_id": field["id"], "options": {o["name"]: o["id"] for o in field["options"]}}
 
 
+def _find_status_field(repo_url: str, project_id: str) -> dict | None:
+    """A freshly created ProjectV2 already has its own default "Status"
+    single-select field (Todo/In Progress/Done) -- confirmed live,
+    createProjectV2Field's own attempt to add a second one fails outright
+    ("Name has already been taken"). This reads that existing field back
+    instead of creating one; _create_status_field stays as a fallback for
+    the case (not observed, but not guaranteed either) where a Project
+    somehow has no Status field at all."""
+    data = _graphql(
+        repo_url,
+        """
+        query($projectId: ID!) {
+          node(id: $projectId) {
+            ... on ProjectV2 {
+              fields(first: 20) {
+                nodes {
+                  ... on ProjectV2SingleSelectField { id name options { id name } }
+                }
+              }
+            }
+          }
+        }
+        """,
+        {"projectId": project_id},
+    )
+    for field in data["node"]["fields"]["nodes"]:
+        if field.get("name") == _STATUS_FIELD_NAME:
+            return {"field_id": field["id"], "options": {o["name"]: o["id"] for o in field["options"]}}
+    return None
+
+
 def ensure_project(repo_url: str) -> dict | None:
     """Idempotent: returns the cached {"project_id", "status_field_id",
     "status_options": {"Todo": id, "In Progress": id, "Done": id}} from
@@ -179,7 +210,7 @@ def ensure_project(repo_url: str) -> dict | None:
     try:
         repository_id, owner_id = _repository_and_owner_ids(repo_url)
         project = _create_project(repo_url, owner_id, repository_id)
-        field = _create_status_field(repo_url, project["id"])
+        field = _find_status_field(repo_url, project["id"]) or _create_status_field(repo_url, project["id"])
 
         github_variables.set_variable(repo_url, _VAR_PROJECT_ID, project["id"])
         github_variables.set_variable(repo_url, _VAR_PROJECT_NUMBER, str(project["number"]))
