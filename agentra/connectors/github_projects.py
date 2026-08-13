@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 _GRAPHQL_URL = f"{GITHUB_API}/graphql"
 
-_PROJECT_TITLE = "agentra features"
 _STATUS_FIELD_NAME = "Status"
 _STATUS_OPTIONS = [
     ("Todo", "GRAY"),
@@ -93,7 +92,7 @@ def _repository_and_owner_ids(repo_url: str) -> tuple[str, str]:
     return repo["id"], repo["owner"]["id"]
 
 
-def _create_project(repo_url: str, owner_id: str, repository_id: str) -> dict:
+def _create_project(repo_url: str, owner_id: str, repository_id: str, title: str) -> dict:
     data = _graphql(
         repo_url,
         """
@@ -103,7 +102,7 @@ def _create_project(repo_url: str, owner_id: str, repository_id: str) -> dict:
           }
         }
         """,
-        {"ownerId": owner_id, "title": _PROJECT_TITLE},
+        {"ownerId": owner_id, "title": title},
     )
     project = data["createProjectV2"]["projectV2"]
     try:
@@ -211,7 +210,8 @@ def ensure_project(repo_url: str) -> dict | None:
 
     try:
         repository_id, owner_id = _repository_and_owner_ids(repo_url)
-        project = _create_project(repo_url, owner_id, repository_id)
+        _, repo_name = _owner_repo_or_raise(repo_url)
+        project = _create_project(repo_url, owner_id, repository_id, title=f"{repo_name} Features")
         field = _find_status_field(repo_url, project["id"]) or _create_status_field(repo_url, project["id"])
 
         github_variables.set_variable(repo_url, _VAR_PROJECT_ID, project["id"])
