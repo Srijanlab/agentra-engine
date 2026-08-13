@@ -121,6 +121,11 @@ def test_get_project_url_never_raises_and_never_provisions(monkeypatch):
 
 
 def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(monkeypatch):
+    """A freshly created ProjectV2 already comes with its own default
+    Status field (Todo/In Progress/Done) -- confirmed live against a real
+    org, createProjectV2Field's own attempt to add a second one fails
+    outright ("Name has already been taken"). ensure_project must read
+    that existing field back, not try to create one."""
     monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
     set_calls: dict[str, str] = {}
     monkeypatch.setattr(
@@ -142,19 +147,28 @@ def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(m
         if "linkProjectV2ToRepository" in query:
             assert variables == {"projectId": "PVT_1", "repositoryId": "REPO_1"}
             return {"linkProjectV2ToRepository": {"repository": {"id": "REPO_1"}}}
-        if "createProjectV2Field" in query:
+        if "node(id: $projectId)" in query:
+            assert variables == {"projectId": "PVT_1"}
             return {
-                "createProjectV2Field": {
-                    "projectV2Field": {
-                        "id": "FIELD_1",
-                        "options": [
-                            {"id": "OPT_TODO", "name": "Todo"},
-                            {"id": "OPT_PROG", "name": "In Progress"},
-                            {"id": "OPT_DONE", "name": "Done"},
-                        ],
+                "node": {
+                    "fields": {
+                        "nodes": [
+                            {"id": "PVTF_TITLE"},  # a ProjectV2FieldCommon field has no "options" key at all
+                            {
+                                "id": "FIELD_1",
+                                "name": "Status",
+                                "options": [
+                                    {"id": "OPT_TODO", "name": "Todo"},
+                                    {"id": "OPT_PROG", "name": "In Progress"},
+                                    {"id": "OPT_DONE", "name": "Done"},
+                                ],
+                            },
+                        ]
                     }
                 }
             }
+        if "createProjectV2Field" in query:
+            raise AssertionError("must not try to create a Status field when one already exists")
         raise AssertionError(f"unexpected query: {query}")
 
     monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
@@ -175,6 +189,34 @@ def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(m
         "AGENTRA_PROJECT_STATUS_OPTION_IN_PROGRESS": "OPT_PROG",
         "AGENTRA_PROJECT_STATUS_OPTION_DONE": "OPT_DONE",
     }
+
+
+def test_ensure_project_falls_back_to_creating_a_status_field_if_none_exists(monkeypatch):
+    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
+    monkeypatch.setattr(github_projects.github_variables, "set_variable", lambda *a, **k: None)
+
+    def fake_graphql(repo_url, query, variables):
+        if "owner { id }" in query:
+            return {"repository": {"id": "REPO_1", "owner": {"id": "OWNER_1"}}}
+        if "createProjectV2(input:" in query:
+            return {"createProjectV2": {"projectV2": {"id": "PVT_1", "number": 7, "url": "https://x/7"}}}
+        if "linkProjectV2ToRepository" in query:
+            return {"linkProjectV2ToRepository": {"repository": {"id": "REPO_1"}}}
+        if "node(id: $projectId)" in query:
+            return {"node": {"fields": {"nodes": [{"id": "PVTF_TITLE"}]}}}  # no Status field present
+        if "createProjectV2Field" in query:
+            return {
+                "createProjectV2Field": {
+                    "projectV2Field": {"id": "FIELD_1", "options": [{"id": "OPT_TODO", "name": "Todo"}]}
+                }
+            }
+        raise AssertionError(f"unexpected query: {query}")
+
+    monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
+
+    result = github_projects.ensure_project("https://github.com/acme/app.git")
+
+    assert result["status_field_id"] == "FIELD_1"
 
 
 def test_ensure_project_returns_none_on_graphql_error(monkeypatch):
@@ -199,6 +241,8 @@ def test_ensure_project_ignores_a_failed_repository_link(monkeypatch):
             return {"createProjectV2": {"projectV2": {"id": "PVT_1", "number": 7, "url": "https://x/7"}}}
         if "linkProjectV2ToRepository" in query:
             raise github_projects.GitHubProjectsError("no repo link permission")
+        if "node(id: $projectId)" in query:
+            return {"node": {"fields": {"nodes": [{"id": "PVTF_TITLE"}]}}}  # no Status field present
         if "createProjectV2Field" in query:
             return {
                 "createProjectV2Field": {
