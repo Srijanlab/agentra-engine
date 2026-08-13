@@ -174,6 +174,7 @@ def _github_bug_to_dict(issue: dict) -> dict:
         "proposed_fix": issue.get("body") or "",
         "source": "github",
         "external_id": issue_number,
+        "html_url": issue.get("html_url"),
     }
 
 
@@ -182,6 +183,7 @@ def _github_feature_to_dict(issue: dict) -> dict:
         "description": issue["title"],
         "source": "github",
         "external_id": str(issue["number"]),
+        "html_url": issue.get("html_url"),
     }
 
 
@@ -203,6 +205,7 @@ def _github_shipped_to_dict(issue: dict) -> dict:
         "run_id": run_id_m.group(1) if run_id_m else None,
         "ts": issue.get("closed_at"),
         "external_id": str(issue["number"]),
+        "html_url": issue.get("html_url"),
     }
 
 

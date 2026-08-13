@@ -14,8 +14,18 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
+
+
+def _repo_https_url(repo_url: str) -> str:
+    """Best-effort 'https://github.com/owner/repo' for building fake
+    html_url/issue links in dev mode -- handles both HTTPS and git@ SSH
+    forms. Falls back to the raw repo_url (still a usable, if odd-looking,
+    link) for anything that doesn't match either shape."""
+    m = re.match(r"^(?:https://github\.com/|git@github\.com:)([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
+    return f"https://github.com/{m.group(1)}/{m.group(2)}" if m else repo_url
 
 
 class FakeGitHubBackend:
@@ -72,7 +82,12 @@ class FakeGitHubBackend:
         number = self._next_issue_number[repo_url]
         self._next_issue_number[repo_url] += 1
         self.issues[repo_url][number] = {
-            "number": number, "title": title, "body": body, "labels": labels or [], "state": "open"
+            "number": number,
+            "title": title,
+            "body": body,
+            "labels": labels or [],
+            "state": "open",
+            "html_url": f"{_repo_https_url(repo_url)}/issues/{number}",
         }
         self._save()
         return dict(self.issues[repo_url][number])

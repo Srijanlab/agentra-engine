@@ -645,10 +645,14 @@ async def get_app(name: str) -> dict:
 
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
+    repo_url = info.get("repo_url")
+    from agentra.connectors import github_projects
+
+    project_url = github_projects.get_project_url(repo_url) if repo_url else None
     return {
         "name": name,
         "repo_path": str(repo),
-        "repo_url": info.get("repo_url"),
+        "repo_url": repo_url,
         "branch": info.get("branch"),
         "objective": mem.get_objective(),
         "shipped_count": len(mem.shipped_features()),
@@ -658,6 +662,7 @@ async def get_app(name: str) -> dict:
         "released": mem.released_features(),
         "bugs": mem.known_bugs(),
         "feature_queue": mem.feature_queue(),
+        "project_url": project_url,
         "vercel": env_config.vercel,
         "firebase": env_config.firebase,
         "ci_cd_on_push": env_config.ci_cd_on_push,
