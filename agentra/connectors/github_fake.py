@@ -142,6 +142,11 @@ class FakeGitHubBackend:
             for i in results
         ]
 
+    def add_comment(self, repo_url: str, issue_number: int, comment: str) -> None:
+        if issue_number in self.issues[repo_url]:
+            self.issues[repo_url][issue_number].setdefault("comments", []).append(comment)
+            self._save()
+
     def close_issue(
         self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
     ) -> None:
@@ -217,6 +222,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_closed_issues", backend.list_closed_issues),
         (github_issues, "list_in_progress_features", backend.list_in_progress_features),
         (github_issues, "close_issue", backend.close_issue),
+        (github_issues, "add_comment", backend.add_comment),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
         (github_projects, "ensure_feature_project", backend.ensure_feature_project),

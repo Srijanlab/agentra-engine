@@ -52,6 +52,30 @@ def test_get_issue_rejects_non_github_url():
         github_issues.get_issue("git@gitlab.com:acme/app.git", 1)
 
 
+def test_add_comment_posts_without_changing_state(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, json=json)
+        return _fake_response({})
+
+    def fail_patch(*a, **k):
+        raise AssertionError("add_comment must not change issue state")
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+    monkeypatch.setattr(github_issues.httpx, "patch", fail_patch)
+
+    github_issues.add_comment("https://github.com/acme/app.git", 7, "Still occurring.")
+
+    assert captured["url"] == "https://api.github.com/repos/acme/app/issues/7/comments"
+    assert captured["json"] == {"body": "Still occurring."}
+
+
+def test_add_comment_rejects_non_github_url():
+    with pytest.raises(github_issues.GitHubIssuesError):
+        github_issues.add_comment("git@gitlab.com:acme/app.git", 1, "x")
+
+
 def test_create_issue_posts_to_the_right_repo_with_labels(monkeypatch):
     captured = {}
 

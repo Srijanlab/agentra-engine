@@ -206,6 +206,21 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
     ]
 
 
+def add_comment(repo_url: str, issue_number: int, comment: str) -> None:
+    """Posts a comment without changing the issue's state -- for a bug
+    that's still occurring (memory.py's record_known_bug duplicate
+    suppression), where close_issue's comment-then-close shape isn't
+    right: the bug isn't fixed, just recurring."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    resp = httpx.post(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/comments",
+        headers=_headers(repo_url),
+        json={"body": comment},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def close_issue(
     repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
 ) -> None:

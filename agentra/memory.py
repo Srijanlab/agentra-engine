@@ -57,6 +57,7 @@ git history in the first place.
 """
 
 import datetime as dt
+import difflib
 import json
 import logging
 import re
@@ -496,6 +497,27 @@ class Memory:
             logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
             return []
 
+    _DUPLICATE_BUG_SIMILARITY_THRESHOLD = 0.6
+
+    def _find_similar_open_bug(self, diagnosis: str) -> str | None:
+        """Best-effort duplicate suppression: record_failure() fires on
+        every non-transient failure, and an unfixed real bug produces the
+        same failure on every retry until someone actually fixes it --
+        without this, each cycle filed its own fresh issue for the
+        identical problem (confirmed live: 4 near-identical "403 Write
+        access to repository not granted" bugs, #7-#10, from four
+        consecutive cycles hitting the same broken code path). difflib
+        similarity, not exact match, since diagnosis text is LLM-generated
+        free text that varies cycle to cycle even describing the same
+        underlying failure. Only checks OPEN bugs -- a bug that recurs
+        after being marked fixed is a real regression, not a duplicate,
+        and should get its own fresh issue."""
+        for bug in self.known_bugs():
+            existing = bug.get("diagnosis") or ""
+            if difflib.SequenceMatcher(None, diagnosis, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+                return bug.get("external_id")
+        return None
+
     def record_known_bug(
         self,
         run_id: str,
@@ -511,6 +533,17 @@ class Memory:
             return
         try:
             from agentra.connectors import github_issues
+
+            duplicate_of = self._find_similar_open_bug(diagnosis)
+            if duplicate_of and duplicate_of.isdigit():
+                github_issues.add_comment(
+                    repo_url, int(duplicate_of), f"Still occurring (run {run_id}, source: {source}).\n\n{diagnosis}"
+                )
+                logger.info(
+                    "record_known_bug: run %s matched existing open bug #%s -- commented instead of filing a duplicate",
+                    run_id, duplicate_of,
+                )
+                return
 
             body = f"Severity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
             if external_id:

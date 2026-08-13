@@ -128,6 +128,50 @@ def test_record_known_bug_is_a_noop_without_a_github_remote(tmp_path, monkeypatc
     mem.record_known_bug("run1", "high", "Checkout crashes", "null-check the cart")  # must not raise
 
 
+def test_record_known_bug_comments_on_a_similar_open_bug_instead_of_filing_a_duplicate(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [
+            {"number": 7, "title": "403 Write access to repository not granted", "body": "..."}
+        ],
+    )
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not file a duplicate"))
+    )
+    comments = []
+    monkeypatch.setattr(
+        github_issues, "add_comment", lambda repo_url, issue_number, comment: comments.append((issue_number, comment))
+    )
+
+    mem.record_known_bug("run2", "high", "403 Write access to repository not granted", "investigate git auth")
+
+    assert len(comments) == 1
+    assert comments[0][0] == 7
+    assert "run2" in comments[0][1]
+
+
+def test_record_known_bug_files_a_fresh_issue_when_no_similar_bug_is_open(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues, "list_open_issues", lambda repo_url, labels=None: [{"number": 3, "title": "Totally unrelated bug", "body": ""}]
+    )
+    created = {}
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda repo_url, title, body, labels=None: created.update(title=title) or {"number": 8}
+    )
+    monkeypatch.setattr(github_issues, "add_comment", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not comment")))
+
+    mem.record_known_bug("run1", "high", "Checkout crashes on empty cart", "null-check the cart")
+
+    assert created["title"] == "Checkout crashes on empty cart"
+
+
 def test_record_known_bug_logs_when_github_create_fails(tmp_path, monkeypatch, caplog):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
