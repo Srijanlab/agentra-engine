@@ -35,12 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from agentra.agents.base import run_log_scope
 from agentra.agents.safety import (
     FORBIDDEN_BASH_PATTERNS,
     FORBIDDEN_EDIT_PATH_PATTERNS,
     PROD_ONLY_BASH_PATTERNS,
     make_pre_tool_use_hook,
 )
+from agentra.memory import Memory
 
 
 def run_hook(hook, tool_name: str, tool_input: dict) -> dict:
@@ -275,3 +277,99 @@ def test_forbidden_bash_pattern_beats_allow_prod_even_when_command_also_looks_pr
     hook = make_pre_tool_use_hook(allow_prod=True)
     result = bash_result(hook, "git reset --hard origin/production --prod")
     assert is_denied(result)
+
+
+# -- audit logging: a deny must leave a durable trace, not just return the ---
+# -- decision to the SDK. See agents/safety.py::_deny/_record_denial, which -
+# -- write through base.py's run_log_scope ContextVar -- the same ambient --
+# -- logger run_agent's own message logging reads from (orchestrator.py/ ---
+# -- brain.py bind it to `lambda line: mem.log(run_id, line)` for a real --
+# -- cycle, so a line written here ends up in .agentra/logs/<run_id>.log). --
+
+
+def test_denied_bash_call_writes_audit_log_entry():
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    logged: list[str] = []
+    with run_log_scope(logged.append):
+        result = bash_result(hook, "rm -rf / --no-preserve-root")
+    assert is_denied(result)
+    assert len(logged) == 1, f"expected exactly one audit log line, got {logged!r}"
+    line = logged[0]
+    assert "[safety]" in line
+    assert "tool=Bash" in line
+    assert "rm -rf / --no-preserve-root" in line
+    assert repr(FORBIDDEN_BASH_PATTERNS[0]) in line
+
+
+def test_denied_prod_only_call_writes_audit_log_entry():
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    logged: list[str] = []
+    with run_log_scope(logged.append):
+        result = bash_result(hook, "vercel deploy --prod --yes")
+    assert is_denied(result)
+    assert len(logged) == 1
+    assert "[safety]" in logged[0]
+    assert "tool=Bash" in logged[0]
+
+
+def test_denied_edit_call_writes_audit_log_entry():
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    logged: list[str] = []
+    with run_log_scope(logged.append):
+        result = edit_result(hook, "infra/secrets/api_key.txt")
+    assert is_denied(result)
+    assert len(logged) == 1
+    assert "[safety]" in logged[0]
+    assert "tool=Write" in logged[0]
+    assert "infra/secrets/api_key.txt" in logged[0]
+
+
+def test_allowed_calls_do_not_write_audit_log_entries():
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    logged: list[str] = []
+    with run_log_scope(logged.append):
+        assert bash_result(hook, "echo hello world") == {}
+        assert edit_result(hook, "agentra/agents/safety.py") == {}
+    assert logged == []
+
+
+def test_denial_audit_log_detail_is_truncated():
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    logged: list[str] = []
+    long_command = "echo " + ("x" * 1000) + " && rm -rf / --no-preserve-root"
+    with run_log_scope(logged.append):
+        result = bash_result(hook, long_command)
+    assert is_denied(result)
+    assert len(logged) == 1
+    assert len(logged[0]) < len(long_command)
+
+
+def test_deny_without_active_run_log_scope_does_not_raise():
+    # No run_log_scope active (the common case for the standalone unit tests
+    # above) -- there's simply no ambient logger to write to, and that must
+    # not raise or otherwise break the deny decision itself.
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    result = bash_result(hook, "rm -rf / --no-preserve-root")
+    assert is_denied(result)
+
+
+def test_denied_call_persists_to_disk_through_real_memory_instance(tmp_path):
+    """End-to-end version of the audit-log tests above: wires run_log_scope
+    to a real Memory instance exactly the way orchestrator.py/brain.py do
+    for a live cycle (`run_log_scope(lambda line: mem.log(run_id, line))`),
+    and asserts the safety denial actually lands in the run's on-disk log
+    file -- not just in an in-memory list, which is what makes it a durable
+    audit record rather than something that vanishes with the process."""
+    mem = Memory(tmp_path)
+    run_id = "test-run-id"
+    hook = make_pre_tool_use_hook(allow_prod=False)
+    with run_log_scope(lambda line: mem.log(run_id, line)):
+        result = bash_result(hook, "git push origin main --force")
+    assert is_denied(result)
+
+    log_path = mem.log_root / f"{run_id}.log"
+    assert log_path.exists(), "expected the safety denial to be written to the run's log file on disk"
+    content = log_path.read_text()
+    assert "[safety]" in content
+    assert "tool=Bash" in content
+    assert "git push origin main --force" in content

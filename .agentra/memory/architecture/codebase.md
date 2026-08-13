@@ -1,33 +1,30 @@
-I now have a complete picture of the repository.
-
-## Summary
-
-This is **agentra** — the "Autonomous Product Engineering Agent System" whose own spec lives in `vision.md`: a meta-system that operates *on other target repos*, understanding their codebases, discovering features, implementing, testing, deploying to pre-prod/beta, and looping. This repo is the agent system itself, not a typical product app.
-
-**Architecture**: Python backend orchestrating Claude Agent SDK subagents (`agentra/agents/*.py`: codebase, discovery, implementation, testing, deployment, feedback, prod_debug, safety, git_ops, generic) coordinated either by a hardcoded pipeline (`orchestrator.py::run_cycle`) or by an LLM-driven "brain" (`agents/brain.py::run_autonomous_cycle`) that picks which of 9 tool-wrapped specialized agents to call and when. Exposed via a CLI (`cli.py`) and a FastAPI service (`server.py`) with webhook/scheduler/pubsub trigger endpoints, backing a React/Vite/Tailwind dashboard (`agentra/web/`) served as static files. Multi-app registry + durable inbox (`registry.py`) backed by Firestore (falls back to local JSON). Ships as a hardened, non-root, read-only Docker container (`Dockerfile`, `run-agent.sh`) deployable to GCP Cloud Run (`deploy/gcp/terraform`) or via Cloudflare tunnel (`deploy/cloudflare/terraform`).
+I now have a clear, complete picture of this repository.
 
 ```json
 {
-  "framework": "Python (FastAPI backend + Claude Agent SDK) with a React/TypeScript/Vite/Tailwind dashboard",
-  "backend": "Google Cloud Firestore (durable registry/inbox), falling back to local JSON files under AGENTRA_HOME when no GCP project configured; per-app audit trail stored as git-committed files under .agentra/ in each target repo",
-  "architecture": "Single always-on FastAPI service (deployable to Cloud Run) that spawns short-lived Claude Agent SDK subagent tasks on demand — not microservices; monolithic Python package (agentra/) with a decoupled statically-built SPA frontend and Terraform-defined cloud infra",
+  "framework": "Python (FastAPI backend + Claude Agent SDK) with a React/TypeScript (Vite + Tailwind v4) dashboard frontend",
+  "backend": "FastAPI HTTP service (agentra/server.py) as the always-on Cloud Run entrypoint, with Firestore (google-cloud-firestore) as the durable store for multi-app registry/inbox state when AGENTRA_FIRESTORE_PROJECT is set, falling back to local JSON files under AGENTRA_HOME for local dev; per-repo audit trail (architecture/decisions/features/metrics/failures) is stored as git-committed files at <repo>/.agentra/memory/",
+  "architecture": "Agentic orchestration monolith: a single Python package (agentra/) implements an 'Orchestrator Agent (Brain)' that dispatches specialized sub-agents (codebase understanding, product discovery, implementation, testing, deployment, feedback, prod-debug, safety, git-ops) as short-lived Claude Agent SDK subprocesses. Deployed as one long-running Cloud Run/Docker service exposing HTTP trigger endpoints (schedule, alert webhook, Pub/Sub queue) plus a CLI (`agentra` console script) and a static React dashboard served from the same FastAPI app. Not microservices — one process fans out work to model-driven subagents rather than separate deployed services. Terraform configs exist for both GCP and Cloudflare deploy targets.",
   "features": [
-    "Autonomous 'brain' orchestrator that decides which specialized agent to invoke and in what order (agents/brain.py)",
-    "Fixed-pipeline orchestrator mode: codebase understanding -> feature discovery -> implementation -> testing -> pre-prod deploy -> feedback (orchestrator.py)",
-    "Codebase Understanding Agent, Product Discovery Agent, Implementation Agent, Testing Agent, Deployment Agent, Analytics Feedback Agent, Production Debugging Agent, Safety filter agent, generic custom-agent spawner",
-    "Multi-app registry with durable inbox for cross-app requests, GitHub App connector, HTTP trigger endpoints (schedule/alert/queue), daily standup reports",
-    "React dashboard: connect GitHub, register apps, monitor agents/activity, view standups",
-    "Safety hooks (agents/safety.py, tests/test_safety_hook.py) as a second line of defense over unrestricted Bash/Write/Edit access, with production deploys blocked unless explicitly promoted by a human or an opted-in auto-remediate path"
+    "Autonomous product-engineering loop: understand codebase -> discover feature opportunities -> implement -> test -> deploy to pre-prod -> measure impact -> repeat, with no human feature-by-feature instruction needed (vision.md)",
+    "Production debugging cycle: diagnose prod issues, optionally auto-remediate with human-gated (or opted-in auto) promotion to production",
+    "Multi-app registry/inbox so one agentra instance can manage many target repos, with durable request queueing",
+    "Human-gated production promotion (`agentra promote` / dashboard Promote button) as the only path allowed to touch prod without explicit auto_remediate_prod opt-in",
+    "Web dashboard (React) with panels for Apps, Agents, Activity/Runs, Loops, Standups, and app registration/config/edit modals",
+    "Daily/periodic 'standup' reporting (agentra/standup.py)",
+    "GitHub App connector for repo/PR integration (agentra/connectors/github_app.py)",
+    "Safety layer: regex-based command filtering (agents/safety.py) as a second line of defense on top of container isolation",
+    "Environment configuration system (.agentra/environments.yaml) defining pre-prod/prod branches and feature-branch naming"
   ],
   "test_commands": [
-    "pytest (root-level tests/, plus package installed via `pip install -e .`)",
-    "python -m py_compile over agentra/*.py (used in CI as a compile sanity check, see ci/github-actions-ci.yml)"
+    "pytest tests",
+    "find agentra -name '*.py' -print0 | xargs -0 -n1 python -m py_compile  (syntax check, run in CI before pytest)"
   ],
   "build_commands": [
-    "pip install -e . (Python package, pyproject.toml/setuptools)",
-    "npm ci && npm run build (agentra/web — tsc -b && vite build)",
-    "docker build -t agentra:local . (or docker compose build)"
+    "pip install -e .[dev]  (Python package + dev deps)",
+    "cd agentra/web && npm ci && npm run build  (tsc -b && vite build for the dashboard)",
+    "docker build -t agentra:local .  (containerized agent runner, see CONTAINER.md/Dockerfile)"
   ],
-  "notes": "Not a conventional product codebase — this repo IS the autonomous engineering agent tool described in vision.md, meant to be pointed at *other* target repositories via --repo. CI (ci/github-actions-ci.yml) only runs py_compile for Python and `npm run build` for the web app; no pytest step is wired into CI despite tests/ existing (4 pytest files covering brain stagnation, generic spawn integration, safety hook regex, and safety integration). tasks.md and CONTAINER.md/docs/deployment.md contain further operational detail; deploy/ holds Terraform for GCP Cloud Run+Firestore+Pub/Sub+Scheduler and an alternative Cloudflare Tunnel path."
+  "notes": "This repo IS the autonomous agent system described in vision.md — it is the very kind of system I (the Codebase Understanding Agent) am modeled after, dogfooding its own architecture. Python >=3.11, packaged via setuptools/pyproject.toml with console script `agentra`. CI (ci/github-actions-ci.yml) runs two independent jobs: 'python' (compile-check + pytest) and 'web' (npm build). Local dev helpers: dev.sh, run-agent.sh, docker-compose.yml, docker-entrypoint.sh. Persistent per-repo memory lives under <repo>/.agentra/ (git-tracked memory/ subdirs, gitignored logs/feature_queue.json/shipped.json per .agentra/.gitignore). No test runner or build tooling found for the web app beyond the standard Vite/tsc scripts in package.json; no linter config detected at a glance."
 }
 ```
