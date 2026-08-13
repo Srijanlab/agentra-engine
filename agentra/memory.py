@@ -449,19 +449,33 @@ class Memory:
     # ── Settings: the current objective. Read by default so --objective becomes
     # optional; `agentra objective set/show` manages this file directly. ──────
 
-    def get_objective(self) -> str | None:
-        if not self.objective_path.exists():
-            return None
-        try:
-            import yaml
+    _OBJECTIVE_VARIABLE = "AGENTRA_OBJECTIVE"
 
-            data = yaml.safe_load(self.objective_path.read_text()) or {}
-        except ImportError:
-            data = {}
-            for line in self.objective_path.read_text().splitlines():
-                if line.startswith("objective:"):
-                    data["objective"] = line.split(":", 1)[1].strip().strip('"')
-        return data.get("objective")
+    def get_objective(self) -> str | None:
+        objective = None
+        if self.objective_path.exists():
+            try:
+                import yaml
+
+                data = yaml.safe_load(self.objective_path.read_text()) or {}
+            except ImportError:
+                data = {}
+                for line in self.objective_path.read_text().splitlines():
+                    if line.startswith("objective:"):
+                        data["objective"] = line.split(":", 1)[1].strip().strip('"')
+            objective = data.get("objective")
+
+        repo_url = self._repo_url()
+        if repo_url:
+            try:
+                from agentra.connectors import github_variables
+
+                remote_vars = github_variables.list_variables(repo_url)
+                if self._OBJECTIVE_VARIABLE in remote_vars:
+                    objective = remote_vars[self._OBJECTIVE_VARIABLE]
+            except Exception:
+                logger.warning("get_objective: GitHub Variables unavailable for %s, using local mirror", repo_url, exc_info=True)
+        return objective
 
     def set_objective(self, objective: str) -> Path:
         content = {
@@ -476,6 +490,15 @@ class Memory:
             self.objective_path.write_text(
                 f'objective: "{objective}"\nupdated_at: "{content["updated_at"]}"\n'
             )
+
+        repo_url = self._repo_url()
+        if repo_url:
+            try:
+                from agentra.connectors import github_variables
+
+                github_variables.set_variable(repo_url, self._OBJECTIVE_VARIABLE, objective)
+            except Exception:
+                logger.warning("set_objective: failed to sync to GitHub Variables for %s, local file still saved", repo_url, exc_info=True)
         return self.objective_path
 
     # ── Feedback sync checkpoint: how far feedback_fetch_command has been read,
