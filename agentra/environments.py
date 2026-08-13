@@ -9,9 +9,12 @@ preview, a real deployed environment for integration testing) -> prod
 """
 
 import json
+import logging
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,16 +68,82 @@ def config_path(repo: Path) -> Path:
     return repo / ".agentra" / "environments.yaml"
 
 
+# GitHub Actions repository Variables as the authoritative store for this
+# config when the target repo has a github.com remote and the App has the
+# Variables permission -- one variable per field so each is individually
+# browsable/editable in GitHub's own UI (Settings -> Secrets and variables
+# -> Actions -> Variables), not one opaque blob. Local environments.yaml
+# stays the fallback/durable-if-GitHub-is-unreachable copy, same hybrid
+# pattern as memory.py's known_bugs/feature_queue GitHub Issues sync.
+_GITHUB_VARIABLE_NAMES = {
+    "local_branch": "AGENTRA_LOCAL_BRANCH",
+    "pre_prod_branch": "AGENTRA_PRE_PROD_BRANCH",
+    "prod_branch": "AGENTRA_PROD_BRANCH",
+    "vercel": "AGENTRA_VERCEL",
+    "firebase": "AGENTRA_FIREBASE",
+    "firebase_pre_prod_alias": "AGENTRA_FIREBASE_PRE_PROD_ALIAS",
+    "firebase_prod_alias": "AGENTRA_FIREBASE_PROD_ALIAS",
+    "ci_cd_on_push": "AGENTRA_CI_CD_ON_PUSH",
+    "auto_remediate_prod": "AGENTRA_AUTO_REMEDIATE_PROD",
+    "schedule_hours": "AGENTRA_SCHEDULE_HOURS",
+    "alarm_enabled": "AGENTRA_ALARM_ENABLED",
+}
+_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled"}
+_FLOAT_FIELDS = {"schedule_hours"}
+
+
+def _repo_url(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "remote", "get-url", "origin"], capture_output=True, text=True, timeout=10
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _coerce(field: str, raw: str):
+    if field in _BOOL_FIELDS:
+        return raw.strip().lower() == "true"
+    if field in _FLOAT_FIELDS:
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    return raw
+
+
 def load(repo: Path) -> EnvironmentConfig | None:
     path = config_path(repo)
-    if not path.exists():
-        return None
-    try:
-        import yaml
+    local_exists = path.exists()
+    data: dict = {}
+    if local_exists:
+        try:
+            import yaml
 
-        data = yaml.safe_load(path.read_text()) or {}
-    except ImportError:
-        data = _naive_yaml_load(path.read_text())
+            data = yaml.safe_load(path.read_text()) or {}
+        except ImportError:
+            data = _naive_yaml_load(path.read_text())
+
+    found_on_github = False
+    repo_url = _repo_url(repo)
+    if repo_url:
+        try:
+            from agentra.connectors import github_variables
+
+            remote_vars = github_variables.list_variables(repo_url)
+            for field, var_name in _GITHUB_VARIABLE_NAMES.items():
+                if var_name not in remote_vars:
+                    continue
+                coerced = _coerce(field, remote_vars[var_name])
+                if coerced is not None:
+                    data[field] = coerced
+                    found_on_github = True
+        except Exception:
+            logger.warning("environments.load: GitHub Variables unavailable for %s, using local mirror", repo_url, exc_info=True)
+
+    if not local_exists and not found_on_github:
+        return None
     return EnvironmentConfig(**data)
 
 
@@ -87,6 +156,19 @@ def save(repo: Path, config: EnvironmentConfig) -> Path:
         path.write_text(yaml.safe_dump(asdict(config), sort_keys=False))
     except ImportError:
         path.write_text(_naive_yaml_dump(asdict(config)))
+
+    repo_url = _repo_url(repo)
+    if repo_url:
+        try:
+            from agentra.connectors import github_variables
+
+            data = asdict(config)
+            for field, var_name in _GITHUB_VARIABLE_NAMES.items():
+                value = data[field]
+                str_value = ("true" if value else "false") if field in _BOOL_FIELDS else str(value)
+                github_variables.set_variable(repo_url, var_name, str_value)
+        except Exception:
+            logger.warning("environments.save: failed to sync to GitHub Variables for %s, local file still saved", repo_url, exc_info=True)
     return path
 
 
