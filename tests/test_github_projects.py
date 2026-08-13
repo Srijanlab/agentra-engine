@@ -1,8 +1,11 @@
 """Tests for connectors/github_projects.py -- the GraphQL client and
 provisioning logic behind "feature mapped to project, bug mapped to
-issue" (see memory.py's record_feature_request/record_shipped). No real
-GitHub API calls: httpx and token minting are stubbed, same pattern as
-test_github_variables.py/test_memory_github_backlog.py.
+issue" (see memory.py's record_feature_request/record_shipped). One
+Project per FEATURE (titled after that feature), not per repo/app -- no
+local cache or GitHub Variables involved, a feature issue's Project
+association is asked from GitHub directly every time (issue.projectItems).
+No real GitHub API calls: httpx and token minting are stubbed, same
+pattern as test_github_variables.py/test_memory_github_backlog.py.
 """
 
 from unittest.mock import MagicMock
@@ -53,92 +56,72 @@ def test_graphql_raises_on_a_graphql_level_errors_array(monkeypatch):
         github_projects._graphql("https://github.com/acme/app.git", "query { x }", {})
 
 
-# ── ensure_project: provision-once, cache-as-variables ────────────────────
+# ── ensure_feature_project: provision-once-per-feature, no local cache ─────
 
 
-def test_ensure_project_returns_none_without_a_github_remote():
-    assert github_projects.ensure_project("git@gitlab.com:acme/app.git") is None
+def _existing_project_response(project):
+    return {"repository": {"issue": {"projectItems": {"nodes": [{"project": project}]}}}}
 
 
-def test_ensure_project_returns_none_when_github_variables_unreachable(monkeypatch):
+def _no_project_response():
+    return {"repository": {"issue": {"projectItems": {"nodes": []}}}}
+
+
+def test_ensure_feature_project_returns_none_without_a_github_remote():
+    assert github_projects.ensure_feature_project("git@gitlab.com:acme/app.git", 10, "My feature") is None
+
+
+def test_ensure_feature_project_returns_none_when_graphql_unreachable(monkeypatch):
     monkeypatch.setattr(
-        github_projects.github_variables, "list_variables", lambda repo_url: (_ for _ in ()).throw(RuntimeError("down"))
+        github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(github_projects.GitHubProjectsError("down"))
     )
 
-    assert github_projects.ensure_project("https://github.com/acme/app.git") is None
+    assert github_projects.ensure_feature_project("https://github.com/acme/app.git", 10, "My feature") is None
 
 
-def test_ensure_project_returns_cached_values_without_any_graphql_calls(monkeypatch):
-    monkeypatch.setattr(
-        github_projects.github_variables,
-        "list_variables",
-        lambda repo_url: {
-            "AGENTRA_PROJECT_ID": "PVT_1",
-            "AGENTRA_PROJECT_STATUS_FIELD_ID": "FIELD_1",
-            "AGENTRA_PROJECT_STATUS_OPTION_TODO": "OPT_TODO",
-            "AGENTRA_PROJECT_STATUS_OPTION_IN_PROGRESS": "OPT_PROG",
-            "AGENTRA_PROJECT_STATUS_OPTION_DONE": "OPT_DONE",
-        },
-    )
-    monkeypatch.setattr(
-        github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GraphQL"))
-    )
+def test_ensure_feature_project_returns_the_existing_project_without_creating_a_new_one(monkeypatch):
+    def fake_graphql(repo_url, query, variables):
+        if "projectItems" in query:
+            assert variables == {"owner": "acme", "name": "app", "number": 10}
+            return _existing_project_response(
+                {
+                    "id": "PVT_1",
+                    "url": "https://github.com/orgs/acme/projects/9",
+                    "fields": {
+                        "nodes": [
+                            {"id": "FIELD_1", "name": "Status", "options": [{"id": "OPT_TODO", "name": "Todo"}]},
+                        ]
+                    },
+                }
+            )
+        raise AssertionError(f"must not call GraphQL again: {query}")
 
-    result = github_projects.ensure_project("https://github.com/acme/app.git")
+    monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
+
+    result = github_projects.ensure_feature_project("https://github.com/acme/app.git", 10, "My feature")
 
     assert result == {
         "project_id": "PVT_1",
+        "url": "https://github.com/orgs/acme/projects/9",
         "status_field_id": "FIELD_1",
-        "status_options": {"Todo": "OPT_TODO", "In Progress": "OPT_PROG", "Done": "OPT_DONE"},
+        "status_options": {"Todo": "OPT_TODO"},
     }
 
 
-def test_get_project_url_reads_the_cached_variable(monkeypatch):
-    monkeypatch.setattr(
-        github_projects.github_variables,
-        "list_variables",
-        lambda repo_url: {"AGENTRA_PROJECT_URL": "https://github.com/orgs/acme/projects/7"},
-    )
-
-    assert github_projects.get_project_url("https://github.com/acme/app.git") == "https://github.com/orgs/acme/projects/7"
-
-
-def test_get_project_url_returns_none_when_no_project_exists_yet(monkeypatch):
-    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
-
-    assert github_projects.get_project_url("https://github.com/acme/app.git") is None
-
-
-def test_get_project_url_never_raises_and_never_provisions(monkeypatch):
-    monkeypatch.setattr(
-        github_projects.github_variables, "list_variables", lambda repo_url: (_ for _ in ()).throw(RuntimeError("down"))
-    )
-    monkeypatch.setattr(
-        github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not provision"))
-    )
-
-    assert github_projects.get_project_url("https://github.com/acme/app.git") is None
-
-
-def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(monkeypatch):
+def test_ensure_feature_project_provisions_a_fresh_project_titled_after_the_feature(monkeypatch):
     """A freshly created ProjectV2 already comes with its own default
     Status field (Todo/In Progress/Done) -- confirmed live against a real
     org, createProjectV2Field's own attempt to add a second one fails
-    outright ("Name has already been taken"). ensure_project must read
-    that existing field back, not try to create one."""
-    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
-    set_calls: dict[str, str] = {}
-    monkeypatch.setattr(
-        github_projects.github_variables,
-        "set_variable",
-        lambda repo_url, name, value: set_calls.__setitem__(name, value),
-    )
+    outright ("Name has already been taken"). ensure_feature_project must
+    read that existing field back, not try to create one."""
 
     def fake_graphql(repo_url, query, variables):
+        if "projectItems" in query:
+            return _no_project_response()
         if "owner { id }" in query:
             return {"repository": {"id": "REPO_1", "owner": {"id": "OWNER_1"}}}
         if "createProjectV2(input:" in query:
-            assert variables == {"ownerId": "OWNER_1", "title": "app Features"}
+            assert variables == {"ownerId": "OWNER_1", "title": "My feature"}
             return {
                 "createProjectV2": {
                     "projectV2": {"id": "PVT_1", "number": 7, "url": "https://github.com/orgs/acme/projects/7"}
@@ -173,29 +156,20 @@ def test_ensure_project_provisions_a_fresh_project_and_caches_ids_as_variables(m
 
     monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
 
-    result = github_projects.ensure_project("https://github.com/acme/app.git")
+    result = github_projects.ensure_feature_project("https://github.com/acme/app.git", 10, "My feature")
 
     assert result == {
         "project_id": "PVT_1",
+        "url": "https://github.com/orgs/acme/projects/7",
         "status_field_id": "FIELD_1",
         "status_options": {"Todo": "OPT_TODO", "In Progress": "OPT_PROG", "Done": "OPT_DONE"},
     }
-    assert set_calls == {
-        "AGENTRA_PROJECT_ID": "PVT_1",
-        "AGENTRA_PROJECT_NUMBER": "7",
-        "AGENTRA_PROJECT_URL": "https://github.com/orgs/acme/projects/7",
-        "AGENTRA_PROJECT_STATUS_FIELD_ID": "FIELD_1",
-        "AGENTRA_PROJECT_STATUS_OPTION_TODO": "OPT_TODO",
-        "AGENTRA_PROJECT_STATUS_OPTION_IN_PROGRESS": "OPT_PROG",
-        "AGENTRA_PROJECT_STATUS_OPTION_DONE": "OPT_DONE",
-    }
 
 
-def test_ensure_project_falls_back_to_creating_a_status_field_if_none_exists(monkeypatch):
-    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
-    monkeypatch.setattr(github_projects.github_variables, "set_variable", lambda *a, **k: None)
-
+def test_ensure_feature_project_falls_back_to_creating_a_status_field_if_none_exists(monkeypatch):
     def fake_graphql(repo_url, query, variables):
+        if "projectItems" in query:
+            return _no_project_response()
         if "owner { id }" in query:
             return {"repository": {"id": "REPO_1", "owner": {"id": "OWNER_1"}}}
         if "createProjectV2(input:" in query:
@@ -214,27 +188,29 @@ def test_ensure_project_falls_back_to_creating_a_status_field_if_none_exists(mon
 
     monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
 
-    result = github_projects.ensure_project("https://github.com/acme/app.git")
+    result = github_projects.ensure_feature_project("https://github.com/acme/app.git", 10, "My feature")
 
     assert result["status_field_id"] == "FIELD_1"
 
 
-def test_ensure_project_returns_none_on_graphql_error(monkeypatch):
-    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
-    monkeypatch.setattr(
-        github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(github_projects.GitHubProjectsError("boom"))
-    )
+def test_ensure_feature_project_returns_none_on_graphql_error_during_creation(monkeypatch):
+    def fake_graphql(repo_url, query, variables):
+        if "projectItems" in query:
+            return _no_project_response()
+        raise github_projects.GitHubProjectsError("boom")
 
-    assert github_projects.ensure_project("https://github.com/acme/app.git") is None
+    monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
+
+    assert github_projects.ensure_feature_project("https://github.com/acme/app.git", 10, "My feature") is None
 
 
-def test_ensure_project_ignores_a_failed_repository_link(monkeypatch):
+def test_ensure_feature_project_ignores_a_failed_repository_link(monkeypatch):
     """linkProjectV2ToRepository is cosmetic (shows the board under the
     repo's Projects tab) -- a failure there must not sink provisioning."""
-    monkeypatch.setattr(github_projects.github_variables, "list_variables", lambda repo_url: {})
-    monkeypatch.setattr(github_projects.github_variables, "set_variable", lambda *a, **k: None)
 
     def fake_graphql(repo_url, query, variables):
+        if "projectItems" in query:
+            return _no_project_response()
         if "owner { id }" in query:
             return {"repository": {"id": "REPO_1", "owner": {"id": "OWNER_1"}}}
         if "createProjectV2(input:" in query:
@@ -242,7 +218,7 @@ def test_ensure_project_ignores_a_failed_repository_link(monkeypatch):
         if "linkProjectV2ToRepository" in query:
             raise github_projects.GitHubProjectsError("no repo link permission")
         if "node(id: $projectId)" in query:
-            return {"node": {"fields": {"nodes": [{"id": "PVTF_TITLE"}]}}}  # no Status field present
+            return {"node": {"fields": {"nodes": [{"id": "PVTF_TITLE"}]}}}
         if "createProjectV2Field" in query:
             return {
                 "createProjectV2Field": {
@@ -253,25 +229,25 @@ def test_ensure_project_ignores_a_failed_repository_link(monkeypatch):
 
     monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
 
-    result = github_projects.ensure_project("https://github.com/acme/app.git")
+    result = github_projects.ensure_feature_project("https://github.com/acme/app.git", 10, "My feature")
 
     assert result["project_id"] == "PVT_1"
 
 
-# ── add_item_to_project: idempotent add + status set ───────────────────────
+# ── add_item_to_feature_project: idempotent add + status set ───────────────
 
 
-def test_add_item_to_project_adds_the_issue_and_sets_its_status(monkeypatch):
+def test_add_item_to_feature_project_adds_the_feature_issue_itself_by_default(monkeypatch):
     monkeypatch.setattr(
         github_projects,
-        "ensure_project",
-        lambda repo_url: {
+        "ensure_feature_project",
+        lambda repo_url, feature_issue_number, title: {
             "project_id": "PVT_1",
             "status_field_id": "FIELD_1",
             "status_options": {"Todo": "OPT_TODO", "In Progress": "OPT_PROG", "Done": "OPT_DONE"},
         },
     )
-    monkeypatch.setattr(github_projects, "_issue_node_id", lambda repo_url, issue_number: "ISSUE_NODE_1")
+    monkeypatch.setattr(github_projects, "_issue_node_id", lambda repo_url, issue_number: f"NODE_{issue_number}")
 
     calls = []
 
@@ -285,39 +261,76 @@ def test_add_item_to_project_adds_the_issue_and_sets_its_status(monkeypatch):
 
     monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
 
-    github_projects.add_item_to_project("https://github.com/acme/app.git", 42, status="Done")
+    github_projects.add_item_to_feature_project("https://github.com/acme/app.git", 10, "My feature", status="Done")
 
-    assert calls[0][1] == {"projectId": "PVT_1", "contentId": "ISSUE_NODE_1"}
+    assert calls[0][1] == {"projectId": "PVT_1", "contentId": "NODE_10"}
     assert calls[1][1] == {"projectId": "PVT_1", "itemId": "ITEM_1", "fieldId": "FIELD_1", "optionId": "OPT_DONE"}
 
 
-def test_add_item_to_project_noops_when_ensure_project_fails(monkeypatch):
-    monkeypatch.setattr(github_projects, "ensure_project", lambda repo_url: None)
+def test_add_item_to_feature_project_adds_a_sub_issue_onto_the_same_board(monkeypatch):
+    monkeypatch.setattr(
+        github_projects,
+        "ensure_feature_project",
+        lambda repo_url, feature_issue_number, title: {
+            "project_id": "PVT_1",
+            "status_field_id": "FIELD_1",
+            "status_options": {"Todo": "OPT_TODO"},
+        },
+    )
+    monkeypatch.setattr(github_projects, "_issue_node_id", lambda repo_url, issue_number: f"NODE_{issue_number}")
+
+    calls = []
+
+    def fake_graphql(repo_url, query, variables):
+        calls.append((query, variables))
+        if "addProjectV2ItemById" in query:
+            return {"addProjectV2ItemById": {"item": {"id": "ITEM_SUB"}}}
+        if "updateProjectV2ItemFieldValue" in query:
+            return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM_SUB"}}}
+        raise AssertionError(f"unexpected query: {query}")
+
+    monkeypatch.setattr(github_projects, "_graphql", fake_graphql)
+
+    github_projects.add_item_to_feature_project(
+        "https://github.com/acme/app.git", 10, "My feature", issue_number=11, status="Todo"
+    )
+
+    assert calls[0][1] == {"projectId": "PVT_1", "contentId": "NODE_11"}
+
+
+def test_add_item_to_feature_project_noops_when_ensure_fails(monkeypatch):
+    monkeypatch.setattr(github_projects, "ensure_feature_project", lambda repo_url, feature_issue_number, title: None)
     monkeypatch.setattr(github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GraphQL")))
 
-    github_projects.add_item_to_project("https://github.com/acme/app.git", 42)  # must not raise
+    github_projects.add_item_to_feature_project("https://github.com/acme/app.git", 10, "My feature")  # must not raise
 
 
-def test_add_item_to_project_noops_on_an_unknown_status(monkeypatch):
+def test_add_item_to_feature_project_noops_on_an_unknown_status(monkeypatch):
     monkeypatch.setattr(
-        github_projects, "ensure_project", lambda repo_url: {"project_id": "PVT_1", "status_field_id": "FIELD_1", "status_options": {"Todo": "OPT_TODO"}}
+        github_projects,
+        "ensure_feature_project",
+        lambda repo_url, feature_issue_number, title: {"project_id": "PVT_1", "status_field_id": "FIELD_1", "status_options": {"Todo": "OPT_TODO"}},
     )
     monkeypatch.setattr(github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GraphQL")))
 
-    github_projects.add_item_to_project("https://github.com/acme/app.git", 42, status="Bogus")
+    github_projects.add_item_to_feature_project("https://github.com/acme/app.git", 10, "My feature", status="Bogus")
 
 
-def test_add_item_to_project_noops_when_the_issue_has_no_node_id(monkeypatch):
+def test_add_item_to_feature_project_noops_when_the_issue_has_no_node_id(monkeypatch):
     monkeypatch.setattr(
-        github_projects, "ensure_project", lambda repo_url: {"project_id": "PVT_1", "status_field_id": "FIELD_1", "status_options": {"Todo": "OPT_TODO"}}
+        github_projects,
+        "ensure_feature_project",
+        lambda repo_url, feature_issue_number, title: {"project_id": "PVT_1", "status_field_id": "FIELD_1", "status_options": {"Todo": "OPT_TODO"}},
     )
     monkeypatch.setattr(github_projects, "_issue_node_id", lambda repo_url, issue_number: None)
     monkeypatch.setattr(github_projects, "_graphql", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GraphQL")))
 
-    github_projects.add_item_to_project("https://github.com/acme/app.git", 42, status="Todo")
+    github_projects.add_item_to_feature_project("https://github.com/acme/app.git", 10, "My feature", status="Todo")
 
 
-def test_add_item_to_project_never_raises_on_an_unexpected_failure(monkeypatch):
-    monkeypatch.setattr(github_projects, "ensure_project", lambda repo_url: (_ for _ in ()).throw(RuntimeError("boom")))
+def test_add_item_to_feature_project_never_raises_on_an_unexpected_failure(monkeypatch):
+    monkeypatch.setattr(
+        github_projects, "ensure_feature_project", lambda repo_url, feature_issue_number, title: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
 
-    github_projects.add_item_to_project("https://github.com/acme/app.git", 42)  # must not raise
+    github_projects.add_item_to_feature_project("https://github.com/acme/app.git", 10, "My feature")  # must not raise

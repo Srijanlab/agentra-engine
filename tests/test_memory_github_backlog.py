@@ -27,7 +27,7 @@ def _stub_project_sync(monkeypatch):
     # so these Issues-focused tests don't also need a fake Project backend.
     # test_github_projects.py covers github_projects.py itself; a couple of
     # tests below assert this gets called with the right arguments.
-    monkeypatch.setattr(github_projects, "add_item_to_project", lambda *a, **k: None)
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -236,12 +236,14 @@ def test_record_feature_request_adds_the_new_issue_to_the_project_as_todo(tmp_pa
     monkeypatch.setattr(github_issues, "create_issue", lambda *a, **k: {"number": 11})
     project_calls = []
     monkeypatch.setattr(
-        github_projects, "add_item_to_project", lambda repo_url, issue_number, status="Todo": project_calls.append((issue_number, status))
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, status="Todo": project_calls.append((feature_issue_number, title, status)),
     )
 
     mem.record_feature_request("Add keyboard shortcuts")
 
-    assert project_calls == [(11, "Todo")]
+    assert project_calls == [(11, "Add keyboard shortcuts", "Todo")]
 
 
 def test_clear_feature_request_closes_the_github_issue(tmp_path, monkeypatch):

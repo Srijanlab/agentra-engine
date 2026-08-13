@@ -5,24 +5,35 @@ Issue (memory.py's record_feature_request/record_shipped, label
 Issue, not a second, independent store of what a feature is. known_bugs
 stay Issues-only; nothing here ever touches them.
 
-One Project per app, provisioned lazily via ensure_project() -- not at
-onboarding, the first time add_item_to_project() actually has a feature to
-put on it (memory.py's record_feature_request/record_shipped). An app
-that never gets a feature never gets a board. Its single "Status"
-single-select field (Todo/In Progress/Done -- "just status", no
-Priority/Size/other fields) and other IDs are cached as GitHub Actions
-Variables (AGENTRA_PROJECT_*) the same way environments.py/memory.py
-cache their own config -- no local file, and ensure_project() re-provisions
-nothing on repeat calls once those variables exist.
+One Project PER FEATURE, not per app/repo -- titled after the feature
+itself (e.g. "Promotion capability with human in loop for testing report
+verification"), not a generic per-repo name. A feature's own issue is the
+first item on its Project; any sub-issues it gets broken into (see
+github_issues.create_sub_issue, GitHub's native parent/sub-issue
+relationship) are added to that same board as further items, all tracked
+through the one "Status" single-select field (Todo/In Progress/Done --
+"just status", no Priority/Size/other fields) every fresh Project already
+comes with by default.
+
+No local cache and no GitHub Variables involved: a feature issue's
+Project association is asked from GitHub directly every time
+(issue.projectItems), since that's where the relationship actually lives
+-- there's no side table here that could ever drift out of sync with it.
+ensure_feature_project() is idempotent purely because of that: call it
+twice for the same feature issue and the second call just finds what the
+first one created.
 
 Requires the GitHub App to have the "Projects" repository permission
 granted (read/write) -- a manual step on the App's settings page, same
-prerequisite github_issues.py's Issues permission needed. Every public
-function here fails soft: catches its own exceptions, logs, and returns
-None/no-ops rather than raising, so a Project provisioning hiccup or a
-missing permission never blocks registering an app or filing/shipping a
-feature -- the Issue itself (the authoritative record) is unaffected
-either way.
+prerequisite github_issues.py's Issues permission needed. Confirmed live:
+this only works for organization-owned repos -- GitHub rejects
+createProjectV2 for a personal (non-org) account's repos regardless of
+permissions granted, a platform limitation, not something fixable here.
+Every public function in this module fails soft either way: catches its
+own exceptions, logs, and returns None/no-ops rather than raising, so a
+Project provisioning hiccup or a missing permission never blocks filing
+or shipping a feature -- the Issue itself (the authoritative record) is
+unaffected.
 """
 
 from __future__ import annotations
@@ -32,7 +43,6 @@ import logging
 import httpx
 
 from agentra.connectors.github_app import GITHUB_API, get_installation_token, owner_repo_from_url
-from agentra.connectors import github_variables
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +54,6 @@ _STATUS_OPTIONS = [
     ("In Progress", "YELLOW"),
     ("Done", "GREEN"),
 ]
-
-_VAR_PROJECT_ID = "AGENTRA_PROJECT_ID"
-_VAR_PROJECT_NUMBER = "AGENTRA_PROJECT_NUMBER"
-_VAR_PROJECT_URL = "AGENTRA_PROJECT_URL"
-_VAR_STATUS_FIELD_ID = "AGENTRA_PROJECT_STATUS_FIELD_ID"
-_VAR_STATUS_OPTION_PREFIX = "AGENTRA_PROJECT_STATUS_OPTION_"
 
 
 class GitHubProjectsError(Exception):
@@ -181,65 +185,6 @@ def _find_status_field(repo_url: str, project_id: str) -> dict | None:
     return None
 
 
-def ensure_project(repo_url: str) -> dict | None:
-    """Idempotent: returns the cached {"project_id", "status_field_id",
-    "status_options": {"Todo": id, "In Progress": id, "Done": id}} from
-    GitHub Variables if this repo already has a Project, provisioning a
-    fresh one (with its single Status field) on first call otherwise.
-    None if the repo has no github.com remote, or provisioning failed for
-    any reason (logged, never raised) -- callers should treat that exactly
-    like "no Project yet" and keep going, never block on it."""
-    try:
-        existing = github_variables.list_variables(repo_url)
-    except Exception:
-        logger.error("ensure_project: GitHub Variables unavailable for %s", repo_url, exc_info=True)
-        return None
-
-    if existing.get(_VAR_PROJECT_ID) and existing.get(_VAR_STATUS_FIELD_ID):
-        status_options = {
-            name: existing[f"{_VAR_STATUS_OPTION_PREFIX}{name.upper().replace(' ', '_')}"]
-            for name, _ in _STATUS_OPTIONS
-            if f"{_VAR_STATUS_OPTION_PREFIX}{name.upper().replace(' ', '_')}" in existing
-        }
-        if status_options:
-            return {
-                "project_id": existing[_VAR_PROJECT_ID],
-                "status_field_id": existing[_VAR_STATUS_FIELD_ID],
-                "status_options": status_options,
-            }
-
-    try:
-        repository_id, owner_id = _repository_and_owner_ids(repo_url)
-        _, repo_name = _owner_repo_or_raise(repo_url)
-        project = _create_project(repo_url, owner_id, repository_id, title=f"{repo_name} Features")
-        field = _find_status_field(repo_url, project["id"]) or _create_status_field(repo_url, project["id"])
-
-        github_variables.set_variable(repo_url, _VAR_PROJECT_ID, project["id"])
-        github_variables.set_variable(repo_url, _VAR_PROJECT_NUMBER, str(project["number"]))
-        github_variables.set_variable(repo_url, _VAR_PROJECT_URL, project["url"])
-        github_variables.set_variable(repo_url, _VAR_STATUS_FIELD_ID, field["field_id"])
-        for name, option_id in field["options"].items():
-            github_variables.set_variable(repo_url, f"{_VAR_STATUS_OPTION_PREFIX}{name.upper().replace(' ', '_')}", option_id)
-
-        return {"project_id": project["id"], "status_field_id": field["field_id"], "status_options": field["options"]}
-    except Exception:
-        logger.error("ensure_project: failed to provision a Project for %s", repo_url, exc_info=True)
-        return None
-
-
-def get_project_url(repo_url: str) -> str | None:
-    """Read-only: the dashboard's "View Project board" link. Deliberately
-    does NOT provision a Project if one doesn't exist yet (unlike
-    ensure_project) -- this is called on every app-detail page load, and a
-    page view should never have the side effect of creating GitHub
-    infrastructure. None if there's no Project yet, no github.com remote,
-    or GitHub Variables are unreachable."""
-    try:
-        return github_variables.list_variables(repo_url).get(_VAR_PROJECT_URL)
-    except Exception:
-        return None
-
-
 def _issue_node_id(repo_url: str, issue_number: int) -> str | None:
     owner, name = _owner_repo_or_raise(repo_url)
     data = _graphql(
@@ -251,30 +196,120 @@ def _issue_node_id(repo_url: str, issue_number: int) -> str | None:
     return issue["id"] if issue else None
 
 
-def add_item_to_project(repo_url: str, issue_number: int, status: str = "Todo") -> None:
-    """Adds `issue_number` to this repo's Project (provisioning one via
-    ensure_project() first if needed) and sets its Status field -- called
-    right after memory.py creates or closes a feature-labeled Issue, so
-    "Todo" tracks record_feature_request and "Done" tracks record_shipped.
-    addProjectV2ItemById is idempotent on content (adding an already-added
-    issue again just returns the existing item), so this is also exactly
-    how a shipped feature's card gets moved to Done without agentra having
-    to remember its item id anywhere -- resolving it by issue number again
-    is cheap and stateless. Best-effort like everything else in this
-    module: never raises, so a Project sync failure never affects the
-    Issue itself."""
+def _existing_feature_project(repo_url: str, feature_issue_number: int) -> dict | None:
+    """A feature issue can only ever be the seed item of the one Project
+    created for it (ensure_feature_project always adds it there first) --
+    so its own projectItems is the live, authoritative answer to "does
+    this feature already have a board," no local bookkeeping required."""
+    owner, name = _owner_repo_or_raise(repo_url)
+    data = _graphql(
+        repo_url,
+        """
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            issue(number: $number) {
+              projectItems(first: 5) {
+                nodes {
+                  project {
+                    id
+                    url
+                    fields(first: 20) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """,
+        {"owner": owner, "name": name, "number": feature_issue_number},
+    )
+    issue = data["repository"]["issue"]
+    if issue is None:
+        return None
+    for item in issue["projectItems"]["nodes"]:
+        project = item["project"]
+        status_field = next(
+            (f for f in project["fields"]["nodes"] if f.get("name") == _STATUS_FIELD_NAME), None
+        )
+        if status_field is None:
+            continue
+        return {
+            "project_id": project["id"],
+            "url": project["url"],
+            "status_field_id": status_field["id"],
+            "status_options": {o["name"]: o["id"] for o in status_field["options"]},
+        }
+    return None
+
+
+def ensure_feature_project(repo_url: str, feature_issue_number: int, title: str) -> dict | None:
+    """Idempotent, no caching: returns feature_issue_number's existing
+    Project if it already has one (found via its own projectItems),
+    provisioning a fresh one -- titled `title` (the feature's own title,
+    not a generic per-repo name) -- otherwise. Does NOT add
+    feature_issue_number to a newly created project itself; callers do
+    that via add_item_to_feature_project the same way any other item gets
+    added, so there's exactly one code path for "put an item on this
+    feature's board" rather than two. None if the repo has no github.com
+    remote, or provisioning failed for any reason (logged, never raised)
+    -- callers should treat that exactly like "no Project yet"."""
     try:
-        project = ensure_project(repo_url)
+        existing = _existing_feature_project(repo_url, feature_issue_number)
+        if existing is not None:
+            return existing
+
+        repository_id, owner_id = _repository_and_owner_ids(repo_url)
+        project = _create_project(repo_url, owner_id, repository_id, title=title)
+        field = _find_status_field(repo_url, project["id"]) or _create_status_field(repo_url, project["id"])
+        return {
+            "project_id": project["id"],
+            "url": project["url"],
+            "status_field_id": field["field_id"],
+            "status_options": field["options"],
+        }
+    except Exception:
+        logger.error(
+            "ensure_feature_project: failed to provision a Project for issue #%s on %s",
+            feature_issue_number, repo_url, exc_info=True,
+        )
+        return None
+
+
+def add_item_to_feature_project(
+    repo_url: str,
+    feature_issue_number: int,
+    title: str,
+    issue_number: int | None = None,
+    status: str = "Todo",
+) -> None:
+    """Adds/moves an item onto feature_issue_number's Project (provisioning
+    it first via ensure_feature_project if needed) and sets its Status.
+    `issue_number` defaults to feature_issue_number itself (the feature's
+    own main issue); pass a different one to add/move one of its
+    sub-issues onto the same board instead. addProjectV2ItemById is
+    idempotent on content (adding an already-added issue again just
+    returns the existing item), so this is also how an item's card moves
+    to a new status without agentra having to remember its item id
+    anywhere -- resolving it by issue number again is cheap and stateless.
+    Best-effort like everything else in this module: never raises, so a
+    Project sync failure never affects the Issue itself."""
+    target_issue_number = feature_issue_number if issue_number is None else issue_number
+    try:
+        project = ensure_feature_project(repo_url, feature_issue_number, title)
         if project is None:
             return
         option_id = project["status_options"].get(status)
         if option_id is None:
-            logger.error("add_item_to_project: unknown status %r for %s", status, repo_url)
+            logger.error("add_item_to_feature_project: unknown status %r for %s", status, repo_url)
             return
 
-        content_id = _issue_node_id(repo_url, issue_number)
+        content_id = _issue_node_id(repo_url, target_issue_number)
         if content_id is None:
-            logger.error("add_item_to_project: issue #%s not found on %s", issue_number, repo_url)
+            logger.error("add_item_to_feature_project: issue #%s not found on %s", target_issue_number, repo_url)
             return
 
         data = _graphql(
@@ -307,4 +342,6 @@ def add_item_to_project(repo_url: str, issue_number: int, status: str = "Todo") 
             {"projectId": project["project_id"], "itemId": item_id, "fieldId": project["status_field_id"], "optionId": option_id},
         )
     except Exception:
-        logger.error("add_item_to_project: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+        logger.error(
+            "add_item_to_feature_project: failed for issue #%s on %s", target_issue_number, repo_url, exc_info=True
+        )

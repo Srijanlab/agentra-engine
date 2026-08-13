@@ -593,10 +593,11 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
 
-    # No eager Project provisioning here -- an app with no features yet
-    # doesn't need a board. ensure_project() runs lazily instead, the first
-    # time memory.py's record_feature_request/record_shipped actually adds
-    # an item to it (see github_projects.py's module docstring).
+    # No Project provisioning here at all -- a Project belongs to a feature,
+    # not an app (see github_projects.py's module docstring), so there's
+    # nothing app-level to create at onboarding. Each feature's own board
+    # gets provisioned lazily by memory.py's record_feature_request/
+    # record_shipped, the first time that feature has an item to add.
 
     push_warning = _apply_app_config(
         dest,
@@ -640,14 +641,10 @@ async def get_app(name: str) -> dict:
 
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
-    repo_url = info.get("repo_url")
-    from agentra.connectors import github_projects
-
-    project_url = github_projects.get_project_url(repo_url) if repo_url else None
     return {
         "name": name,
         "repo_path": str(repo),
-        "repo_url": repo_url,
+        "repo_url": info.get("repo_url"),
         "branch": info.get("branch"),
         "objective": mem.get_objective(),
         "shipped_count": len(mem.shipped_features()),
@@ -657,7 +654,6 @@ async def get_app(name: str) -> dict:
         "released": mem.released_features(),
         "bugs": mem.known_bugs(),
         "feature_queue": mem.feature_queue(),
-        "project_url": project_url,
         "vercel": env_config.vercel,
         "firebase": env_config.firebase,
         "ci_cd_on_push": env_config.ci_cd_on_push,

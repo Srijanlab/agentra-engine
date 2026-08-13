@@ -24,7 +24,7 @@ def _stub_project_sync(monkeypatch):
     # no-op here so these Issues-focused tests don't also need a fake
     # Project backend. test_github_projects.py covers github_projects.py
     # itself; a dedicated test below asserts this gets called correctly.
-    monkeypatch.setattr(github_projects, "add_item_to_project", lambda *a, **k: None)
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -159,17 +159,19 @@ def test_record_shipped_moves_the_project_card_to_done(tmp_path, monkeypatch):
     monkeypatch.setattr(github_issues, "close_issue", lambda *a, **k: None)
     project_calls = []
     monkeypatch.setattr(
-        github_projects, "add_item_to_project", lambda repo_url, issue_number, status="Todo": project_calls.append((issue_number, status))
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, status="Todo": project_calls.append((feature_issue_number, title, status)),
     )
 
     mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
 
-    assert project_calls == [(99, "Done")]
+    assert project_calls == [(99, "Dark mode", "Done")]
 
     project_calls.clear()
     mem.record_shipped("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
 
-    assert project_calls == [(42, "Done")]
+    assert project_calls == [(42, "Approvals queue UI", "Done")]
 
 
 def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
