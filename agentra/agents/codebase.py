@@ -21,6 +21,11 @@ Investigate:
 - Backend/data layer
 - Existing user-facing features
 - Test and build tooling already configured (so later agents know what to run)
+- Key design decisions and patterns actually visible in the code -- not \
+  guesses about intent, only what the code itself demonstrates (e.g. "auth \
+  is a hybrid: GitHub-authoritative when reachable, falls back to a local \
+  JSON mirror otherwise" or "git operations that must not silently fail are \
+  done deterministically in plain Python, never left to an LLM agent turn")
 
 End your response with a fenced ```json block shaped like:
 {
@@ -30,7 +35,8 @@ End your response with a fenced ```json block shaped like:
   "features": ["...", "..."],
   "test_commands": ["..."],
   "build_commands": ["..."],
-  "notes": "..."
+  "notes": "...",
+  "design_notes": "one paragraph (or a short bulleted list) of the concrete design decisions/patterns you actually found, not generic best-practice advice"
 }
 """
 
@@ -89,6 +95,14 @@ async def run_cached(repo: Path, mem: Memory) -> AgentResult:
     result = await run(repo)
     if result.ok:
         mem.write("architecture", "codebase", result.text)
+        design_notes = (result.json_data or {}).get("design_notes")
+        if design_notes:
+            # architecture/design.md: a live, agent-maintained snapshot of
+            # actual design decisions/patterns found in the code -- like
+            # codebase.md, overwritten fresh each real scan, not an
+            # accumulating log (see memory.py's append_documentation for
+            # the deliberately different, changelog-style file).
+            mem.write("architecture", "design", design_notes)
         new_head = _current_head_sha(repo)
         if new_head is not None:
             mem.set_codebase_spec_commit(new_head)

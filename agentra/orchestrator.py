@@ -127,7 +127,7 @@ async def run_cycle(
                 mem.clear_feature_request(top["id"], resolution_note)
 
         mem.log(run_id, "testing agent: starting (local)")
-        test = await testing.run_local(repo, cb.text)
+        test = await testing.run_local(repo, cb.text, mem)
         mem.log(run_id, f"testing agent (local): ok={test.ok} turns={test.turns} cost=${test.cost_usd:.4f}")
         test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
         if not test_passed:

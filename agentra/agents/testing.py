@@ -22,6 +22,7 @@ agent's prose report of it.
 from pathlib import Path
 
 from agentra.agents.base import AgentResult, run_agent
+from agentra.memory import Memory
 
 LOCAL_SYSTEM_PROMPT = """You are the Testing Agent in an autonomous product \
 engineering system, running in LOCAL mode. A feature was just implemented. \
@@ -92,12 +93,12 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-async def run_local(repo: Path, codebase_summary: str) -> AgentResult:
+async def run_local(repo: Path, codebase_summary: str, mem: Memory | None = None) -> AgentResult:
     prompt = f"""Codebase summary:
 {codebase_summary}
 
 Run the full local test/QA pass now, following your system prompt."""
-    return await run_agent(
+    result = await run_agent(
         prompt=prompt,
         system_prompt=LOCAL_SYSTEM_PROMPT,
         cwd=repo,
@@ -106,6 +107,20 @@ Run the full local test/QA pass now, following your system prompt."""
         max_turns=30,
         agent_label="Testing Agent",
     )
+    if mem is not None and result.ok and result.json_data:
+        # architecture/testing-notes.md: a live, agent-maintained snapshot
+        # of what test infra actually exists right now -- overwritten
+        # fresh each run, same freshness semantics as codebase.md, not an
+        # accumulating log.
+        data = result.json_data
+        lines = [
+            f"Lint: {data.get('lint_status', 'unknown')}",
+            f"Typecheck: {data.get('typecheck_status', 'unknown')}",
+        ]
+        if data.get("notes"):
+            lines.append(f"Notes: {data['notes']}")
+        mem.write("architecture", "testing-notes", "\n".join(lines))
+    return result
 
 
 def screenshot_path(repo: Path, run_id: str) -> Path:
