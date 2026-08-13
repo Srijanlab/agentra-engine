@@ -160,6 +160,52 @@ def create_sub_issue(
             sub_issue["number"], parent_issue_number, repo_url, exc_info=True,
         )
     return sub_issue
+
+
+def list_in_progress_features(repo_url: str, labels: list[str] | None = None) -> list[dict]:
+    """Open issues that already have at least one sub-issue -- a
+    multi-part feature the Orchestrator started splitting up but hasn't
+    yet signaled complete (memory.py's record_shipped only closes the
+    parent once more_parts_expected=False on a later sub_feature_of
+    call). A plain not-yet-started feature_queue entry has zero
+    sub-issues, so this and list_open_issues never overlap. Each entry
+    carries sub_issues_total/sub_issues_completed (GitHub's own
+    subIssuesSummary) so a caller can tell "half done" from "just
+    started" without a follow-up call per issue."""
+    owner, name = _owner_repo_or_raise(repo_url).split("/", 1)
+    data = _graphql(
+        repo_url,
+        """
+        query($owner: String!, $name: String!, $labels: [String!]) {
+          repository(owner: $owner, name: $name) {
+            issues(states: OPEN, first: 50, labels: $labels) {
+              nodes {
+                number
+                title
+                body
+                url
+                subIssuesSummary { total completed }
+              }
+            }
+          }
+        }
+        """,
+        {"owner": owner, "name": name, "labels": labels or None},
+    )
+    return [
+        {
+            "number": i["number"],
+            "title": i["title"],
+            "body": i.get("body"),
+            "html_url": i.get("url"),
+            "sub_issues_total": i["subIssuesSummary"]["total"],
+            "sub_issues_completed": i["subIssuesSummary"]["completed"],
+        }
+        for i in data["repository"]["issues"]["nodes"]
+        if i["subIssuesSummary"]["total"] > 0
+    ]
+
+
 def close_issue(
     repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
 ) -> None:

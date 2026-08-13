@@ -279,6 +279,19 @@ def ensure_feature_project(repo_url: str, feature_issue_number: int, title: str)
         return None
 
 
+def get_feature_project_url(repo_url: str, feature_issue_number: int) -> str | None:
+    """Read-only: does feature_issue_number already have a Project board?
+    Never provisions one as a side effect (unlike ensure_feature_project)
+    -- for the dashboard, which shouldn't create GitHub infrastructure
+    just by rendering a page. None if there's no board yet, no
+    github.com remote, or the lookup failed for any reason."""
+    try:
+        project = _existing_feature_project(repo_url, feature_issue_number)
+        return project["url"] if project else None
+    except Exception:
+        return None
+
+
 def add_item_to_feature_project(
     repo_url: str,
     feature_issue_number: int,

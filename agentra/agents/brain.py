@@ -245,29 +245,39 @@ def _tools_for(session: OrchestratorSession) -> list:
 
     @tool(
         "check_backlog",
-        "See what's already shipped (don't repeat it), what known bugs are pending "
-        "(a confirmed bug always outranks a nice-to-have feature), and what's in the "
-        "feature request queue (customer/admin submitted -- outranks your own ideation).",
+        "Cheap, direct data read -- no sub-agent call, always call this before "
+        "discover_opportunities. Priority order for what to work on next: (1) an "
+        "in-progress multi-part feature -- resume it (implement_feature with "
+        "sub_feature_of set to its id) before starting anything new, so it's never "
+        "silently abandoned; (2) a known bug -- always outranks a nice-to-have "
+        "feature; (3) the feature request queue -- customer/admin submitted, "
+        "outranks your own ideation; (4) only if all three are empty, call "
+        "discover_opportunities to ideate something new. Also shows what's already "
+        "shipped, so you don't repeat it.",
         {},
     )
     async def check_backlog(_args):
         if stop := session.check_hard_stop():
             return stop
         shipped = [f["feature"] for f in session.mem.shipped_features()]
+        in_progress = session.mem.in_progress_features()
         bugs = session.mem.known_bugs()
         queue = session.mem.feature_queue()
         text = (
-            f"Already shipped: {shipped or '(none)'}\n\n"
+            f"In-progress multi-part features (resume these first): {json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
             f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
-            f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}"
+            f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
+            f"Already shipped: {shipped or '(none)'}"
         )
         session.note("check_backlog", ok=True)
         return {"content": [{"type": "text", "text": text}]}
 
     @tool(
         "discover_opportunities",
-        "Ask the Product Discovery Agent for ranked feature opportunities from the "
-        "codebase, analytics, and backlog. Requires understand_codebase first.",
+        "Last resort: only call this once check_backlog shows no in-progress "
+        "feature, no known bug, and an empty feature queue. Asks the Product "
+        "Discovery Agent for ranked NEW feature opportunities from the codebase, "
+        "analytics, and backlog. Requires understand_codebase first.",
         {},
     )
     async def discover_opportunities(_args):
@@ -304,12 +314,25 @@ def _tools_for(session: OrchestratorSession) -> list:
         "If this brief comes from check_backlog's known bugs or feature queue (not your own "
         "idea), pass its id in resolves_id with the matching resolves_origin -- otherwise it "
         "never gets cleared and will keep resurfacing every future cycle. Leave both empty "
-        "strings for your own autonomous ideas. If a feature is too large for one call, split "
-        "it: the result of each call names an issue number ('issue #N') -- pass that number in "
-        "sub_feature_of on every following call for the same feature, so each part lands as a "
-        "linked sub-issue on the same board instead of a separate one. Leave sub_feature_of "
-        "empty for a single-call, self-contained feature (the common case).",
-        {"feature_brief": str, "resolves_origin": str, "resolves_id": str, "sub_feature_of": str},
+        "strings for your own autonomous ideas.\n"
+        "If a feature is too large for one call, split it across multiple implement_feature "
+        "calls: set more_parts_expected=true on every call except the last one for that "
+        "feature. On the FIRST call for a multi-part feature, leave sub_feature_of empty -- "
+        "a parent tracking issue is created (or, if resolves_id was set, that feature_queue "
+        "issue becomes the parent) and its id is given back to you in the result as 'issue "
+        "#N'. On every call AFTER the first for the same feature, pass that id in "
+        "sub_feature_of and leave resolves_id empty. The parent stays open, discoverable by "
+        "check_backlog, until the call where more_parts_expected=false -- that's what marks "
+        "the whole feature done, so always set it false on the final part.\n"
+        "Leave sub_feature_of empty and more_parts_expected false (the defaults) for a "
+        "single-call, self-contained feature -- the common case.",
+        {
+            "feature_brief": str,
+            "resolves_origin": str,
+            "resolves_id": str,
+            "sub_feature_of": str,
+            "more_parts_expected": bool,
+        },
     )
     async def implement_feature(args):
         if stop := session.check_hard_stop():
@@ -359,17 +382,19 @@ def _tools_for(session: OrchestratorSession) -> list:
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
         sub_feature_of = args.get("sub_feature_of") or ""
+        more_parts_expected = bool(args.get("more_parts_expected"))
         # record_shipped closes a GitHub 'enhancement' issue as the shipped record,
         # stamping run_id/commit_sha into it -- the originating feature_queue issue
-        # itself when this resolves one, a linked sub-issue of sub_feature_of's
-        # parent when this is one part of a larger feature, otherwise a fresh issue
-        # created and closed immediately.
-        issue_number = session.mem.record_shipped(
+        # itself when this resolves one, a linked sub-issue of a multi-part
+        # feature's (left-open-until-done) parent, or a fresh issue created and
+        # closed immediately for a single-call feature. See its own docstring.
+        shipped = session.mem.record_shipped(
             feature_name,
             commit_sha=commit_sha,
             run_id=session.run_id,
             resolves_id=resolves_id if resolves_origin == "feature_queue" else None,
             sub_feature_of=sub_feature_of or None,
+            more_parts_expected=more_parts_expected,
         )
         session.mem.append_documentation(
             f"Shipped **{feature_name}**"
@@ -382,20 +407,20 @@ def _tools_for(session: OrchestratorSession) -> list:
             )
             session.mem.clear_known_bug(resolves_id, resolution_note)
         session.current_feature = feature_name
-        # The parent id a follow-up sub_feature_of call should reference: the same
-        # parent this call itself was a part of, the feature_queue issue this
-        # resolved, or (a fresh top-level feature) the issue just created -- so a
-        # multi-part feature always accumulates under its first-ever issue number.
-        parent_for_next = sub_feature_of or (resolves_id if resolves_origin == "feature_queue" else "") or (
-            str(issue_number) if issue_number else ""
-        )
+
+        issue_number = shipped["issue_number"] if shipped else None
+        parent_issue_number = shipped["board_issue_number"] if shipped else None
+        issue_note = f" (issue #{issue_number})" if issue_number else ""
+        # more_parts_expected is the model's own stated intent for THIS call --
+        # trust it directly rather than re-deriving "is there more to do" from
+        # the args, so the hint always matches what the model actually asked for.
         next_part_hint = (
-            f" If more parts remain for this feature, call implement_feature again with "
-            f"sub_feature_of={parent_for_next!r}."
-            if parent_for_next
+            f" More parts expected -- call implement_feature again for the next part with "
+            f"sub_feature_of={str(parent_issue_number)!r} (and more_parts_expected=true "
+            f"unless that call is the last part)."
+            if more_parts_expected and parent_issue_number
             else ""
         )
-        issue_note = f" (issue #{issue_number})" if issue_number else ""
         return {
             "content": [
                 {
@@ -644,11 +669,18 @@ any circumstance, including via spawn_custom_agent.
 
 Use judgment, not a rigid script, but this is generally sound:
 1. Understand the codebase before deciding anything.
-2. Check the backlog — a known production bug always outranks a \
-   nice-to-have feature. If you implement something straight from check_backlog's \
-   output, pass its id/run_id through implement_feature's resolves_origin+resolves_id \
-   so it gets cleared — otherwise it resurfaces every future cycle even after you fix it.
-3. If no feature was suggested to you, discover opportunities and pick one.
+2. Check the backlog — this alone tells you what to work on next, in \
+   priority order: (a) an in-progress multi-part feature — resume it \
+   (implement_feature with sub_feature_of set to its id) before starting \
+   anything new, so it's never silently abandoned mid-way; (b) a known \
+   production bug — always outranks a nice-to-have feature; (c) the \
+   feature request queue — customer/admin submitted, outranks your own \
+   ideation. If you implement something straight from check_backlog's \
+   output, pass its id/run_id through implement_feature's \
+   resolves_origin+resolves_id so it gets cleared — otherwise it resurfaces \
+   every future cycle even after you fix it.
+3. Only if check_backlog shows none of the above (or a feature was \
+   explicitly suggested to you), discover opportunities and pick one.
 4. Implement it, then run_local_tests. deploy_pre_prod refuses if local \
    tests haven't passed since the last implementation — if that happens, \
    fix the underlying issue and re-test, don't just retry the deploy.

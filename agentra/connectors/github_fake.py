@@ -120,6 +120,28 @@ class FakeGitHubBackend:
         results.sort(key=lambda i: i.get("closed_at") or "", reverse=True)
         return [dict(i) for i in results[:limit]]
 
+    def list_in_progress_features(self, repo_url: str, labels: list[str] | None = None) -> list[dict]:
+        results = [
+            i for i in self.issues[repo_url].values() if i["state"] == "open" and i.get("sub_issue_numbers")
+        ]
+        if labels:
+            results = [i for i in results if any(label in i["labels"] for label in labels)]
+        return [
+            {
+                "number": i["number"],
+                "title": i["title"],
+                "body": i.get("body"),
+                "html_url": i.get("html_url"),
+                "sub_issues_total": len(i["sub_issue_numbers"]),
+                "sub_issues_completed": sum(
+                    1
+                    for n in i["sub_issue_numbers"]
+                    if self.issues[repo_url].get(n, {}).get("state") == "closed"
+                ),
+            }
+            for i in results
+        ]
+
     def close_issue(
         self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
     ) -> None:
@@ -165,6 +187,10 @@ class FakeGitHubBackend:
         self.projects[key]["items"][str(target_issue_number)] = status
         self._save()
 
+    def get_feature_project_url(self, repo_url: str, feature_issue_number: int) -> str | None:
+        project = self.projects.get(f"{repo_url}#{feature_issue_number}")
+        return project["url"] if project else None
+
 
 def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_path: Path | None = None) -> FakeGitHubBackend:
     """Patches the github_issues/github_variables modules in place with
@@ -189,11 +215,13 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "get_issue", backend.get_issue),
         (github_issues, "list_open_issues", backend.list_open_issues),
         (github_issues, "list_closed_issues", backend.list_closed_issues),
+        (github_issues, "list_in_progress_features", backend.list_in_progress_features),
         (github_issues, "close_issue", backend.close_issue),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
         (github_projects, "ensure_feature_project", backend.ensure_feature_project),
         (github_projects, "add_item_to_feature_project", backend.add_item_to_feature_project),
+        (github_projects, "get_feature_project_url", backend.get_feature_project_url),
     ]
     for module, attr, fn in patches:
         if monkeypatch is not None:

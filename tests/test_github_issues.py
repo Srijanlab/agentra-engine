@@ -155,6 +155,57 @@ def test_close_issue_rejects_non_github_url():
         github_issues.close_issue("git@gitlab.com:acme/app.git", 1)
 
 
+def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, variables=json["variables"])
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = None
+        resp.json.return_value = {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "title": "Big feature",
+                                "body": "Tracks a multi-part feature.",
+                                "url": "https://github.com/acme/app/issues/10",
+                                "subIssuesSummary": {"total": 3, "completed": 1},
+                            },
+                            {
+                                "number": 11,
+                                "title": "Not yet started",
+                                "body": None,
+                                "url": "https://github.com/acme/app/issues/11",
+                                "subIssuesSummary": {"total": 0, "completed": 0},
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+        return resp
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    result = github_issues.list_in_progress_features("https://github.com/acme/app.git", labels=["enhancement"])
+
+    assert captured["url"] == "https://api.github.com/graphql"
+    assert captured["variables"] == {"owner": "acme", "name": "app", "labels": ["enhancement"]}
+    assert result == [
+        {
+            "number": 10,
+            "title": "Big feature",
+            "body": "Tracks a multi-part feature.",
+            "html_url": "https://github.com/acme/app/issues/10",
+            "sub_issues_total": 3,
+            "sub_issues_completed": 1,
+        }
+    ]
+
+
 def test_create_sub_issue_creates_and_links_under_parent(monkeypatch):
     posts = []
 

@@ -325,31 +325,36 @@ class Memory:
         run_id: str | None = None,
         resolves_id: str | None = None,
         sub_feature_of: str | None = None,
-    ) -> int | None:
-        """Records a shipped feature as a closed GitHub 'enhancement' issue --
-        the same ledger feature_queue() reads (open) and shipped_features()
-        reads (closed), so "pending" vs. "shipped" is just an issue's state,
-        never two things to keep in sync.
+        more_parts_expected: bool = False,
+    ) -> dict | None:
+        """Records a shipped feature (or one part of one) as a closed
+        GitHub 'enhancement' issue -- the same ledger feature_queue() reads
+        (open) and shipped_features() reads (closed), so "pending" vs.
+        "shipped" is just an issue's state, never two things to keep in
+        sync.
 
-        Exactly one of resolves_id/sub_feature_of should be set, or neither:
-        - resolves_id: the feature_queue issue this feature came from --
-          that issue is closed as the shipped record itself.
-        - sub_feature_of: a parent issue this is one PART of a larger
-          feature being built across multiple implement_feature calls
-          (agents/brain.py) -- a fresh issue is created and closed, but
-          linked as a GitHub-native sub-issue of the parent (see
-          github_issues.create_sub_issue) and added to the PARENT's
-          Project board rather than getting a board of its own.
-        - neither: a self-contained, self-initiated feature -- a fresh
-          issue is opened and closed immediately, same as sub_feature_of
-          but with no parent.
+        - sub_feature_of set: this part continues a multi-part feature
+          already started (its parent issue number). A new sub-issue is
+          created and closed for THIS part; the parent itself only closes
+          too once more_parts_expected=False signals the whole feature is
+          now done -- until then it stays open, discoverable via
+          in_progress_features() so a later cycle resumes it instead of
+          abandoning it.
+        - sub_feature_of unset, more_parts_expected=True: starts a new
+          multi-part feature. If resolves_id names a feature_queue issue,
+          THAT issue becomes the (left-open) parent; otherwise a fresh
+          parent issue is created and left open. Either way this call's
+          own part becomes the parent's first sub-issue, closed as usual.
+        - Neither set: today's simple, single-call feature. resolves_id
+          (a feature_queue issue) is closed directly as the shipped
+          record; with no resolves_id, a fresh issue is opened and closed
+          immediately. Unchanged from before multi-part features existed.
 
-        Returns the shipped feature's own issue number (whichever of the
-        three paths above produced it), or None if recording failed --
-        callers that support multi-part features surface this back to the
-        caller so a follow-up call can reference it as sub_feature_of for
-        the next part. Every shipped feature ends up with exactly one
-        audit-trail issue either way."""
+        Returns {"issue_number": N, "board_issue_number": M} on success --
+        M is this call's own issue except for the sub_feature_of/
+        more_parts_expected paths, where it's the parent's number (the one
+        to reference on a following call, and the one the Project board is
+        anchored to). None if recording failed."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_shipped: %s has no github.com remote -- shipped feature %r was NOT recorded anywhere", self.repo, feature)
@@ -366,14 +371,39 @@ class Memory:
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                if not more_parts_expected:
+                    github_issues.close_issue(
+                        repo_url, parent_number, comment=f"All parts shipped (run {run_id})." if run_id else "All parts shipped."
+                    )
                 board_issue_number = parent_number
                 parent = github_issues.get_issue(repo_url, parent_number)
                 board_title = parent["title"] if parent else feature
+
+            elif more_parts_expected:
+                if resolves_id and resolves_id.isdigit():
+                    parent_number = int(resolves_id)  # the feature_queue issue itself becomes the parent, left open
+                else:
+                    parent_issue = github_issues.create_issue(
+                        repo_url,
+                        feature,
+                        "Tracks a multi-part feature; stays open until every part has shipped.",
+                        labels=[_FEATURE_LABEL],
+                    )
+                    parent_number = parent_issue["number"]
+                issue = github_issues.create_sub_issue(
+                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL]
+                )
+                issue_number = issue["number"]
+                github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                board_issue_number = parent_number
+                board_title = feature
+
             elif resolves_id and resolves_id.isdigit():
                 issue_number = int(resolves_id)
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 board_issue_number = issue_number
                 board_title = feature
+
             else:
                 issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL])
                 issue_number = issue["number"]
@@ -390,10 +420,10 @@ class Memory:
             repo_url,
             board_issue_number,
             title=board_title,
-            issue_number=issue_number if sub_feature_of else None,
+            issue_number=issue_number if board_issue_number != issue_number else None,
             status="Done",
         )
-        return issue_number
+        return {"issue_number": issue_number, "board_issue_number": board_issue_number}
 
     def released_features(self) -> list[dict]:
         """Each entry: {feature, commit_sha, ts, release_run_id} -- the
@@ -532,6 +562,37 @@ class Memory:
             return [_github_feature_to_dict(i) for i in issues]
         except Exception:
             logger.error("feature_queue: GitHub Issues unavailable for %s -- feature backlog is unreadable until it recovers", repo_url, exc_info=True)
+            return []
+
+    def in_progress_features(self) -> list[dict]:
+        """Open 'enhancement' issues that already have at least one
+        sub-issue -- a multi-part feature record_shipped started (via
+        sub_feature_of/more_parts_expected) but hasn't yet signaled
+        complete. A plain not-yet-started feature_queue entry has zero
+        sub-issues, so this and feature_queue() describe different things
+        even though both can include the same open issue -- check_backlog
+        surfaces this first so a new cycle resumes unfinished work instead
+        of abandoning it to start something else."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("in_progress_features: %s has no github.com remote -- no in-progress features are visible", self.repo)
+            return []
+        try:
+            from agentra.connectors import github_issues
+
+            issues = github_issues.list_in_progress_features(repo_url, labels=[_FEATURE_LABEL])
+            return [
+                {
+                    "description": i["title"],
+                    "external_id": str(i["number"]),
+                    "sub_issues_total": i["sub_issues_total"],
+                    "sub_issues_completed": i["sub_issues_completed"],
+                    "html_url": i.get("html_url"),
+                }
+                for i in issues
+            ]
+        except Exception:
+            logger.error("in_progress_features: GitHub Issues unavailable for %s", repo_url, exc_info=True)
             return []
 
     def record_feature_request(

@@ -128,7 +128,7 @@ def test_record_shipped_creates_and_closes_a_fresh_issue_for_a_self_initiated_fe
     assert "abc1234" in closed["comment"]
     assert "Shipped-Run-ID: run42" in closed["body_suffix"]
     assert "Shipped-Commit: abc1234" in closed["body_suffix"]
-    assert result == 99
+    assert result == {"issue_number": 99, "board_issue_number": 99}
 
 
 def test_record_shipped_closes_the_originating_feature_queue_issue_instead_of_creating_a_new_one(tmp_path, monkeypatch):
@@ -151,7 +151,7 @@ def test_record_shipped_closes_the_originating_feature_queue_issue_instead_of_cr
 
     assert closed["issue_number"] == 42
     assert "Shipped-Run-ID: run7" in closed["body_suffix"]
-    assert result == 42
+    assert result == {"issue_number": 42, "board_issue_number": 42}
 
 
 def test_record_shipped_moves_the_project_card_to_done(tmp_path, monkeypatch):
@@ -207,7 +207,7 @@ def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path,
     # Lands on the PARENT's board (feature_issue_number=10, the parent's own
     # title), as an additional item (issue_number=55), not a board of its own.
     assert project_calls == [(10, "Big feature", 55, "Done")]
-    assert result == 55
+    assert result == {"issue_number": 55, "board_issue_number": 10}
 
 
 def test_record_shipped_with_sub_feature_of_falls_back_to_the_feature_name_when_parent_lookup_fails(tmp_path, monkeypatch):
@@ -230,6 +230,91 @@ def test_record_shipped_with_sub_feature_of_falls_back_to_the_feature_name_when_
     mem.record_shipped("Part two", sub_feature_of="10")
 
     assert project_calls == [(10, "Part two", 55, "Done")]
+
+
+def test_record_shipped_sub_feature_of_with_more_parts_expected_leaves_the_parent_open(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(github_issues, "create_sub_issue", lambda *a, **k: {"number": 55, "title": "Part two"})
+    monkeypatch.setattr(github_issues, "get_issue", lambda repo_url, issue_number: {"title": "Big feature"})
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+
+    mem.record_shipped("Part two", sub_feature_of="10", more_parts_expected=True)
+
+    assert closed == [55]  # only the sub-issue -- the parent (#10) stays open
+
+
+def test_record_shipped_sub_feature_of_without_more_parts_closes_the_parent_too(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(github_issues, "create_sub_issue", lambda *a, **k: {"number": 55, "title": "Final part"})
+    monkeypatch.setattr(github_issues, "get_issue", lambda repo_url, issue_number: {"title": "Big feature"})
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+
+    mem.record_shipped("Final part", run_id="run9", sub_feature_of="10", more_parts_expected=False)
+
+    # Sub-issue closed first, then the parent -- marking the whole feature done.
+    assert closed == [55, 10]
+
+
+def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    created_issues = []
+    monkeypatch.setattr(
+        github_issues,
+        "create_issue",
+        lambda repo_url, title, body, labels=None: created_issues.append(title) or {"number": 20, "title": title},
+    )
+    monkeypatch.setattr(github_issues, "create_sub_issue", lambda repo_url, parent, title, body, labels=None: {"number": 21, "title": title})
+    project_calls = []
+    monkeypatch.setattr(
+        github_projects,
+        "add_item_to_feature_project",
+        lambda repo_url, feature_issue_number, title, issue_number=None, status="Todo": project_calls.append(
+            (feature_issue_number, issue_number)
+        ),
+    )
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+
+    result = mem.record_shipped("Big new feature", run_id="run1", more_parts_expected=True)
+
+    assert created_issues == ["Big new feature"]  # the fresh parent, never closed
+    assert closed == [21]  # only the first part's sub-issue
+    assert project_calls == [(20, 21)]
+    assert result == {"issue_number": 21, "board_issue_number": 20}
+
+
+def test_record_shipped_starts_a_multi_part_feature_using_the_feature_queue_issue_as_parent(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reuse the feature_queue issue"))
+    )
+    sub_issue_calls = {}
+    monkeypatch.setattr(
+        github_issues,
+        "create_sub_issue",
+        lambda repo_url, parent, title, body, labels=None: sub_issue_calls.update(parent=parent) or {"number": 21, "title": title},
+    )
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+
+    result = mem.record_shipped("Big backlog feature", run_id="run1", resolves_id="7", more_parts_expected=True)
+
+    assert sub_issue_calls == {"parent": 7}
+    assert closed == [21]  # the sub-issue only -- issue #7 (the feature_queue entry) stays open
+    assert result == {"issue_number": 21, "board_issue_number": 7}
 
 
 def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):

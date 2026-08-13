@@ -225,3 +225,22 @@ def test_run_logs_endpoint_streams_existing_lines(tmp_path, monkeypatch):
     assert "implementation agent: starting" in response.text
     assert "testing agent: ok=True" in response.text
     assert "event: done" in response.text
+
+
+def test_get_app_surfaces_in_progress_multi_part_features(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    mem = Memory(repo)
+
+    mem.record_shipped("Big feature", run_id="run1", more_parts_expected=True)
+
+    response = TestClient(server.app).get("/apps/myapp")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["in_progress_features"]) == 1
+    entry = body["in_progress_features"][0]
+    assert entry["description"] == "Big feature"
+    assert entry["sub_issues_total"] == 1
+    assert entry["sub_issues_completed"] == 1
+    assert entry["project_url"] is not None

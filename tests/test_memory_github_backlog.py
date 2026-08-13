@@ -212,6 +212,47 @@ def test_feature_queue_returns_empty_without_a_github_remote(tmp_path):
     assert mem.feature_queue() == []
 
 
+def test_in_progress_features_reads_from_github(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    captured = {}
+
+    def fake_list(repo_url, labels=None):
+        captured["labels"] = labels
+        return [
+            {
+                "number": 10,
+                "title": "Big feature",
+                "body": "Tracks a multi-part feature.",
+                "html_url": "https://github.com/acme/app/issues/10",
+                "sub_issues_total": 3,
+                "sub_issues_completed": 1,
+            }
+        ]
+
+    monkeypatch.setattr(github_issues, "list_in_progress_features", fake_list)
+
+    result = mem.in_progress_features()
+
+    assert captured["labels"] == ["enhancement"]
+    assert result == [
+        {
+            "description": "Big feature",
+            "external_id": "10",
+            "sub_issues_total": 3,
+            "sub_issues_completed": 1,
+            "html_url": "https://github.com/acme/app/issues/10",
+        }
+    ]
+
+
+def test_in_progress_features_returns_empty_without_a_github_remote(tmp_path):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+
+    assert mem.in_progress_features() == []
+
+
 def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)

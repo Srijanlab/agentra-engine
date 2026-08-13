@@ -641,10 +641,22 @@ async def get_app(name: str) -> dict:
 
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
+
+    # A per-feature Project board only exists once a feature's been split into
+    # parts (see github_projects.py) -- read-only lookup, one per in-progress
+    # entry, never provisions a board just because this page got loaded.
+    repo_url = info.get("repo_url")
+    in_progress = mem.in_progress_features()
+    if repo_url and in_progress:
+        from agentra.connectors import github_projects
+
+        for entry in in_progress:
+            entry["project_url"] = github_projects.get_feature_project_url(repo_url, int(entry["external_id"]))
+
     return {
         "name": name,
         "repo_path": str(repo),
-        "repo_url": info.get("repo_url"),
+        "repo_url": repo_url,
         "branch": info.get("branch"),
         "objective": mem.get_objective(),
         "shipped_count": len(mem.shipped_features()),
@@ -654,6 +666,7 @@ async def get_app(name: str) -> dict:
         "released": mem.released_features(),
         "bugs": mem.known_bugs(),
         "feature_queue": mem.feature_queue(),
+        "in_progress_features": in_progress,
         "vercel": env_config.vercel,
         "firebase": env_config.firebase,
         "ci_cd_on_push": env_config.ci_cd_on_push,
