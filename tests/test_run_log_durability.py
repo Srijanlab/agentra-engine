@@ -7,6 +7,7 @@ mirrors each line into Firestore's run_logs collection, and server.py's
 stream_run_logs falls back to that mirror when the local file is missing.
 """
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from agentra import registry, server
 from agentra.memory import Memory
+from agentra.server import _strip_log_timestamp
 
 
 def test_log_mirrors_to_firestore_when_configured(tmp_path, monkeypatch):
@@ -60,6 +62,21 @@ def test_log_skips_firestore_when_not_configured(tmp_path, monkeypatch):
     assert path.exists()
 
 
+def test_strip_log_timestamp_removes_a_real_iso_timestamp_prefix():
+    # Memory.log()'s actual on-disk format: "[<iso ts>] [Agent Label] rest" --
+    # the outer timestamp bracket must go so logLineParser.ts's LABEL_RE (which
+    # matches the FIRST bracketed group as the agent tag) sees "[Agent Label]",
+    # not the timestamp.
+    raw = "[2026-08-13T17:03:05.183079+00:00] [Orchestrator] assistant text: hello"
+    assert _strip_log_timestamp(raw) == "[Orchestrator] assistant text: hello"
+
+
+def test_strip_log_timestamp_leaves_a_non_timestamp_line_unchanged():
+    assert _strip_log_timestamp("[Orchestrator] assistant text: hello") == "[Orchestrator] assistant text: hello"
+    assert _strip_log_timestamp("no brackets at all") == "no brackets at all"
+    assert _strip_log_timestamp("[t1] cycle start") == "[t1] cycle start"
+
+
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
@@ -101,3 +118,31 @@ def test_stream_run_logs_falls_back_to_firestore_when_local_file_missing(tmp_pat
     assert "cycle start" in body
     assert "cycle complete" in body
     assert "event: done" in body
+
+
+def test_stream_run_logs_strips_the_timestamp_from_a_locally_tailed_line(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    monkeypatch.setattr(registry, "_db", None)
+
+    repo = tmp_path / "myapp"
+    repo.mkdir()
+    Memory(repo).set_objective("Ship things.")
+    registry.register_app("myapp", str(repo), repo_url="https://github.com/acme/myapp.git", branch="main")
+    registry.record_run(
+        "run456", app="myapp", source="on-demand", status="completed",
+        started_at=0, objective="Ship things.", loop_id="loop1",
+    )
+    mem = Memory(repo)
+    mem.log("run456", "[Orchestrator] assistant text: hello")
+
+    client = TestClient(server.app)
+    with client.stream("GET", "/runs/run456/logs") as response:
+        body = "".join(response.iter_text())
+
+    # The real bug: without stripping, this line would stream as
+    # "[<iso-timestamp>] [Orchestrator] assistant text: hello" -- the
+    # frontend's agent-tag matcher (logLineParser.ts's LABEL_RE) would then
+    # pick up the timestamp as the "agent" instead of "Orchestrator", and
+    # the line would fail to match any known pattern and render as noise.
+    assert '"line": "[Orchestrator] assistant text: hello"' in body
+    assert not re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", body)  # no leftover ISO timestamp anywhere in the payload

@@ -173,6 +173,34 @@ def _run_log_path(run_key: str) -> Path | None:
     return Memory(repo).log_root / f"{run_key}.log"
 
 
+def _strip_log_timestamp(raw_line: str) -> str:
+    """Memory.log() always writes "[<iso timestamp>] <content>" -- the
+    audit-trail format recent_log_lines() itself parses that leading
+    timestamp back out of, so it can't change. The live SSE stream below
+    is a different consumer with a different need: logLineParser.ts's
+    LABEL_RE matches the FIRST bracketed group as the agent tag (its own
+    docstring says the wire format is "[Agent Label] ..."), and content
+    written via log_claude_message already carries that as a second,
+    inner bracket (mem.log(run_id, f"[Orchestrator] {line}")) -- so
+    without stripping the timestamp here first, the frontend parser
+    matches the timestamp as "agent" instead, and every real line falls
+    through its pattern matching into "noise" (confirmed live: a run's
+    Live Log panel stuck on "waiting for the first line worth showing"
+    for its entire duration, with the current-agent pill showing a raw
+    timestamp string). Falls back to the raw line unchanged if it isn't
+    actually timestamp-prefixed (older/malformed lines)."""
+    if not raw_line.startswith("["):
+        return raw_line
+    ts_str, sep, rest = raw_line[1:].partition("] ")
+    if not sep:
+        return raw_line
+    try:
+        dt.datetime.fromisoformat(ts_str)
+    except ValueError:
+        return raw_line
+    return rest
+
+
 def _run_screenshot_path(run_key: str) -> Path | None:
     run = _active_runs.get(run_key) or registry.get_run(run_key)
     if run is None:
@@ -262,7 +290,7 @@ async def stream_run_logs(run_key: str) -> StreamingResponse:
                 doc = db.collection("run_logs").document(run_key).get()
                 if doc.exists:
                     for line in doc.to_dict().get("lines", []):
-                        yield f"data: {json.dumps({'line': line})}\n\n"
+                        yield f"data: {json.dumps({'line': _strip_log_timestamp(line)})}\n\n"
                     yield "event: done\ndata: {}\n\n"
                     return
 
@@ -272,7 +300,7 @@ async def stream_run_logs(run_key: str) -> StreamingResponse:
             if log_path.exists():
                 lines = log_path.read_text().splitlines()
                 for line in lines[offset:]:
-                    yield f"data: {json.dumps({'line': line})}\n\n"
+                    yield f"data: {json.dumps({'line': _strip_log_timestamp(line)})}\n\n"
                 offset = len(lines)
             current = _active_runs.get(run_key) or registry.get_run(run_key)
             terminal = current is not None and current.get("status") in {"completed", "failed"}
