@@ -367,19 +367,23 @@ class Memory:
         )
         self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
 
-    def clear_known_bug(self, id_: str) -> None:
+    def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
         # Match on either run_id or external_id -- a bug entry can carry both (this repo's
         # own known_bugs.json has both for a human-sourced entry), and an LLM resolving it
         # from check_backlog's raw JSON dump has no way to know which one is "the" id without
         # this being lenient. Confirmed live: an autonomous cycle passed external_id while
         # this only matched run_id, so the clear silently no-op'd and the bug never left the
         # backlog despite the agent believing it had resolved it.
+        #
+        # resolution_note: what actually shipped to fix this (feature name + commit) --
+        # callers that know it should pass it, so the closed GitHub issue itself carries
+        # a real "shipped" record instead of a content-free "Resolved by agentra."
         repo_url = self._repo_url()
         if repo_url and id_.isdigit():
             try:
                 from agentra.connectors import github_issues
 
-                github_issues.close_issue(repo_url, int(id_), comment="Resolved by agentra.")
+                github_issues.close_issue(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
             except Exception:
                 logger.warning("clear_known_bug: failed to close GitHub issue #%s on %s", id_, repo_url, exc_info=True)
 
@@ -429,13 +433,13 @@ class Memory:
         queue.append({"description": description, "source": source, "external_id": external_id})
         self.feature_queue_path.write_text(json.dumps(queue, indent=2))
 
-    def clear_feature_request(self, external_id: str) -> None:
+    def clear_feature_request(self, external_id: str, resolution_note: str | None = None) -> None:
         repo_url = self._repo_url()
         if repo_url and external_id.isdigit():
             try:
                 from agentra.connectors import github_issues
 
-                github_issues.close_issue(repo_url, int(external_id), comment="Resolved by agentra.")
+                github_issues.close_issue(repo_url, int(external_id), comment=resolution_note or "Resolved by agentra.")
             except Exception:
                 logger.warning("clear_feature_request: failed to close GitHub issue #%s on %s", external_id, repo_url, exc_info=True)
 
@@ -649,3 +653,25 @@ class Memory:
             "ts": dt.datetime.now(dt.timezone.utc).isoformat()
         })
         self.work_updates_path.write_text(json.dumps(updates, indent=2))
+
+    def append_documentation(self, entry: str) -> None:
+        """Appends one dated line to architecture/documentation.md's
+        running changelog, instead of overwriting the whole file the way
+        write() does -- the top of documentation.md is a static
+        architecture description (human-edited via the dashboard's Edit
+        App modal), the changelog lives below it as its own section so
+        recording a shipped feature here never clobbers that description.
+
+        Deliberately separate from record_work_update: that's a
+        structured per-agent ledger the dashboard's "Latest Work Done"
+        card reads (JSON, one entry replaces nothing, all history kept)
+        -- this is the human-readable prose trail of what actually
+        shipped, meant to accumulate as living documentation rather than
+        an array nobody browses as JSON."""
+        existing = self.read("architecture", "documentation") or ""
+        marker = "## Changelog"
+        if marker not in existing:
+            existing = existing.rstrip() + f"\n\n{marker}\n" if existing else f"{marker}\n"
+        date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        updated = existing.rstrip() + f"\n- {date_str}: {entry}\n"
+        self.write("architecture", "documentation", updated)

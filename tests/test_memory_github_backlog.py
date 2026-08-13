@@ -170,6 +170,23 @@ def test_clear_known_bug_closes_the_github_issue(tmp_path, monkeypatch):
     assert mem._local_known_bugs() == []
 
 
+def test_clear_known_bug_passes_through_a_custom_resolution_note(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    mem.known_bugs_path.write_text(
+        '[{"run_id": "r1", "severity": "high", "diagnosis": "x", "proposed_fix": "y", "source": "github", "external_id": "42"}]'
+    )
+    closed = {}
+
+    monkeypatch.setattr(
+        github_issues, "close_issue", lambda repo_url, issue_number, comment=None: closed.update(comment=comment)
+    )
+
+    mem.clear_known_bug("42", "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)")
+
+    assert closed["comment"] == "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)"
+
+
 def test_clear_known_bug_with_non_numeric_id_does_not_call_github(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)

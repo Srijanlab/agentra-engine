@@ -118,13 +118,15 @@ async def run_cycle(
             mem.write("failures", f"{run_id}-implementation", impl.text)
             return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
         mem.record_shipped(feature)
+        mem.append_documentation(f"Shipped **{feature}**: {feature_brief[:300]}")
         # Clear the originating backlog entry so it doesn't keep resurfacing every cycle --
         # only known_bug/feature_queue-origin opportunities carry an id (see discovery.py).
         if top and top.get("id"):
+            resolution_note = f"Resolved by agentra: shipped as {feature!r}"
             if top.get("origin") == "known_bug":
-                mem.clear_known_bug(top["id"])
+                mem.clear_known_bug(top["id"], resolution_note)
             elif top.get("origin") == "feature_queue":
-                mem.clear_feature_request(top["id"])
+                mem.clear_feature_request(top["id"], resolution_note)
 
         mem.log(run_id, "testing agent: starting (local)")
         test = await testing.run_local(repo, cb.text)

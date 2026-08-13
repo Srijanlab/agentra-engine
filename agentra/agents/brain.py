@@ -364,13 +364,21 @@ def _tools_for(session: OrchestratorSession) -> list:
         # requiring every agent prompt to be rewritten to emit a
         # work_update field.
         session.mem.record_work_update("implementation", f"Implemented: {feature_name}")
+        session.mem.append_documentation(
+            f"Shipped **{feature_name}**"
+            + (f" (commit `{commit_sha[:7]}`)" if commit_sha else "")
+            + f": {brief[:300]}"
+        )
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
         if resolves_id:
+            resolution_note = f"Resolved by agentra: shipped as {feature_name!r}" + (
+                f" (commit {commit_sha})" if commit_sha else ""
+            )
             if resolves_origin == "known_bug":
-                session.mem.clear_known_bug(resolves_id)
+                session.mem.clear_known_bug(resolves_id, resolution_note)
             elif resolves_origin == "feature_queue":
-                session.mem.clear_feature_request(resolves_id)
+                session.mem.clear_feature_request(resolves_id, resolution_note)
         session.current_feature = feature_name
         return {
             "content": [
