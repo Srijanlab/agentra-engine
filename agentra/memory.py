@@ -1,14 +1,25 @@
 """Persistent memory store, scoped to the target repo being improved.
 
-Mirrors the layout from vision.md section 9: architecture, decisions,
-features, metrics, failures. Lives at <repo>/.agentra/memory/ so it travels
-with the repo and accumulates across runs.
+vision.md section 9 originally laid this out as five categories
+(architecture, decisions, features, metrics, failures) under
+<repo>/.agentra/memory/, each a write-only per-run ledger. Four of those
+five turned out to have zero readers anywhere in the codebase (confirmed
+live) and were retired: decisions/features/metrics were pure duplication
+of documentation.md's changelog and git commit history; failures/*.md was
+replaced by record_failure()'s actual triage policy (a permanent failure
+becomes a GitHub issue, a transient one is just logged) instead of an
+archive nothing ever consulted. architecture/ is what's left, and it's
+different in kind from the other four: not a per-run log at all, but a
+handful of named, live-maintained "steering files" (codebase.md,
+design.md, testing-notes.md, documentation.md) that each get overwritten
+fresh by whichever agent is responsible for that fact, or read by every
+downstream agent as shared context.
 
 App-agnostic by design: everything here is plain JSON/YAML files agentra
 owns and reads/writes itself, or -- for known_bugs/feature_queue/objective/
 environments -- GitHub Issues/Actions Variables directly, with no local
-mirror at all (repos.py's _repo_url() requires a github.com remote; there
-is deliberately no local-file fallback if GitHub is unreachable or
+mirror at all (this module's own _repo_url() requires a github.com remote;
+there is deliberately no local-file fallback if GitHub is unreachable or
 unconfigured, a known availability tradeoff -- see known_bugs()'s own
 docstring). Getting real data INTO the backlog (customer feedback from
 whatever database a given app uses) is the job of a per-app adapter command
@@ -22,9 +33,8 @@ On first use, Memory writes a .agentra/.gitignore into the target repo so that:
 
   Committed (audit trail, config)       Not committed (noisy per-run data)
   ──────────────────────────────────    ────────────────────────────────────
-  memory/  (architecture, decisions,    logs/  (verbose timestamped traces)
-           features, metrics, failures) test_artifacts/ (pre-prod screenshots)
-  shipped.json
+  memory/architecture/                  logs/  (verbose timestamped traces)
+  shipped.json                          test_artifacts/ (pre-prod screenshots)
   released.json
   feedback_sync_state.json
   codebase_spec_commit.json
@@ -32,7 +42,10 @@ On first use, Memory writes a .agentra/.gitignore into the target repo so that:
 This means the memory system travels with the repo across clones, CI runners,
 and contributors, while run logs stay local. known_bugs.json/feature_queue.json/
 objective.yaml/environments.yaml no longer exist as local files at all --
-GitHub Issues/Variables are their only home now.
+GitHub Issues/Variables are their only home now. Agent chat history, the live
+standup channel, and session continuity moved out entirely too -- see
+chat_store.py -- they were never a fit for a customer's own git history in
+the first place.
 """
 
 import datetime as dt
@@ -44,7 +57,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-CATEGORIES = ("architecture", "decisions", "features", "metrics", "failures")
+CATEGORIES = ("architecture",)
 
 _SAFETY_DETAIL_LIMIT = 200
 
@@ -179,7 +192,6 @@ class Memory:
         self.released_path = self.root / "released.json"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
         self.codebase_spec_commit_path = self.root / "codebase_spec_commit.json"
-        self.standups_root = self.root / "standups"
         self.work_updates_path = self.root / "work_updates.json"
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
@@ -534,112 +546,11 @@ class Memory:
         lines.sort()
         return lines
 
-    def record_standup(self, date_str: str, content: str) -> Path:
-        self.standups_root.mkdir(parents=True, exist_ok=True)
-        path = self.standups_root / f"{date_str}.md"
-        path.write_text(content)
-        return path
-
-    def get_standup(self, date_str: str) -> str | None:
-        path = self.standups_root / f"{date_str}.md"
-        return path.read_text() if path.exists() else None
-
-    def latest_standup(self) -> dict | None:
-        if not self.standups_root.is_dir():
-            return None
-        dated = sorted(self.standups_root.glob("*.md"), key=lambda p: p.stem)
-        if not dated:
-            return None
-        latest = dated[-1]
-        date_str = latest.stem
-        json_path = self.standups_root / f"{date_str}.json"
-        
-        updates = None
-        if json_path.exists():
-            try:
-                updates = json.loads(json_path.read_text())
-            except Exception:
-                pass
-                
-        return {
-            "date": date_str,
-            "content": latest.read_text(),
-            "updates": updates
-        }
-
-    # ── Live Standup Channel ────────────────────────────────────────────────
-    # One shared transcript per day (not per-agent, unlike agent_chat_path
-    # below) -- every agent's opening status post and every human message +
-    # routed reply lands in the same ordered list, same "one channel,
-    # multiple participants" shape the dashboard renders. Scoped by date
-    # like the written standup report it replaces was, so "today's standup"
-    # still means one specific day's conversation, not an ever-growing log.
-
-    def standup_channel_path(self, date_str: str) -> Path:
-        return self.standups_root / f"{date_str}-channel.json"
-
-    def get_standup_channel_messages(self, date_str: str) -> list[dict]:
-        path = self.standup_channel_path(date_str)
-        if not path.exists():
-            return []
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            return []
-
-    def record_standup_channel_message(self, date_str: str, sender: str, text: str) -> dict:
-        self.standups_root.mkdir(parents=True, exist_ok=True)
-        messages = self.get_standup_channel_messages(date_str)
-        message = {"sender": sender, "text": text, "ts": dt.datetime.now(dt.timezone.utc).isoformat()}
-        messages.append(message)
-        self.standup_channel_path(date_str).write_text(json.dumps(messages, indent=2))
-        return message
-
-    # ── Agent Chat & Work Updates ─────────────────────────────────────────────
-
-    def agent_chat_path(self, agent_id: str) -> Path:
-        return self.root / f"agent_chats_{agent_id}.json"
-
-    def get_agent_chat_messages(self, agent_id: str) -> list[dict]:
-        path = self.agent_chat_path(agent_id)
-        if not path.exists():
-            return []
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            return []
-
-    def record_agent_chat_message(self, agent_id: str, sender: str, text: str) -> None:
-        messages = self.get_agent_chat_messages(agent_id)
-        messages.append({
-            "sender": sender,
-            "text": text,
-            "ts": dt.datetime.now(dt.timezone.utc).isoformat()
-        })
-        self.agent_chat_path(agent_id).write_text(json.dumps(messages, indent=2))
-
-    # Claude Agent SDK session id for this agent's chat -- lets server.py
-    # resume the exact prior session (full context, same as `claude -c`)
-    # instead of a fresh cold-start subprocess reconstructing a crude
-    # "Human: ...\nAgent: ..." text blob from the last few messages on every
-    # single turn. One session per (app, agent_id), same scope as the chat
-    # history itself; a separate file rather than folding into the chat
-    # messages JSON so a corrupt/reset session doesn't need touching the
-    # actual conversation log.
-    def agent_session_path(self, agent_id: str) -> Path:
-        return self.root / f"agent_session_{agent_id}.json"
-
-    def get_agent_session_id(self, agent_id: str) -> str | None:
-        path = self.agent_session_path(agent_id)
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text()).get("session_id")
-        except Exception:
-            return None
-
-    def set_agent_session_id(self, agent_id: str, session_id: str) -> None:
-        self.agent_session_path(agent_id).write_text(json.dumps({"session_id": session_id}))
+    # Standup reports, the live standup channel, agent chat history, and
+    # agent session continuity all moved to chat_store.py (server-side,
+    # AGENTRA_HOME) -- see that module's docstring. They used to live here
+    # as git-committed files under the target repo's own .agentra/, which
+    # was never the right home for agentra's own operational chat state.
 
     def get_work_updates(self) -> list[dict]:
         if not self.work_updates_path.exists():

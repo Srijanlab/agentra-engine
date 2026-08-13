@@ -13,6 +13,7 @@ handler (unlike a full autonomous cycle).
 import datetime as dt
 from pathlib import Path
 
+from agentra import chat_store
 from agentra.agents.base import run_agent
 from agentra.memory import Memory
 
@@ -132,8 +133,11 @@ async def generate_standup_updates(
 
 
 async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24) -> str:
-    """Generate and persist today's standup for one app. Returns the
-    generated report text (also written to .agentra/standups/<date>.md)."""
+    """Generate today's standup for one app and persist it server-side
+    (chat_store.py, AGENTRA_HOME -- not the target repo's own .agentra/,
+    which is git-committed to that repo's history and not where a chat
+    transcript-adjacent artifact belongs). Returns the generated report
+    text."""
     if mem is None:
         mem = Memory(repo)
 
@@ -147,11 +151,8 @@ async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, wind
     report = "\n".join(lines).strip()
 
     date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
-    mem.record_standup(date_str, report)
-
-    import json
-    json_path = mem.standups_root / f"{date_str}.json"
-    json_path.write_text(json.dumps(updates_json, indent=2))
+    chat_store.record_standup(app_name, date_str, report)
+    chat_store.record_standup_updates_json(app_name, date_str, updates_json)
 
     return report
 

@@ -45,7 +45,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agentra import environments, registry
+from agentra import chat_store, environments, registry
 from agentra.agents import catalog as agents_catalog
 from agentra.agents import deployment
 from agentra.agents.brain import run_autonomous_cycle
@@ -773,10 +773,9 @@ async def submit_feature_request(name: str, payload: BacklogRequestPayload) -> d
 
 @app.get("/apps/{app_name}/standup/latest")
 async def get_latest_standup(app_name: str) -> dict:
-    repo = registry.get_app_repo(app_name)
-    if repo is None:
+    if app_name not in registry.list_apps():
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
-    latest = Memory(repo).latest_standup()
+    latest = chat_store.latest_standup(app_name)
     if latest is None:
         return {"app": app_name, "standup": None}
     return {"app": app_name, "standup": latest}
@@ -870,7 +869,7 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
     mem = Memory(repo)
     date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
 
-    existing = mem.get_standup_channel_messages(date_str)
+    existing = chat_store.get_standup_channel_messages(app_name, date_str)
     if existing:
         # Replayed history on reconnect -- no "fresh" flag, so the
         # frontend shows it instantly instead of re-running the
@@ -883,7 +882,7 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
 
         updates = await generate_standup_updates(repo, app_name, mem)
         for agent_id, text in updates.items():
-            msg = mem.record_standup_channel_message(date_str, agent_id, text)
+            msg = chat_store.record_standup_channel_message(app_name, date_str, agent_id, text)
             await websocket.send_json({"type": "message", "fresh": True, **msg})
 
     # Marks the end of the opening burst specifically (not history replay,
@@ -903,12 +902,11 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
             if not human_text:
                 continue
 
-            human_msg = mem.record_standup_channel_message(date_str, "human", human_text)
+            human_msg = chat_store.record_standup_channel_message(app_name, date_str, "human", human_text)
             await websocket.send_json({"type": "message", **human_msg})
 
             agent_id = _route_standup_message(human_text)
-            session_key = f"standup:{date_str}:{agent_id}"
-            resume_session_id = mem.get_agent_session_id(session_key)
+            resume_session_id = chat_store.get_standup_agent_session_id(app_name, date_str, agent_id)
             system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
 
             from agentra.agents.base import extract_json_block, stream_chat_turn
@@ -938,8 +936,8 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
                 full_text = re.sub(r"```json\s*.*?\s*```", "", full_text, flags=re.DOTALL).strip()
 
             if session_id:
-                mem.set_agent_session_id(session_key, session_id)
-            agent_msg = mem.record_standup_channel_message(date_str, agent_id, full_text)
+                chat_store.set_standup_agent_session_id(app_name, date_str, agent_id, session_id)
+            agent_msg = chat_store.record_standup_channel_message(app_name, date_str, agent_id, full_text)
             # "replacing_stream" tells the frontend to collapse the
             # delta-built bubble into this authoritative final version
             # (full_text can differ from the raw concatenated deltas -- the
@@ -1101,12 +1099,9 @@ If you have performed any work recently, you can update the work you performed b
 
 @app.get("/apps/{app_name}/agents/{agent_id}/chat")
 async def get_agent_chat(app_name: str, agent_id: str) -> dict:
-    repo = registry.get_app_repo(app_name)
-    if repo is None:
+    if app_name not in registry.list_apps():
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
-    mem = Memory(repo)
-    messages = mem.get_agent_chat_messages(agent_id)
-    return {"messages": messages}
+    return {"messages": chat_store.get_agent_chat_messages(app_name, agent_id)}
 
 def _chat_agent_label(agent_id: str) -> str:
     if agent_id == "orchestrator":
@@ -1139,25 +1134,31 @@ def _finalize_chat_turn(
         response_text = re.sub(r"```json\s*.*?\s*```", "", response_text, flags=re.DOTALL).strip()
 
     if session_id:
-        mem.set_agent_session_id(agent_id, session_id)
-    mem.record_agent_chat_message(agent_id, "agent", response_text)
+        chat_store.set_agent_session_id(app_name, agent_id, session_id)
+    chat_store.record_agent_chat_message(app_name, agent_id, "agent", response_text)
 
-    def _persist_chat_in_background() -> None:
-        error = registry.persist_agentra_dir(
-            repo, _app_branch(app_name), f"agentra: chat with {agent_id!r} for {app_name!r}"
-        )
-        if error:
-            _server_log("chat", f"app={app_name!r} agent={agent_id!r} chat saved locally but failed to push: {error}")
+    # Chat itself lives server-side now (chat_store.py, AGENTRA_HOME) --
+    # nothing about the conversation lands in the target repo's git
+    # history anymore. A work_update is the one thing a chat turn can
+    # still write into the target repo's own .agentra/ (Memory, still
+    # git-committed), so only push when one was actually recorded --
+    # otherwise there's nothing new under .agentra/ for this app and a
+    # background git round-trip would be pure overhead.
+    if work_update:
+        def _persist_chat_in_background() -> None:
+            error = registry.persist_agentra_dir(
+                repo, _app_branch(app_name), f"agentra: work update from {agent_id!r} for {app_name!r}"
+            )
+            if error:
+                _server_log("chat", f"app={app_name!r} agent={agent_id!r} work update saved locally but failed to push: {error}")
 
-    # Was a blocking git push (commit + push to GitHub) on the critical path
-    # of every single chat message -- the human waited on a full network
-    # round-trip to GitHub for even a one-word reply. Local writes
-    # (mem.record_agent_chat_message above) already happened synchronously;
-    # this only pushes them durable, which doesn't need to block the
-    # response the human is waiting on. Same fire-and-forget shape
-    # elsewhere in this file wouldn't apply here since those callers don't
-    # have a human staring at a spinner.
-    asyncio.get_running_loop().run_in_executor(None, _persist_chat_in_background)
+        # Was a blocking git push (commit + push to GitHub) on the critical
+        # path of every single chat message -- the human waited on a full
+        # network round-trip to GitHub for even a one-word reply. Local
+        # writes already happened synchronously above; this only pushes
+        # the work_update durable, which doesn't need to block the
+        # response the human is waiting on.
+        asyncio.get_running_loop().run_in_executor(None, _persist_chat_in_background)
 
     return response_text, work_update
 
@@ -1169,7 +1170,7 @@ async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) ->
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
 
     mem = Memory(repo)
-    mem.record_agent_chat_message(agent_id, "human", payload.message)
+    chat_store.record_agent_chat_message(app_name, agent_id, "human", payload.message)
 
     from agentra.agents.base import run_agent
     system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
@@ -1181,7 +1182,7 @@ async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) ->
     # keyed per (app, agent_id) same as the chat history itself. None on the
     # first message of a conversation -- run_agent starts a fresh session
     # same as any other caller, and stores the new one below either way.
-    resume_session_id = mem.get_agent_session_id(agent_id)
+    resume_session_id = chat_store.get_agent_session_id(app_name, agent_id)
 
     result = await run_agent(
         prompt=payload.message,
@@ -1226,11 +1227,11 @@ async def post_agent_chat_stream(app_name: str, agent_id: str, payload: ChatPayl
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
 
     mem = Memory(repo)
-    mem.record_agent_chat_message(agent_id, "human", payload.message)
+    chat_store.record_agent_chat_message(app_name, agent_id, "human", payload.message)
 
     from agentra.agents.base import stream_chat_turn
     system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
-    resume_session_id = mem.get_agent_session_id(agent_id)
+    resume_session_id = chat_store.get_agent_session_id(app_name, agent_id)
 
     async def event_stream():
         async for event in stream_chat_turn(

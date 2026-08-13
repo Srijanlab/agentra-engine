@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from agentra import registry, server, standup
+from agentra import chat_store, registry, server, standup
 from agentra.memory import Memory
 
 
@@ -32,17 +32,19 @@ def _register_tmp_app(tmp_path: Path, name: str = "myapp") -> Path:
     return repo
 
 
-def test_memory_chats_and_work_updates(tmp_path):
+def test_memory_chats_and_work_updates(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
     repo = tmp_path / "mytestrepo"
     repo.mkdir()
     mem = Memory(repo)
 
-    # Test Chat Messages
-    assert mem.get_agent_chat_messages("codebase") == []
-    mem.record_agent_chat_message("codebase", "human", "hello agent")
-    mem.record_agent_chat_message("codebase", "agent", "hello human")
+    # Test Chat Messages -- chat_store.py (server-side, AGENTRA_HOME), not
+    # the target repo's own .agentra/.
+    assert chat_store.get_agent_chat_messages("mytestrepo", "codebase") == []
+    chat_store.record_agent_chat_message("mytestrepo", "codebase", "human", "hello agent")
+    chat_store.record_agent_chat_message("mytestrepo", "codebase", "agent", "hello human")
 
-    msgs = mem.get_agent_chat_messages("codebase")
+    msgs = chat_store.get_agent_chat_messages("mytestrepo", "codebase")
     assert len(msgs) == 2
     assert msgs[0]["sender"] == "human"
     assert msgs[0]["text"] == "hello agent"
@@ -92,16 +94,16 @@ def test_server_agent_chat_endpoints(tmp_path, monkeypatch):
     assert "```json" not in body["response"]
     assert body["work_update"] == "Analyzed the codebase structure"
 
-    # Verify message was stored in memory
-    mem = Memory(repo)
-    msgs = mem.get_agent_chat_messages("codebase")
+    # Verify message was stored server-side (chat_store.py)
+    msgs = chat_store.get_agent_chat_messages("chat-app", "codebase")
     assert len(msgs) == 2
     assert msgs[0]["sender"] == "human"
     assert msgs[0]["text"] == "explain the code"
     assert msgs[1]["sender"] == "agent"
     assert "Hello! I am Codebase Agent." in msgs[1]["text"]
 
-    # Verify work update was stored
+    # Verify work update was stored (still Memory/target-repo -- unchanged)
+    mem = Memory(repo)
     work_updates = mem.get_work_updates()
     assert len(work_updates) == 1
     assert work_updates[0]["agent_id"] == "codebase"
@@ -114,7 +116,7 @@ def test_server_agent_chat_endpoints(tmp_path, monkeypatch):
 
     # 4. Session continuity: the session_id from turn 1 was persisted, and a
     # second message resumes it instead of starting cold.
-    assert mem.get_agent_session_id("codebase") == "test-session-123"
+    assert chat_store.get_agent_session_id("chat-app", "codebase") == "test-session-123"
     client.post("/apps/chat-app/agents/codebase/chat", json={"message": "and now?"})
     _, kwargs = mock_run_agent.call_args
     assert kwargs["resume"] == "test-session-123"
@@ -155,12 +157,11 @@ def test_server_agent_chat_stream_endpoint(tmp_path, monkeypatch):
     assert done_events[0]["response"] == "Hello! I am Codebase Agent."
 
     # Same persistence as the buffered endpoint: chat history and session id.
-    mem = Memory(repo)
-    msgs = mem.get_agent_chat_messages("codebase")
+    msgs = chat_store.get_agent_chat_messages("stream-app", "codebase")
     assert len(msgs) == 2
     assert msgs[0]["text"] == "explain the code"
     assert msgs[1]["text"] == "Hello! I am Codebase Agent."
-    assert mem.get_agent_session_id("codebase") == "stream-session-456"
+    assert chat_store.get_agent_session_id("stream-app", "codebase") == "stream-session-456"
 
 
 def test_all_apps_loops_endpoint_matches_per_app_shape(tmp_path, monkeypatch):
@@ -229,6 +230,7 @@ def test_server_work_update_endpoints(tmp_path, monkeypatch):
 
 
 def test_structured_standup_generation(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
     repo = tmp_path / "standup-repo"
     repo.mkdir()
     mem = Memory(repo)
@@ -265,8 +267,8 @@ def test_structured_standup_generation(tmp_path, monkeypatch):
     assert "## Implementation Agent" in report
     assert "Yesterday: Fixed a bug. Today: Idle." in report
 
-    # Verify structured standup json file is created
-    latest = mem.latest_standup()
+    # Verify structured standup json file is created (chat_store.py, server-side)
+    latest = chat_store.latest_standup("standup-app")
     assert latest is not None
     assert latest["updates"] is not None
     assert latest["updates"]["codebase"] == "Yesterday: Scanned files. Today: Idle."
@@ -329,11 +331,11 @@ def test_standup_live_channel_websocket(tmp_path, monkeypatch):
         assert final["type"] == "message" and final["sender"] == "testing" and final["text"] == "All green."
         assert final["replacing_stream"] is True
 
-    # Persisted to the channel transcript and reused on reconnect.
+    # Persisted to the channel transcript (chat_store.py) and reused on reconnect.
     date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
-    persisted = mem.get_standup_channel_messages(date_str)
+    persisted = chat_store.get_standup_channel_messages("live-standup-app", date_str)
     assert [m["sender"] for m in persisted] == ["testing", "human", "testing"]
-    assert mem.get_agent_session_id(f"standup:{date_str}:testing") == "standup-session-789"
+    assert chat_store.get_standup_agent_session_id("live-standup-app", date_str, "testing") == "standup-session-789"
 
     with client.websocket_connect("/apps/live-standup-app/standup/live") as ws:
         replayed = [ws.receive_json() for _ in range(3)]
