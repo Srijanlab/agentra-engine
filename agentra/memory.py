@@ -36,6 +36,7 @@ and contributors, while run logs stay local.
 import datetime as dt
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -116,6 +117,28 @@ def _ensure_gitignore(root: Path) -> None:
 # issue later even if a caller only has the local record.
 _BUG_LABEL = "bug"
 _FEATURE_LABEL = "enhancement"
+
+# ── Failure triage: replaces the old write-only memory/failures/*.md ledger
+# (confirmed nothing in this codebase ever read it back). A permanent
+# failure (a real defect in the work attempted) gets filed via
+# record_known_bug -- which creates a real GitHub Issue when the target
+# repo has one configured, so Discovery Agent prioritizes fixing it next
+# cycle instead of it vanishing into a file nothing reads. A transient
+# failure (infra/capacity hiccups: rate/usage limits, max-turns
+# exhaustion, the Claude Code CLI's own contradictory-result quirk -- see
+# agents/base.py's _CONTRADICTORY_RESULT_SUFFIX) isn't a defect at all; a
+# retry next cycle is the fix, not a backlog entry, so it's just logged. ──
+_TRANSIENT_FAILURE_PATTERNS = [
+    re.compile(r"Reached maximum number of turns \(\d+\)"),
+    re.compile(r"rate.?limit", re.IGNORECASE),
+    re.compile(r"usage limit", re.IGNORECASE),
+    re.compile(r"overloaded", re.IGNORECASE),
+    re.compile(r"returned an error result: success"),
+]
+
+
+def is_transient_failure(text: str) -> bool:
+    return any(p.search(text) for p in _TRANSIENT_FAILURE_PATTERNS)
 
 
 def _github_bug_to_dict(issue: dict) -> dict:
@@ -389,6 +412,17 @@ class Memory:
 
         bugs = [b for b in self._local_known_bugs() if b.get("run_id") != id_ and b.get("external_id") != id_]
         self.known_bugs_path.write_text(json.dumps(bugs, indent=2))
+
+    def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
+        """The one place a failed agent turn's full output should be
+        reported to -- see is_transient_failure's docstring above for the
+        permanent-vs-transient policy this implements."""
+        if is_transient_failure(text):
+            self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
+            return
+        self.record_known_bug(
+            run_id, severity, f"{step_name} failed during an autonomous cycle", text[:2000], source="autonomous-failure"
+        )
 
     # ── Queue: feature requests, from customers or added by an admin. Considered
     # by Discovery Agent above its own autonomous ideation, below real signals. ──

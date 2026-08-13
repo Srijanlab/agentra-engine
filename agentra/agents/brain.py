@@ -42,7 +42,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_s
 from agentra.agents import codebase, deployment, discovery, feedback, implementation, testing
 from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
-from agentra.environments import EnvironmentConfig, feature_branch_name, slug
+from agentra.environments import EnvironmentConfig, feature_branch_name
 from agentra.memory import Memory
 from agentra.ranking import rank
 
@@ -285,7 +285,6 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.mem.feature_queue(),
         )
         session.cost_usd += disc.cost_usd
-        session.mem.write("decisions", f"{session.run_id}-discovery", disc.text)
         opportunities = rank((disc.json_data or {}).get("opportunities", []))
         session.note(
             f"discover_opportunities: {len(opportunities)} candidates",
@@ -331,7 +330,6 @@ def _tools_for(session: OrchestratorSession) -> list:
             return {"content": [{"type": "text", "text": f"implement_feature raised: {exc}"}], "is_error": True}
         session.cost_usd += impl.cost_usd
         feature_name = (impl.json_data or {}).get("feature") or brief.split(":")[0].strip()
-        session.mem.write("features", f"{session.run_id}-{slug(feature_name)}", impl.text)
         session.tests_passed = False  # any new change invalidates the last test result
         session.pre_prod_verified = False  # ...and any prior live verification too
         session.note(
@@ -341,7 +339,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             turns=impl.turns,
         )
         if not impl.ok:
-            session.mem.write("failures", f"{session.run_id}-implementation", impl.text)
+            session.mem.record_failure(session.run_id, "implementation", impl.text)
             session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
         session.record_success("implement_feature")
@@ -408,7 +406,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         passed = test.ok and data.get("status") != "fail"
         session.tests_passed = passed
         # The structured result (lint/typecheck status, which tests failed) used to only
-        # get durably recorded on failure (mem.write("failures", ...) below) -- on a pass
+        # get durably recorded on failure (mem.record_failure(...) below) -- on a pass
         # it vanished once the process ended, so the dashboard's "testing artifacts" view
         # had nothing to show for a clean run. note()'s message is already durable
         # (agent_steps.summary + this run's own actions list), so folding the detail in
@@ -418,7 +416,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             detail += f" failed={data['failed_tests']}"
         session.note(f"run_local_tests: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
-            session.mem.write("failures", f"{session.run_id}-testing", test.text)
+            session.mem.record_failure(session.run_id, "testing", test.text)
             session.record_failure("run_local_tests")
         else:
             session.record_success("run_local_tests")
@@ -471,7 +469,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             turns=deploy.turns,
         )
         if not ok:
-            session.mem.write("failures", f"{session.run_id}-deployment", deploy.text)
+            session.mem.record_failure(session.run_id, "deployment", deploy.text)
             session.record_failure("deploy_pre_prod")
         else:
             session.record_success("deploy_pre_prod")
@@ -501,7 +499,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         detail = f"reachable={data.get('reachable', '?')} feature_verified={data.get('feature_verified', '?')}"
         session.note(f"verify_pre_prod: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
-            session.mem.write("failures", f"{session.run_id}-pre-prod-verification", test.text)
+            session.mem.record_failure(session.run_id, "pre-prod-verification", test.text)
             session.record_failure("verify_pre_prod")
         else:
             session.record_success("verify_pre_prod")
@@ -523,7 +521,6 @@ def _tools_for(session: OrchestratorSession) -> list:
         feature = session.current_feature or "unknown feature"
         fb = await feedback.run(session.repo, session.objective, feature)
         session.cost_usd += fb.cost_usd
-        session.mem.write("metrics", f"{session.run_id}-{slug(feature)}", fb.text)
         session.note("assess_feedback", ok=fb.ok, cost_usd=fb.cost_usd, turns=fb.turns)
         return {"content": [{"type": "text", "text": fb.text[:2000]}]}
 
@@ -747,7 +744,7 @@ async def run_autonomous_cycle(
         # an unhandled traceback.
         final_text = f"autonomous cycle raised: {exc}"
         session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
-        mem.write("failures", f"{run_id}-autonomous", final_text)
+        mem.record_failure(run_id, "autonomous-cycle", final_text)
 
     if session.stagnation_detected:
         # Don't rely solely on the model having actually followed the "summarize and end
@@ -758,14 +755,6 @@ async def run_autonomous_cycle(
         )
         final_text = f"{final_text}\n\n{stagnation_note}" if final_text else stagnation_note
         session.note("stagnation breaker: cycle terminated early, no progress", agent="cycle", ok=False)
-
-    mem.write(
-        "decisions",
-        f"{run_id}-autonomous-summary",
-        f"# Autonomous cycle {run_id}\n\nObjective: {objective}\n\n"
-        + "\n".join(f"- {a}" for a in session.actions)
-        + f"\n\nFinal message:\n{final_text}\n",
-    )
 
     if final_text:
         # Cycle-level work update, distinct from implement_feature's own
