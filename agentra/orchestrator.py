@@ -115,16 +115,17 @@ async def run_cycle(
         if not impl.ok:
             mem.record_failure(run_id, "implementation", impl.text)
             return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
-        mem.record_shipped(feature, run_id=run_id)
+        # record_shipped closes a GitHub 'enhancement' issue as the shipped record --
+        # the originating feature_queue issue itself if this opportunity came from
+        # there (resolves_id), otherwise a fresh one. A known_bug-origin opportunity
+        # still needs its own bug issue cleared separately, since that's a different
+        # label/ledger than the shipped-feature record.
+        resolves_id = top["id"] if top and top.get("origin") == "feature_queue" else None
+        mem.record_shipped(feature, run_id=run_id, resolves_id=resolves_id)
         mem.append_documentation(f"Shipped **{feature}**: {feature_brief[:300]}")
-        # Clear the originating backlog entry so it doesn't keep resurfacing every cycle --
-        # only known_bug/feature_queue-origin opportunities carry an id (see discovery.py).
-        if top and top.get("id"):
+        if top and top.get("id") and top.get("origin") == "known_bug":
             resolution_note = f"Resolved by agentra: shipped as {feature!r} (run {run_id})"
-            if top.get("origin") == "known_bug":
-                mem.clear_known_bug(top["id"], resolution_note)
-            elif top.get("origin") == "feature_queue":
-                mem.clear_feature_request(top["id"], resolution_note)
+            mem.clear_known_bug(top["id"], resolution_note)
 
         mem.log(run_id, "testing agent: starting (local)")
         test = await testing.run_local(repo, cb.text, mem)
@@ -170,7 +171,8 @@ async def run_cycle(
         if deploy_ok:
             # Only meaningful once merged onto a durable, shared branch (pre-prod) -- a feature
             # branch that was never deployed is about to be abandoned regardless. Must come after
-            # every mem.write above so feedback/decisions ride along too, not just shipped.json.
+            # every mem.write above so architecture/memory.md notes ride along too, not just
+            # documentation.md's changelog line (shipped itself lives on GitHub now, not here).
             persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
             if persist_error:
                 mem.log(run_id, f"persist_audit_trail: failed: {persist_error}")

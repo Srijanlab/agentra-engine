@@ -32,13 +32,12 @@ def _register_tmp_app(tmp_path: Path, name: str = "myapp") -> Path:
     return repo
 
 
-def test_memory_chats_and_work_updates(tmp_path, monkeypatch):
+def test_memory_chats(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = tmp_path / "mytestrepo"
     repo.mkdir()
-    mem = Memory(repo)
 
-    # Test Chat Messages -- chat_store.py (server-side, AGENTRA_HOME), not
+    # Chat Messages -- chat_store.py (server-side, AGENTRA_HOME), not
     # the target repo's own .agentra/.
     assert chat_store.get_agent_chat_messages("mytestrepo", "codebase") == []
     chat_store.record_agent_chat_message("mytestrepo", "codebase", "human", "hello agent")
@@ -51,26 +50,14 @@ def test_memory_chats_and_work_updates(tmp_path, monkeypatch):
     assert msgs[1]["sender"] == "agent"
     assert msgs[1]["text"] == "hello human"
 
-    # Test Work Updates
-    assert mem.get_work_updates() == []
-    mem.record_work_update("implementation", "Implemented voice chat feature")
-    mem.record_work_update("testing", "Wrote unit tests for voice feature")
-
-    updates = mem.get_work_updates()
-    assert len(updates) == 2
-    assert updates[0]["agent_id"] == "implementation"
-    assert updates[0]["description"] == "Implemented voice chat feature"
-    assert updates[1]["agent_id"] == "testing"
-    assert updates[1]["description"] == "Wrote unit tests for voice feature"
-
 
 def test_server_agent_chat_endpoints(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
-    repo = _register_tmp_app(tmp_path, "chat-app")
+    _register_tmp_app(tmp_path, "chat-app")
 
     # Mock the run_agent execution so we don't trigger real LLM calls
     mock_result = AsyncMock()
-    mock_result.text = "Hello! I am Codebase Agent.\n```json\n{\n  \"work_update\": \"Analyzed the codebase structure\"\n}\n```"
+    mock_result.text = "Hello! I am Codebase Agent."
     mock_result.ok = True
     mock_result.cost_usd = 0.01
     mock_result.turns = 1
@@ -90,9 +77,7 @@ def test_server_agent_chat_endpoints(tmp_path, monkeypatch):
     response = client.post("/apps/chat-app/agents/codebase/chat", json={"message": "explain the code"})
     assert response.status_code == 200
     body = response.json()
-    assert "Hello! I am Codebase Agent." in body["response"]
-    assert "```json" not in body["response"]
-    assert body["work_update"] == "Analyzed the codebase structure"
+    assert body["response"] == "Hello! I am Codebase Agent."
 
     # Verify message was stored server-side (chat_store.py)
     msgs = chat_store.get_agent_chat_messages("chat-app", "codebase")
@@ -101,13 +86,6 @@ def test_server_agent_chat_endpoints(tmp_path, monkeypatch):
     assert msgs[0]["text"] == "explain the code"
     assert msgs[1]["sender"] == "agent"
     assert "Hello! I am Codebase Agent." in msgs[1]["text"]
-
-    # Verify work update was stored (still Memory/target-repo -- unchanged)
-    mem = Memory(repo)
-    work_updates = mem.get_work_updates()
-    assert len(work_updates) == 1
-    assert work_updates[0]["agent_id"] == "codebase"
-    assert work_updates[0]["description"] == "Analyzed the codebase structure"
 
     # 3. GET chat history (now populated)
     response = client.get("/apps/chat-app/agents/codebase/chat")
@@ -124,7 +102,7 @@ def test_server_agent_chat_endpoints(tmp_path, monkeypatch):
 
 def test_server_agent_chat_stream_endpoint(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
-    repo = _register_tmp_app(tmp_path, "stream-app")
+    _register_tmp_app(tmp_path, "stream-app")
 
     async def fake_stream_chat_turn(**kwargs):
         assert kwargs["resume"] is None  # first message, no prior session
@@ -205,39 +183,14 @@ def test_all_apps_loops_endpoint_matches_per_app_shape(tmp_path, monkeypatch):
     assert len(loops[0]["runs"]) == 1
 
 
-def test_server_work_update_endpoints(tmp_path, monkeypatch):
-    _isolate_registry(tmp_path, monkeypatch)
-    repo = _register_tmp_app(tmp_path, "work-app")
-    client = TestClient(server.app)
-
-    # 1. GET work updates (empty)
-    response = client.get("/apps/work-app/work-updates")
-    assert response.status_code == 200
-    assert response.json()["updates"] == []
-
-    # 2. POST manual work update
-    response = client.post("/apps/work-app/agents/testing/work", json={"description": "Added test cases for server triggers"})
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-
-    # 3. GET work updates (populated)
-    response = client.get("/apps/work-app/work-updates")
-    assert response.status_code == 200
-    updates = response.json()["updates"]
-    assert len(updates) == 1
-    assert updates[0]["agent_id"] == "testing"
-    assert updates[0]["description"] == "Added test cases for server triggers"
-
-
 def test_structured_standup_generation(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = tmp_path / "standup-repo"
     repo.mkdir()
     mem = Memory(repo)
 
-    # Seed some log lines and a work update
+    # Seed some log lines
     mem.log("run1", "codebase agent: scanned files")
-    mem.record_work_update("implementation", "Fixed a bug in auth token parsing")
 
     # Mock run_agent call in standup.py
     mock_result = AsyncMock()
@@ -278,8 +231,10 @@ def test_structured_standup_generation(tmp_path, monkeypatch):
 def test_standup_live_channel_websocket(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path, "live-standup-app")
-    mem = Memory(repo)
-    mem.record_work_update("testing", "Ran the full suite, all green")
+    # Something for generate_standup_updates to find non-empty -- otherwise
+    # its "nothing to report" early exit skips the (mocked) LLM call below
+    # entirely and the assertions on its output never get exercised.
+    Memory(repo).log("run1", "testing agent: ran the full suite, all green")
 
     # Opening burst: same mechanism test_structured_standup_generation
     # covers, mocked the same way -- generate_standup_updates's one LLM call.

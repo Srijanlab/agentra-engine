@@ -18,7 +18,7 @@ from agentra.agents.base import run_agent
 from agentra.memory import Memory
 
 STANDUP_SYSTEM_PROMPT = """You are writing a daily standup update for agentra, an autonomous engineering system.
-You are given, verbatim, everything this project's own record-keeping has about the last 24 hours of activity, its recent work updates from agents, and its current backlog.
+You are given, verbatim, everything this project's own record-keeping has about the last 24 hours of activity, its recently shipped features, and its current backlog.
 
 Write a daily standup update structured by agent. Respond with a JSON block containing the standup updates for each agent. The JSON block must look exactly like this:
 ```json
@@ -37,9 +37,9 @@ Write a daily standup update structured by agent. Respond with a JSON block cont
 ```
 
 Rules:
-- For each agent, summarize their actual logged activity or work updates in the last 24 hours for "Yesterday", and their role-specific next step or backlog item for "Today".
+- For each agent, summarize their actual logged activity or shipped features in the last 24 hours for "Yesterday", and their role-specific next step or backlog item for "Today".
 - Only mention things that appear in the data you were given. Never invent activity, features, or plans that aren't present.
-- If an agent had no logged activity or work updates, its update should simply say: "Yesterday: No activity. Today: Idle." or similar, do not pad it out.
+- If an agent had no logged activity or shipped features, its update should simply say: "Yesterday: No activity. Today: Idle." or similar, do not pad it out.
 - Ensure the response contains the fenced JSON block and nothing else.
 """
 
@@ -47,17 +47,17 @@ Rules:
 def _format_input(
     app_name: str,
     yesterday_lines: list[str],
-    work_updates: list[dict],
+    shipped_recently: list[dict],
     known_bugs: list[dict],
     feature_queue: list[dict],
     objective: str | None,
 ) -> str:
     lines = [f"Project: {app_name}", "", "=== Yesterday (last 24h of logged activity) ==="]
     lines.extend(yesterday_lines or ["(none)"])
-    lines += ["", "=== Yesterday (last 24h of agent work updates) ==="]
-    for wu in work_updates:
-        lines.append(f"[{wu.get('agent_id')}] {wu.get('description')}")
-    if not work_updates:
+    lines += ["", "=== Yesterday (last 24h of shipped features) ==="]
+    for s in shipped_recently:
+        lines.append(f"- {s.get('feature')}" + (f" (commit {s['commit_sha']})" if s.get("commit_sha") else ""))
+    if not shipped_recently:
         lines.append("(none)")
     lines += ["", "=== Today's backlog ===", f"Objective: {objective or '(none set)'}"]
     lines.append(f"Open known bugs ({len(known_bugs)}):")
@@ -91,16 +91,17 @@ async def generate_standup_updates(
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=window_hours)
     yesterday_lines = mem.recent_log_lines(since)
 
-    all_work_updates = mem.get_work_updates()
-    work_updates = []
-    for wu in all_work_updates:
-        if "ts" in wu:
-            try:
-                ts = dt.datetime.fromisoformat(wu["ts"])
-                if ts >= since:
-                    work_updates.append(wu)
-            except Exception:
-                pass
+    shipped_recently = []
+    for s in mem.shipped_features():
+        ts = s.get("ts")
+        if not ts:
+            continue
+        try:
+            shipped_ts = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if shipped_ts >= since:
+                shipped_recently.append(s)
+        except Exception:
+            pass
 
     known_bugs = mem.known_bugs()
     feature_queue = mem.feature_queue()
@@ -108,13 +109,13 @@ async def generate_standup_updates(
 
     from agentra.agents.base import extract_json_block
 
-    if not yesterday_lines and not work_updates and not known_bugs and not feature_queue and not objective:
+    if not yesterday_lines and not shipped_recently and not known_bugs and not feature_queue and not objective:
         # Nothing at all to report -- don't spend an LLM call manufacturing
         # prose around an empty project. Same rule the model itself is
         # given below: no activity/backlog means say so plainly.
         return {agent_id: "Yesterday: No activity. Today: Idle." for agent_id in AGENT_LABELS}
 
-    prompt = _format_input(app_name, yesterday_lines, work_updates, known_bugs, feature_queue, objective)
+    prompt = _format_input(app_name, yesterday_lines, shipped_recently, known_bugs, feature_queue, objective)
     result = await run_agent(
         prompt=prompt,
         system_prompt=STANDUP_SYSTEM_PROMPT,

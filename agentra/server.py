@@ -909,7 +909,7 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
             resume_session_id = chat_store.get_standup_agent_session_id(app_name, date_str, agent_id)
             system_prompt = AGENT_CHAT_SYSTEM_PROMPTS.get(agent_id, AGENT_CHAT_SYSTEM_PROMPTS["custom"])
 
-            from agentra.agents.base import extract_json_block, stream_chat_turn
+            from agentra.agents.base import stream_chat_turn
 
             await websocket.send_json({"type": "start", "sender": agent_id})
             full_text = ""
@@ -930,28 +930,13 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
                     full_text = event["text"] or full_text
                     session_id = event["session_id"]
 
-            json_data = extract_json_block(full_text)
-            if json_data and "work_update" in json_data:
-                mem.record_work_update(agent_id, json_data["work_update"])
-                full_text = re.sub(r"```json\s*.*?\s*```", "", full_text, flags=re.DOTALL).strip()
-
             if session_id:
                 chat_store.set_standup_agent_session_id(app_name, date_str, agent_id, session_id)
             agent_msg = chat_store.record_standup_channel_message(app_name, date_str, agent_id, full_text)
             # "replacing_stream" tells the frontend to collapse the
-            # delta-built bubble into this authoritative final version
-            # (full_text can differ from the raw concatenated deltas -- the
-            # work_update JSON block strip above, same as 1:1 chat).
+            # delta-built bubble into this authoritative final version (in
+            # case full_text ever differs from the raw concatenated deltas).
             await websocket.send_json({"type": "message", "replacing_stream": True, **agent_msg})
-
-            def _persist_channel_in_background() -> None:
-                error = registry.persist_agentra_dir(
-                    repo, _app_branch(app_name), f"agentra: standup channel for {app_name!r}"
-                )
-                if error:
-                    _server_log("standup", f"app={app_name!r} channel message saved locally but failed to push: {error}")
-
-            asyncio.get_running_loop().run_in_executor(None, _persist_channel_in_background)
     except WebSocketDisconnect:
         pass
 
@@ -1019,82 +1004,16 @@ async def text_to_speech(payload: TtsPayload) -> Response:
 class ChatPayload(BaseModel):
     message: str
 
-class WorkUpdatePayload(BaseModel):
-    description: str
-
 AGENT_CHAT_SYSTEM_PROMPTS = {
-    "orchestrator": """You are the Orchestrator Agent. You decide which agent to call next and sequence tasks. You are now communicating directly with a human user. Respond to their queries in a helpful and concise manner.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "codebase": """You are the Codebase Agent. Your role is read-only scanning of the repository: mapping framework, architecture, and existing patterns. Respond to user queries about the code.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "discovery": """You are the Discovery Agent. Your role is deciding what to build next based on codebase, analytics, and backlog signals.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "implementation": """You are the Implementation Agent. Your role is implementing features and fixing bugs on dedicated branches.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "testing": """You are the Testing Agent. Your role is verifying the code locally and independently verifying live deployments.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "deployment": """You are the Deployment Agent. Your role is deploying verified feature branches to pre-prod or promoting to production.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "feedback": """You are the Analytics Feedback Agent. Your role is checking if a shipped feature is measurable and naming success metrics.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "prod_debug": """You are the Production Debugging Agent. Your role is diagnosing production alarms and auto-remediating issues.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-""",
-    "custom": """You are a Custom Agent. Your role is executing one-off sub-tasks that do not fit specialized agents.
-If you have performed any work recently, you can update the work you performed by including a JSON block at the end of your response:
-```json
-{
-  "work_update": "Description of the work you performed"
-}
-```
-"""
+    "orchestrator": "You are the Orchestrator Agent. You decide which agent to call next and sequence tasks. You are now communicating directly with a human user. Respond to their queries in a helpful and concise manner.",
+    "codebase": "You are the Codebase Agent. Your role is read-only scanning of the repository: mapping framework, architecture, and existing patterns. Respond to user queries about the code.",
+    "discovery": "You are the Discovery Agent. Your role is deciding what to build next based on codebase, analytics, and backlog signals.",
+    "implementation": "You are the Implementation Agent. Your role is implementing features and fixing bugs on dedicated branches.",
+    "testing": "You are the Testing Agent. Your role is verifying the code locally and independently verifying live deployments.",
+    "deployment": "You are the Deployment Agent. Your role is deploying verified feature branches to pre-prod or promoting to production.",
+    "feedback": "You are the Analytics Feedback Agent. Your role is checking if a shipped feature is measurable and naming success metrics.",
+    "prod_debug": "You are the Production Debugging Agent. Your role is diagnosing production alarms and auto-remediating issues.",
+    "custom": "You are a Custom Agent. Your role is executing one-off sub-tasks that do not fit specialized agents.",
 }
 
 @app.get("/apps/{app_name}/agents/{agent_id}/chat")
@@ -1115,52 +1034,16 @@ def _chat_agent_label(agent_id: str) -> str:
     return agent_id.capitalize() + " Agent"
 
 
-# Shared by both the buffered and streaming chat endpoints -- the raw text
-# a turn produced needs the exact same treatment either way (strip the
-# work_update JSON block, persist the work update, record the chat message,
-# push it durable in the background), so this is the one place that logic
-# lives rather than two copies that could quietly drift.
-def _finalize_chat_turn(
-    mem: "Memory", repo: Path, app_name: str, agent_id: str, raw_text: str, session_id: str | None,
-) -> tuple[str, str | None]:
-    from agentra.agents.base import extract_json_block
-
+# Shared by both the buffered and streaming chat endpoints -- recording the
+# reply and updating session continuity is the exact same treatment either
+# way, so this is the one place that logic lives rather than two copies
+# that could quietly drift.
+def _finalize_chat_turn(app_name: str, agent_id: str, raw_text: str, session_id: str | None) -> str:
     response_text = raw_text or "(no response)"
-    json_data = extract_json_block(response_text)
-    work_update = None
-    if json_data and "work_update" in json_data:
-        work_update = json_data["work_update"]
-        mem.record_work_update(agent_id, work_update)
-        response_text = re.sub(r"```json\s*.*?\s*```", "", response_text, flags=re.DOTALL).strip()
-
     if session_id:
         chat_store.set_agent_session_id(app_name, agent_id, session_id)
     chat_store.record_agent_chat_message(app_name, agent_id, "agent", response_text)
-
-    # Chat itself lives server-side now (chat_store.py, AGENTRA_HOME) --
-    # nothing about the conversation lands in the target repo's git
-    # history anymore. A work_update is the one thing a chat turn can
-    # still write into the target repo's own .agentra/ (Memory, still
-    # git-committed), so only push when one was actually recorded --
-    # otherwise there's nothing new under .agentra/ for this app and a
-    # background git round-trip would be pure overhead.
-    if work_update:
-        def _persist_chat_in_background() -> None:
-            error = registry.persist_agentra_dir(
-                repo, _app_branch(app_name), f"agentra: work update from {agent_id!r} for {app_name!r}"
-            )
-            if error:
-                _server_log("chat", f"app={app_name!r} agent={agent_id!r} work update saved locally but failed to push: {error}")
-
-        # Was a blocking git push (commit + push to GitHub) on the critical
-        # path of every single chat message -- the human waited on a full
-        # network round-trip to GitHub for even a one-word reply. Local
-        # writes already happened synchronously above; this only pushes
-        # the work_update durable, which doesn't need to block the
-        # response the human is waiting on.
-        asyncio.get_running_loop().run_in_executor(None, _persist_chat_in_background)
-
-    return response_text, work_update
+    return response_text
 
 
 @app.post("/apps/{app_name}/agents/{agent_id}/chat")
@@ -1169,7 +1052,6 @@ async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) ->
     if repo is None:
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
 
-    mem = Memory(repo)
     chat_store.record_agent_chat_message(app_name, agent_id, "human", payload.message)
 
     from agentra.agents.base import run_agent
@@ -1209,8 +1091,8 @@ async def post_agent_chat(app_name: str, agent_id: str, payload: ChatPayload) ->
         resume=resume_session_id,
     )
 
-    response_text, work_update = _finalize_chat_turn(mem, repo, app_name, agent_id, result.text, result.session_id)
-    return {"response": response_text, "work_update": work_update}
+    response_text = _finalize_chat_turn(app_name, agent_id, result.text, result.session_id)
+    return {"response": response_text}
 
 
 @app.post("/apps/{app_name}/agents/{agent_id}/chat/stream")
@@ -1226,7 +1108,6 @@ async def post_agent_chat_stream(app_name: str, agent_id: str, payload: ChatPayl
     if repo is None:
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
 
-    mem = Memory(repo)
     chat_store.record_agent_chat_message(app_name, agent_id, "human", payload.message)
 
     from agentra.agents.base import stream_chat_turn
@@ -1246,10 +1127,8 @@ async def post_agent_chat_stream(app_name: str, agent_id: str, payload: ChatPayl
             if event["type"] == "delta":
                 yield f"data: {json.dumps({'delta': event['text']})}\n\n"
             else:
-                response_text, work_update = _finalize_chat_turn(
-                    mem, repo, app_name, agent_id, event["text"], event["session_id"]
-                )
-                yield f"data: {json.dumps({'done': True, 'response': response_text, 'work_update': work_update})}\n\n"
+                response_text = _finalize_chat_turn(app_name, agent_id, event["text"], event["session_id"])
+                yield f"data: {json.dumps({'done': True, 'response': response_text})}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -1257,27 +1136,6 @@ async def post_agent_chat_stream(app_name: str, agent_id: str, payload: ChatPayl
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-@app.get("/apps/{app_name}/work-updates")
-async def get_work_updates(app_name: str) -> dict:
-    repo = registry.get_app_repo(app_name)
-    if repo is None:
-        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
-    mem = Memory(repo)
-    return {"updates": mem.get_work_updates()}
-
-@app.post("/apps/{app_name}/agents/{agent_id}/work")
-async def post_work_update(app_name: str, agent_id: str, payload: WorkUpdatePayload) -> dict:
-    repo = registry.get_app_repo(app_name)
-    if repo is None:
-        raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
-    mem = Memory(repo)
-    mem.record_work_update(agent_id, payload.description)
-    error = registry.persist_agentra_dir(
-        repo, _app_branch(app_name), f"agentra: log work update for {agent_id!r} on {app_name!r}"
-    )
-    if error:
-        _server_log("chat", f"app={app_name!r} agent={agent_id!r} work update saved locally but failed to push: {error}")
-    return {"ok": True}
 
 
 async def _run_autonomous_background(

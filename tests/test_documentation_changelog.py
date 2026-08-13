@@ -1,8 +1,8 @@
 """Tests for Memory.append_documentation() -- the running changelog
 section of architecture/documentation.md that a shipped feature gets
 appended to (agents/brain.py's implement_feature tool, orchestrator.py's
-run_cycle), distinct from record_work_update()'s structured JSON ledger
-that the dashboard's "Latest Work Done" card reads.
+run_cycle), distinct from record_shipped()'s structured record (a closed
+GitHub 'enhancement' issue) that shipped_features() reads back.
 """
 
 from pathlib import Path
