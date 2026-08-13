@@ -383,24 +383,31 @@ def _apply_request(repo: Path, request: dict) -> None:
         raise ValueError(f"unknown request type: {request_type!r}")
 
 
-def _persist_backlog(app: str, repo: Path, branch: str, errors: list[str]) -> None:
-    """_apply_request only ever writes known_bugs.json/feature_queue.json/
-    objective.yaml to THIS instance's local checkout -- never durable on
-    its own. Confirmed live: a bug/feature added via the dashboard would
-    vanish the next time a *different* Cloud Run instance (a fresh
-    checkout, cloned straight from git) served a request for the same app,
-    since nothing had ever pushed the addition anywhere. Every other write
-    path that touches .agentra/ (register_app, update_app) already commits
-    and pushes immediately for exactly this reason -- dispatch_once's
-    absorption path was the one gap. One commit per app per dispatch batch
-    (not one per request), same "durable before this call returns success"
-    bar the inbox write itself already holds."""
+def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:
+    """Commit and push .agentra/ -- returns an error string on failure
+    (caller decides how to surface it), None on success. Any write that
+    only touches the local checkout (Memory.record_*, mem.write, etc.) is
+    NOT durable on its own -- confirmed live for the backlog-absorption
+    path: an addition would vanish the next time a *different* Cloud Run
+    instance (a fresh checkout, cloned straight from git) served a request
+    for the same app, since nothing had ever pushed it anywhere. Shared by
+    dispatch_once's backlog absorption and server.py's chat/work-update/
+    standup endpoints -- every write path that touches .agentra/ needs
+    this same "durable before the call returns success" bar register_app/
+    update_app already hold themselves to."""
     from agentra.agents.git_ops import GitOpError, commit_and_push
 
     try:
-        commit_and_push(repo, branch, f"agentra: absorb inbox requests for {app!r}", [".agentra/"])
+        commit_and_push(repo, branch, message, [".agentra/"])
+        return None
     except GitOpError as exc:
-        errors.append(f"{app}: applied locally but failed to push .agentra/: {exc}")
+        return str(exc)
+
+
+def _persist_backlog(app: str, repo: Path, branch: str, errors: list[str]) -> None:
+    error = persist_agentra_dir(repo, branch, f"agentra: absorb inbox requests for {app!r}")
+    if error:
+        errors.append(f"{app}: applied locally but failed to push .agentra/: {error}")
 
 
 # ── Local (file-based) fallback implementation ──────────────────────────────
@@ -695,23 +702,34 @@ def loop_id_for(objective: str) -> str:
     return hashlib.sha1(objective.encode("utf-8")).hexdigest()[:10]
 
 
-def list_loops(app: str) -> list[dict]:
-    """One object per loop_id for `app`: the objective it was working
-    toward, every run made under it (oldest first), and cost/agent
-    aggregates across all of them. Cross-references agent_steps by run_key
-    (server.py passes its run_key down as the cycle's own run_id, so the
-    two are the same value for anything dispatched over HTTP -- see
+def list_loops(app: str | None = None) -> list[dict]:
+    """One object per loop_id for `app` (every app's loops, newest first,
+    when app is None -- the dashboard's "All apps" view): the objective it
+    was working toward, every run made under it (oldest first), and
+    cost/agent aggregates across all of them. Cross-references agent_steps
+    by run_key (server.py passes its run_key down as the cycle's own run_id,
+    so the two are the same value for anything dispatched over HTTP -- see
     run_autonomous_cycle's run_id parameter)."""
-    runs = [r for r in list_runs(limit=1000) if r.get("app") == app and r.get("loop_id")]
+    runs = [r for r in list_runs(limit=1000) if (app is None or r.get("app") == app) and r.get("loop_id")]
     steps = list_agent_steps(app=app, limit=2000)
     steps_by_run_key: dict[str, list[dict]] = {}
     for s in steps:
         steps_by_run_key.setdefault(s.get("run_id"), []).append(s)
 
-    loops: dict[str, dict] = {}
+    loops: dict[tuple[str, str], dict] = {}
     for run in runs:
-        lid = run["loop_id"]
-        loop = loops.setdefault(lid, {"loop_id": lid, "objective": run.get("objective"), "runs": []})
+        # loop_id alone is a hash of the objective text (loop_id_for),
+        # nothing app-scoped about it -- fine when this function only ever
+        # saw one app's runs, but aggregating across every app (app=None)
+        # means two apps with the same objective text would otherwise
+        # silently merge into a single loop mixing both apps' runs
+        # together. Keying on (app, loop_id) keeps the single-app case
+        # identical (app is constant within it anyway) while making the
+        # cross-app case actually correct.
+        key = (run.get("app"), run["loop_id"])
+        loop = loops.setdefault(
+            key, {"loop_id": run["loop_id"], "app": run.get("app"), "objective": run.get("objective"), "runs": []}
+        )
         loop["runs"].append(run)
 
     result = []

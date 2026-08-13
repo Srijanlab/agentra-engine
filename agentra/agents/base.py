@@ -44,6 +44,24 @@ _WHITESPACE = re.compile(r"\s+")
 # or otherwise idempotent -- see run_agent's retry_on_contradictory_result docstring.
 _CONTRADICTORY_RESULT_SUFFIX = "returned an error result: success"
 
+_MAX_TURNS_PATTERN = re.compile(r"Reached maximum number of turns \(\d+\)")
+
+
+def _friendly_error_text(raw: str) -> str:
+    """Confirmed live: a grounded chat question ("is everything green?",
+    Testing Agent, max_turns=5) that needed more tool calls than it had
+    turns for raised "agent turn raised: Claude Code returned an error
+    result: Reached maximum number of turns (N)" -- the CLI's internal
+    exception text, verbatim, straight into a chat bubble. Callers that
+    show `text` directly to a human (chat, standup channel -- NOT the
+    autonomous-cycle callers, who log this and move on programmatically)
+    should route it through here first."""
+    if _MAX_TURNS_PATTERN.search(raw):
+        return "I needed more steps than I had available to fully answer that -- try asking something narrower, or ask again for another attempt."
+    if _CONTRADICTORY_RESULT_SUFFIX in raw:
+        return "Claude Code returned a self-contradictory result (known CLI quirk, not a real failure) -- try asking again."
+    return raw
+
 RunLogger = Callable[[str], None]
 _RUN_LOGGER: ContextVar[RunLogger | None] = ContextVar("agentra_run_logger", default=None)
 
@@ -191,6 +209,12 @@ class AgentResult:
     json_data: dict[str, Any] | None
     cost_usd: float
     turns: int
+    # The CLI's own session id for this turn (ResultMessage.session_id) --
+    # pass back in as run_agent's `resume` argument to continue this exact
+    # session on a later call instead of starting cold. None only if the
+    # turn never produced a ResultMessage at all (the early-return failure
+    # paths below).
+    session_id: str | None = None
 
 
 def extract_json_block(text: str) -> dict[str, Any] | None:
@@ -201,6 +225,26 @@ def extract_json_block(text: str) -> dict[str, Any] | None:
         return json.loads(match.group(1))
     except json.JSONDecodeError:
         return None
+
+
+def label_to_id(label: str) -> str:
+    if "Codebase" in label:
+        return "codebase"
+    if "Discovery" in label:
+        return "discovery"
+    if "Implementation" in label:
+        return "implementation"
+    if "Testing" in label:
+        return "testing"
+    if "Deployment" in label:
+        return "deployment"
+    if "Feedback" in label:
+        return "feedback"
+    if "Production Debugging" in label:
+        return "prod_debug"
+    if "Custom" in label:
+        return "custom"
+    return "orchestrator"
 
 
 async def run_agent(
@@ -214,8 +258,17 @@ async def run_agent(
     allow_prod: bool = False,
     retry_on_contradictory_result: bool = True,
     agent_label: str | None = None,
+    resume: str | None = None,
 ) -> AgentResult:
     """Run one agent to completion and return its final result message.
+
+    resume: a session_id from a previous call's AgentResult.session_id --
+    continues that exact session (full prior context, same as `claude -c`)
+    instead of a cold-start turn from just `prompt` alone. None (the
+    default, and what every background-cycle caller still passes) starts a
+    fresh session same as before -- resumption is opt-in for callers that
+    actually want conversational continuity, e.g. server.py's per-agent
+    chat.
 
     allow_prod must only be set True for the single, explicitly-approved
     prod-promotion call in the auto-remediate hotfix path — never as a
@@ -248,6 +301,7 @@ async def run_agent(
         max_turns=max_turns,
         include_partial_messages=True,
         include_hook_events=True,
+        resume=resume,
     )
 
     attempts = 2 if retry_on_contradictory_result else 1
@@ -280,10 +334,100 @@ async def run_agent(
         return AgentResult(ok=False, text="", json_data=None, cost_usd=0.0, turns=0)
 
     text = result_msg.result or ""
-    return AgentResult(
+    res = AgentResult(
         ok=not result_msg.is_error,
         text=text,
         json_data=extract_json_block(text),
         cost_usd=result_msg.total_cost_usd or 0.0,
         turns=result_msg.num_turns,
+        session_id=result_msg.session_id,
     )
+    if res.ok and res.json_data and "work_update" in res.json_data:
+        try:
+            from agentra.memory import Memory
+            mem = Memory(cwd)
+            agent_id = label_to_id(agent_label or "Agent")
+            mem.record_work_update(agent_id, res.json_data["work_update"])
+        except Exception:
+            pass
+    return res
+
+
+async def stream_chat_turn(
+    *,
+    prompt: str,
+    system_prompt: str,
+    cwd: Path,
+    allowed_tools: list[str],
+    max_turns: int | None = None,
+    resume: str | None = None,
+    agent_label: str | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Streaming sibling of run_agent, for server.py's chat endpoint only --
+    NOT a general replacement (every autonomous-cycle caller stays on
+    run_agent). Yields {"type": "delta", "text": ...} as assistant text
+    arrives (content_block_delta/text_delta stream events -- confirmed live
+    against the real SDK output, see the type field literally matching
+    Anthropic's own streaming API shape), then exactly one final
+    {"type": "done", "ok", "text" (full), "json_data", "cost_usd", "turns",
+    "session_id"} matching AgentResult's fields, so callers that want the
+    complete picture don't have to reassemble it from deltas themselves.
+
+    Deliberately no retry-on-contradictory-result: a blind full retry after
+    already streaming partial output to a human would mean silently
+    discarding what they saw and restarting mid-conversation, more
+    confusing than just surfacing the error -- callers that hit this can
+    just send another message, same as any other chat failure. Also no
+    work_update auto-persistence here (server.py's caller already does its
+    own post-processing on the final "done" event, same as it does for
+    run_agent's return value)."""
+    options = ClaudeAgentOptions(
+        cwd=str(cwd),
+        system_prompt=system_prompt,
+        allowed_tools=allowed_tools,
+        permission_mode="bypassPermissions",
+        hooks=make_hooks(allow_prod=False),
+        max_turns=max_turns,
+        include_partial_messages=True,
+        resume=resume,
+    )
+
+    raw_logger = _RUN_LOGGER.get()
+    label = agent_label or "Agent"
+    logger = (lambda line: raw_logger(f"[{label}] {line}")) if raw_logger else None
+
+    result_msg: ResultMessage | None = None
+    try:
+        if logger:
+            logger(f"claude chat stream start | cwd={cwd} tools={allowed_tools} max_turns={max_turns} resume={resume!r}")
+        async for message in query(prompt=single_prompt_stream(prompt), options=options):
+            log_claude_message(message, logger)
+            if isinstance(message, StreamEvent):
+                event = message.event
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta") or {}
+                    if delta.get("type") == "text_delta" and delta.get("text"):
+                        yield {"type": "delta", "text": delta["text"]}
+            elif isinstance(message, ResultMessage):
+                result_msg = message
+    except Exception as exc:
+        yield {
+            "type": "done", "ok": False, "text": _friendly_error_text(f"agent turn raised: {exc}"),
+            "json_data": None, "cost_usd": 0.0, "turns": 0, "session_id": None,
+        }
+        return
+
+    if result_msg is None:
+        yield {"type": "done", "ok": False, "text": "", "json_data": None, "cost_usd": 0.0, "turns": 0, "session_id": None}
+        return
+
+    text = result_msg.result or ""
+    yield {
+        "type": "done",
+        "ok": not result_msg.is_error,
+        "text": text,
+        "json_data": extract_json_block(text),
+        "cost_usd": result_msg.total_cost_usd or 0.0,
+        "turns": result_msg.num_turns,
+        "session_id": result_msg.session_id,
+    }

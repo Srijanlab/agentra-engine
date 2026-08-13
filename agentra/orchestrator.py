@@ -79,8 +79,7 @@ async def run_cycle(
         env = _load_env(repo, mem, run_id)
 
         mem.log(run_id, "codebase agent: starting")
-        cb = await codebase.run(repo)
-        mem.write("architecture", "codebase", cb.text)
+        cb = await codebase.run_cached(repo, mem)
         mem.log(run_id, f"codebase agent: ok={cb.ok} turns={cb.turns} cost=${cb.cost_usd:.4f}")
         if not cb.ok:
             return CycleReport(run_id, feature or "", False, False, False, None, [], "codebase understanding failed; aborting cycle")
@@ -147,7 +146,7 @@ async def run_cycle(
                 preview_url = (deploy.json_data or {}).get("preview_url")
                 if preview_url:
                     mem.log(run_id, "testing agent: starting (live pre-prod verification)")
-                    pre_prod_test = await testing.run_pre_prod(repo, cb.text, preview_url)
+                    pre_prod_test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id)
                     mem.log(
                         run_id,
                         f"testing agent (pre-prod): ok={pre_prod_test.ok} turns={pre_prod_test.turns} "
@@ -260,7 +259,7 @@ async def run_prod_debug_cycle(
             return ProdDebugReport(run_id, True, severity, False, False, diag.text)
 
         mem.log(run_id, "prod-debug: auto_remediate_prod is on; building fix")
-        cb = await codebase.run(repo)
+        cb = await codebase.run_cached(repo, mem)
         registry.record_agent_step(repo.name, run_id, "understand_codebase", cb.ok, cb.cost_usd, cb.turns, "understand_codebase: ok=%s" % cb.ok)
         feature_branch = feature_branch_name(env, run_id, f"hotfix-{severity}")
         impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch)
@@ -297,7 +296,7 @@ async def run_prod_debug_cycle(
 
         # Must verify the actual live deployment here, not re-run local tests — the whole point
         # of this gate is proving the hotfix works once deployed, before it's ever allowed near prod.
-        test = await testing.run_pre_prod(repo, cb.text, preview_url)
+        test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id)
         test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
         mem.log(run_id, f"prod-debug: live pre-prod verification passed={test_passed}")
         registry.record_agent_step(

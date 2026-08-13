@@ -1,0 +1,103 @@
+"""Regression tests for agents/codebase.py's run_cached() -- the Codebase
+Agent's repo scan is a real multi-turn LLM call, so this must only re-run
+it when HEAD has actually moved since the last cached scan, and must
+always reuse it otherwise (same commit == same repo == same scan).
+
+Real local git repo on disk (a plain `git init` + commits), same pattern
+as test_registry_sync.py -- the point of this test is real `git rev-parse
+HEAD` behavior, not a mocked git.
+"""
+
+import asyncio
+import subprocess
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+from agentra.agents import codebase
+from agentra.agents.base import AgentResult
+from agentra.memory import Memory
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-b", "main")
+    _git(path, "config", "user.email", "test@example.com")
+    _git(path, "config", "user.name", "Test")
+    (path / "README.md").write_text("hello\n")
+    _git(path, "add", ".")
+    _git(path, "commit", "-m", "initial commit")
+    return path
+
+
+def _fake_result(text: str) -> AgentResult:
+    return AgentResult(ok=True, text=text, json_data={"framework": "test"}, cost_usd=0.05, turns=3)
+
+
+def test_run_cached_calls_run_on_first_invocation(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    mock_run = AsyncMock(return_value=_fake_result("summary v1"))
+    monkeypatch.setattr(codebase, "run", mock_run)
+
+    result = asyncio.run(codebase.run_cached(repo, mem))
+
+    assert result.text == "summary v1"
+    assert mock_run.await_count == 1
+    assert mem.read("architecture", "codebase") == "summary v1"
+    assert mem.codebase_spec_commit() == _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_run_cached_reuses_cache_when_head_unchanged(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    mock_run = AsyncMock(return_value=_fake_result("summary v1"))
+    monkeypatch.setattr(codebase, "run", mock_run)
+
+    first = asyncio.run(codebase.run_cached(repo, mem))
+    second = asyncio.run(codebase.run_cached(repo, mem))
+
+    # The real (expensive) scan must only have run once -- the second call
+    # found HEAD unchanged and served the cached summary instead.
+    assert mock_run.await_count == 1
+    assert second.text == first.text == "summary v1"
+    assert second.cost_usd == 0.0
+    assert second.turns == 0
+    assert second.ok is True
+
+
+def test_run_cached_regenerates_after_a_new_commit(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    mock_run = AsyncMock(side_effect=[_fake_result("summary v1"), _fake_result("summary v2")])
+    monkeypatch.setattr(codebase, "run", mock_run)
+
+    asyncio.run(codebase.run_cached(repo, mem))
+
+    # Simulate Implementation Agent committing a real change to the repo.
+    (repo / "feature.py").write_text("x = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add feature")
+
+    second = asyncio.run(codebase.run_cached(repo, mem))
+
+    assert mock_run.await_count == 2
+    assert second.text == "summary v2"
+    assert mem.codebase_spec_commit() == _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_run_cached_does_not_cache_a_failed_scan(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    failed = AgentResult(ok=False, text="agent error", json_data=None, cost_usd=0.01, turns=1)
+    mock_run = AsyncMock(return_value=failed)
+    monkeypatch.setattr(codebase, "run", mock_run)
+
+    result = asyncio.run(codebase.run_cached(repo, mem))
+
+    assert result.ok is False
+    assert mem.codebase_spec_commit() is None
+    assert mem.read("architecture", "codebase") is None

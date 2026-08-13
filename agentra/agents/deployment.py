@@ -162,6 +162,19 @@ def _sync_branch_to_remote(repo: Path, branch: str) -> None:
     pull_latest(repo, branch)
 
 
+# Paths under here are Memory's own regenerated notes (understand_codebase's
+# architecture summary, per-run decision/feature/metric write-ups) -- nobody
+# hand-edits these, each branch just independently overwrites them on its
+# own cycles, so a content conflict here reflects two branches re-describing
+# the same repo slightly differently, never an actual code disagreement that
+# needs a human's judgment. Confirmed live: a real promote blocked on
+# exactly this (conflict in .agentra/memory/architecture/codebase.md, two
+# unrelated code files in the same merge auto-merged fine) -- safe to always
+# take source_ref's copy here since it's the freshest regeneration, same
+# choice a human resolving it by hand would make.
+_AUTO_RESOLVE_OURS_PREFIX = ".agentra/memory/"
+
+
 def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | None:
     """Merge source_ref into target_branch (already synced to its remote tip) and push.
     Returns an error message on failure (merge left aborted, nothing pushed), None on success.
@@ -177,8 +190,37 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
         ["git", "-C", str(repo), "merge", "--no-edit", source_ref], capture_output=True, text=True,
     )
     if merge.returncode != 0:
+        conflicts = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--name-only", "--diff-filter=U"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        if conflicts and all(path.startswith(_AUTO_RESOLVE_OURS_PREFIX) for path in conflicts):
+            checkout = subprocess.run(
+                ["git", "-C", str(repo), "checkout", source_ref, "--", *conflicts],
+                capture_output=True, text=True,
+            )
+            add = subprocess.run(["git", "-C", str(repo), "add", *conflicts], capture_output=True, text=True)
+            commit = subprocess.run(
+                ["git", "-C", str(repo), "commit", "--no-edit"], capture_output=True, text=True,
+            )
+            if checkout.returncode == 0 and add.returncode == 0 and commit.returncode == 0:
+                try:
+                    push_branch(repo, target_branch)
+                except GitOpError as exc:
+                    return f"Push of {target_branch!r} failed: {exc}"
+                return None
+            # Auto-resolve itself failed unexpectedly -- fall through to the
+            # normal abort-and-report path rather than leaving a half-resolved
+            # merge in place.
         subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True, text=True)
-        return f"Merge of {source_ref!r} into {target_branch!r} failed, aborted: {merge.stderr}"
+        # git writes the actually-useful diagnostic ("CONFLICT (content):
+        # Merge conflict in ...", "Automatic merge failed...") to STDOUT,
+        # not stderr -- confirmed live: a real failed promote reported this
+        # error with stderr present-but-empty, so the human saw "failed,
+        # aborted: " and nothing else. stderr kept too since some failure
+        # modes (e.g. an unrelated-histories error) do write there instead.
+        detail = "\n".join(part for part in (merge.stdout.strip(), merge.stderr.strip()) if part)
+        return f"Merge of {source_ref!r} into {target_branch!r} failed, aborted: {detail}"
     try:
         push_branch(repo, target_branch)
     except GitOpError as exc:

@@ -12,7 +12,11 @@ run_pre_prod() is the other half: independently verify the LIVE deployed
 pre-prod URL after deploy_pre_prod succeeds. Deliberately not a re-run of
 run_local()'s job — it assumes the code already passed local testing, and
 focuses on what only shows up once the artifact is actually deployed and
-serving traffic.
+serving traffic. It also captures a full-page screenshot of {preview_url}
+deterministically (agents/screenshot.py, not left to the LLM to script
+itself) to .agentra/test_artifacts/{run_id}/screenshot.png, for a human
+reviewing the run to see the actual live page rather than only reading the
+agent's prose report of it.
 """
 
 from pathlib import Path
@@ -104,11 +108,27 @@ Run the full local test/QA pass now, following your system prompt."""
     )
 
 
-async def run_pre_prod(repo: Path, codebase_summary: str, preview_url: str) -> AgentResult:
+def screenshot_path(repo: Path, run_id: str) -> Path:
+    return repo / ".agentra" / "test_artifacts" / run_id / "screenshot.png"
+
+
+async def run_pre_prod(repo: Path, codebase_summary: str, preview_url: str, run_id: str) -> AgentResult:
+    from agentra.agents import screenshot
+
+    ok, detail = await screenshot.capture(preview_url, screenshot_path(repo, run_id))
+    screenshot_note = (
+        "A full-page screenshot of the live URL was already captured for you and is attached "
+        "to this run's report -- no need to take your own."
+        if ok
+        else f"Screenshot capture failed ({detail}) -- note this in your report, but don't let it block the rest of your verification."
+    )
+
     prompt = f"""Codebase summary:
 {codebase_summary}
 
 The feature was just deployed to: {preview_url}
+
+{screenshot_note}
 
 Independently verify the live deployment now, following your system prompt."""
     system_prompt = PRE_PROD_SYSTEM_PROMPT.format(preview_url=preview_url)

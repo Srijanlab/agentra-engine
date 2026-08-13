@@ -39,8 +39,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Agent shells out to, globally
 RUN npm install -g @anthropic-ai/claude-code vercel firebase-tools --no-update-notifier
 
-# Copy installed agentra from builder
+# Copy installed agentra (and its playwright dependency) from builder
 COPY --from=builder /install /usr/local
+
+# Chromium for Testing Agent's pre-prod screenshot capture (agents/
+# screenshot.py) -- installed to a shared, world-readable path instead of
+# the default ~/.cache under whichever user runs this install step (root,
+# here), since the browser actually gets launched by agentuser at runtime.
+# --with-deps pulls the OS-level libraries (fonts, libnss3, etc.) headless
+# Chromium needs to launch at all, not just the browser binary itself.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/playwright-browsers
 
 # Create a non-root user for safer execution, and pre-create /workspace owned by it --
 # so a *fresh* named/anonymous volume mounted at /workspace (the server/clone-on-start

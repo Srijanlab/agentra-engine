@@ -28,6 +28,11 @@ variable "claude_code_oauth_token" {
     or the local .claude_oauth_token file). Stored in Secret Manager, never
     as a plain env var or committed to the repo. Expires -- see
     docs/deployment.md for the rotation procedure.
+
+    Not read by anything since the Cloud Run -> VM migration (the VM
+    authenticates via an interactive `claude auth login` session on its
+    persistent disk instead) -- kept declared deliberately as a ready
+    fallback auth path for the VM too, not removed as dead config.
   EOT
   type        = string
   sensitive   = true
