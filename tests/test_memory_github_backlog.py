@@ -158,7 +158,7 @@ def test_record_known_bug_creates_a_github_issue(tmp_path, monkeypatch):
     mem.record_known_bug("run1", "high", "Checkout crashes", "null-check the cart")
 
     assert created["title"] == "Checkout crashes"
-    assert created["labels"] == ["bug"]
+    assert created["labels"] == ["bug", "agentra"]
 
 
 def test_record_known_bug_adds_need_human_and_blocking_agentra_labels(tmp_path, monkeypatch):
@@ -175,7 +175,7 @@ def test_record_known_bug_adds_need_human_and_blocking_agentra_labels(tmp_path, 
         needs_human=True, blocking_agentra=True,
     )
 
-    assert created["labels"] == ["bug", "need_human", "blocking_agentra"]
+    assert created["labels"] == ["bug", "agentra", "need_human", "blocking_agentra"]
 
 
 def test_record_known_bug_adds_labels_to_an_existing_duplicate_instead_of_a_fresh_issue(tmp_path, monkeypatch):
@@ -333,7 +333,7 @@ def test_feature_queue_reads_from_github(tmp_path, monkeypatch):
 
     queue = mem.feature_queue()
 
-    assert captured["labels"] == ["feature"]
+    assert captured["labels"] == ["feature", "agentra"]
     assert queue == [{"description": "Add dark mode", "source": "github", "external_id": "5", "html_url": None}]
 
 
@@ -367,7 +367,7 @@ def test_in_progress_features_reads_from_github(tmp_path, monkeypatch):
 
     result = mem.in_progress_features()
 
-    assert captured["labels"] == ["feature"]
+    assert captured["labels"] == ["feature", "agentra"]
     assert result == [
         {
             "description": "Big feature",
@@ -446,7 +446,7 @@ def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):
     mem.record_feature_request("Add keyboard shortcuts")
 
     assert created["title"] == "Add keyboard shortcuts"
-    assert created["labels"] == ["feature"]
+    assert created["labels"] == ["feature", "agentra"]
 
 
 def test_record_feature_request_adds_the_new_issue_to_the_project_as_todo(tmp_path, monkeypatch):
@@ -489,12 +489,17 @@ def test_record_in_progress_branch_delegates_to_github_issues(tmp_path, monkeypa
     monkeypatch.setattr(
         github_issues,
         "record_in_progress_branch",
-        lambda repo_url, issue_number, branch: captured.update(issue_number=issue_number, branch=branch),
+        lambda repo_url, issue_number, branch, run_id=None: captured.update(issue_number=issue_number, branch=branch, run_id=run_id),
+    )
+    labeled = {}
+    monkeypatch.setattr(
+        github_issues, "add_labels", lambda repo_url, issue_number, labels: labeled.update(issue_number=issue_number, labels=labels)
     )
 
-    mem.record_in_progress_branch(13, "dev/abc123-fix-sort-order")
+    mem.record_in_progress_branch(13, "dev/abc123-fix-sort-order", "run42")
 
-    assert captured == {"issue_number": 13, "branch": "dev/abc123-fix-sort-order"}
+    assert captured == {"issue_number": 13, "branch": "dev/abc123-fix-sort-order", "run_id": "run42"}
+    assert labeled == {"issue_number": 13, "labels": ["status:in-progress"]}
 
 
 def test_record_in_progress_branch_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
@@ -569,7 +574,7 @@ def test_closed_bugs_reads_from_github(tmp_path, monkeypatch):
 
     bugs = mem.closed_bugs()
 
-    assert captured["labels"] == ["bug"]
+    assert captured["labels"] == ["bug", "agentra"]
     assert bugs == [
         {
             "run_id": "6",
@@ -580,6 +585,7 @@ def test_closed_bugs_reads_from_github(tmp_path, monkeypatch):
             "external_id": "6",
             "html_url": "https://github.com/acme/app/issues/6",
             "closed_at": "2026-08-13T00:00:00Z",
+            "status_done": False,
         }
     ]
 
@@ -627,3 +633,52 @@ def test_record_commit_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
     )
 
     mem.record_commit(13, "abc1234")  # must not raise
+
+
+# ── mark_status_done() / resume_run_id_for() ───────────────────────────────
+
+
+def test_mark_status_done_delegates_to_add_labels(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    captured = {}
+    monkeypatch.setattr(
+        github_issues,
+        "add_labels",
+        lambda repo_url, issue_number, labels: captured.update(issue_number=issue_number, labels=labels),
+    )
+
+    mem.mark_status_done(13)
+
+    assert captured == {"issue_number": 13, "labels": ["status:done"]}
+
+
+def test_mark_status_done_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+    monkeypatch.setattr(github_issues, "add_labels", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub")))
+
+    mem.mark_status_done(13)  # must not raise
+
+
+def test_resume_run_id_for_delegates_to_github_issues(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "get_in_progress_run_id",
+        lambda repo_url, issue_number: "run42" if issue_number == 13 else None,
+    )
+
+    assert mem.resume_run_id_for("13") == "run42"
+    assert mem.resume_run_id_for("99") is None
+
+
+def test_resume_run_id_for_returns_none_for_a_non_numeric_id(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_in_progress_run_id", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub"))
+    )
+
+    assert mem.resume_run_id_for("not-a-number") is None

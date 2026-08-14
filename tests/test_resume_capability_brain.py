@@ -118,7 +118,7 @@ def test_implement_feature_records_in_progress_branch_when_resolving_a_known_bug
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     marker_calls = []
-    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch: marker_calls.append((issue_number, branch)))
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None: marker_calls.append((issue_number, branch, run_id)))
 
     result = asyncio.run(
         _tool(session, "implement_feature").handler(
@@ -127,7 +127,7 @@ def test_implement_feature_records_in_progress_branch_when_resolving_a_known_bug
     )
 
     assert result.get("is_error") is not True
-    assert marker_calls == [(13, session.feature_branch)]
+    assert marker_calls == [(13, session.feature_branch, session.run_id)]
 
 
 def test_implement_feature_records_in_progress_branch_on_the_parent_when_continuing_a_multi_part_feature(tmp_path, monkeypatch):
@@ -140,7 +140,7 @@ def test_implement_feature_records_in_progress_branch_on_the_parent_when_continu
     monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 21, "board_issue_number": 20})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     marker_calls = []
-    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch: marker_calls.append((issue_number, branch)))
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None: marker_calls.append((issue_number, branch, run_id)))
 
     asyncio.run(
         _tool(session, "implement_feature").handler(
@@ -148,7 +148,7 @@ def test_implement_feature_records_in_progress_branch_on_the_parent_when_continu
         )
     )
 
-    assert marker_calls == [(20, session.feature_branch)]
+    assert marker_calls == [(20, session.feature_branch, session.run_id)]
 
 
 def test_implement_feature_records_in_progress_branch_even_when_implementation_fails(tmp_path, monkeypatch):
@@ -163,7 +163,7 @@ def test_implement_feature_records_in_progress_branch_even_when_implementation_f
     monkeypatch.setattr(brain.implementation, "run", fake_run)
     monkeypatch.setattr(session.mem, "record_failure", lambda *a, **k: None)
     marker_calls = []
-    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch: marker_calls.append((issue_number, branch)))
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None: marker_calls.append((issue_number, branch, run_id)))
 
     result = asyncio.run(
         _tool(session, "implement_feature").handler(
@@ -172,7 +172,7 @@ def test_implement_feature_records_in_progress_branch_even_when_implementation_f
     )
 
     assert result.get("is_error") is True
-    assert marker_calls == [(13, session.feature_branch)]
+    assert marker_calls == [(13, session.feature_branch, session.run_id)]
 
 
 def test_implement_feature_links_the_commit_on_the_tracking_issue(tmp_path, monkeypatch):

@@ -139,6 +139,12 @@ def _branch_head_sha(repo: Path, branch: str) -> str | None:
 
 
 def _record_production_release(repo: Path, run_id: str) -> list[str]:
+    """The "final deployment" trigger for issue lifecycle status (see
+    memory.py's _STATUS_DONE_LABEL) -- everything currently shipped-but-not-
+    released (features) or closed-but-not-done (bugs) is, by definition,
+    what this promotion actually shipped, so all of it gets status:done
+    here. Same code path regardless of whether a human clicked Promote in
+    the dashboard or an autonomous cycle triggered it (both call this)."""
     env = environments.load(repo) or environments.EnvironmentConfig()
     mem = Memory(repo)
     released = {feature["feature"] for feature in mem.released_features()}
@@ -147,10 +153,15 @@ def _record_production_release(repo: Path, run_id: str) -> list[str]:
 
     for feature in mem.shipped_features():
         name = feature["feature"]
-        if name in released:
-            continue
-        mem.record_released(name, release_run_id=run_id, commit_sha=prod_sha or feature.get("commit_sha"))
-        newly_released.append(name)
+        if name not in released:
+            mem.record_released(name, release_run_id=run_id, commit_sha=prod_sha or feature.get("commit_sha"))
+            newly_released.append(name)
+        if not feature.get("status_done") and feature.get("external_id", "").isdigit():
+            mem.mark_status_done(int(feature["external_id"]))
+
+    for bug in mem.closed_bugs():
+        if not bug.get("status_done") and bug.get("external_id", "").isdigit():
+            mem.mark_status_done(int(bug["external_id"]))
 
     if newly_released:
         persist_error = deployment.persist_audit_trail(repo, env.prod_branch)

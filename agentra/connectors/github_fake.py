@@ -151,9 +151,13 @@ class FakeGitHubBackend:
         return [{"body": c} for c in self.issues[repo_url].get(issue_number, {}).get("comments", [])]
 
     _IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
+    _IN_PROGRESS_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
 
-    def record_in_progress_branch(self, repo_url: str, issue_number: int, branch: str) -> None:
-        self.add_comment(repo_url, issue_number, f"In-Progress-Branch: {branch}")
+    def record_in_progress_branch(self, repo_url: str, issue_number: int, branch: str, run_id: str | None = None) -> None:
+        body = f"In-Progress-Branch: {branch}"
+        if run_id:
+            body += f"\nRun-ID: {run_id}"
+        self.add_comment(repo_url, issue_number, body)
 
     def get_in_progress_branch(self, repo_url: str, issue_number: int) -> str | None:
         comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
@@ -161,6 +165,15 @@ class FakeGitHubBackend:
             match = self._IN_PROGRESS_BRANCH_RE.search(comment)
             if match:
                 return match.group(1)
+        return None
+
+    def get_in_progress_run_id(self, repo_url: str, issue_number: int) -> str | None:
+        comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
+        for comment in reversed(comments):
+            if not self._IN_PROGRESS_BRANCH_RE.search(comment):
+                continue
+            match = self._IN_PROGRESS_RUN_ID_RE.search(comment)
+            return match.group(1) if match else None
         return None
 
     def record_commit(self, repo_url: str, issue_number: int, commit_sha: str) -> None:
@@ -278,6 +291,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_comments", backend.list_comments),
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),
         (github_issues, "get_in_progress_branch", backend.get_in_progress_branch),
+        (github_issues, "get_in_progress_run_id", backend.get_in_progress_run_id),
         (github_issues, "record_spec", backend.record_spec),
         (github_issues, "get_spec", backend.get_spec),
         (github_issues, "record_commit", backend.record_commit),

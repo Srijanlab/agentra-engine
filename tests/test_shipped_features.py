@@ -68,6 +68,7 @@ def test_shipped_features_reads_from_github(tmp_path, monkeypatch):
             "ts": "2026-08-10T12:00:00Z",
             "external_id": "12",
             "html_url": None,
+            "status_done": False,
         }
     ]
 
@@ -91,6 +92,7 @@ def test_shipped_features_tolerates_a_body_with_no_structured_fields(tmp_path, m
             "ts": "2026-01-01T00:00:00Z",
             "external_id": "3",
             "html_url": None,
+            "status_done": False,
         }
     ]
 
@@ -122,7 +124,7 @@ def test_record_shipped_creates_and_closes_a_fresh_issue_for_a_self_initiated_fe
     result = mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
 
     assert created["title"] == "Dark mode"
-    assert created["labels"] == ["feature"]
+    assert created["labels"] == ["feature", "agentra"]
     assert closed["issue_number"] == 99
     assert "run42" in closed["comment"]
     assert "abc1234" in closed["comment"]
@@ -203,7 +205,7 @@ def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path,
 
     result = mem.record_shipped("Part two", commit_sha="cafe123", run_id="run9", sub_feature_of="10")
 
-    assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["story"]}
+    assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["story", "agentra"]}
     # Lands on the PARENT's board (feature_issue_number=10, the parent's own
     # title), as an additional item (issue_number=55), not a board of its own.
     # A second call moves the PARENT's own card too -- "Done" here since
@@ -348,6 +350,60 @@ def test_record_shipped_starts_a_multi_part_feature_using_the_feature_queue_issu
     assert closed == [21]  # the sub-issue only -- issue #7 (the feature_queue entry) stays open
     assert project_calls == [(7, 21, "Done"), (7, None, "In Progress")]
     assert result == {"issue_number": 21, "board_issue_number": 7}
+
+
+def test_record_shipped_closes_a_similar_open_bug_instead_of_orphaning_a_fresh_issue(tmp_path, monkeypatch):
+    # The real bug this fixes: a known-bug fix's caller is supposed to pass
+    # resolves_id/resolves_origin, but confirmed live (issues #13/#16,
+    # #1/#19, #6/#15) it doesn't always -- leaving the original bug open
+    # forever while an orphaned "shipped" issue captures the fix.
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: (
+            [{"number": 13, "title": "Runs within a loop are listed oldest-first, not newest-first", "body": ""}]
+            if labels == ["bug", "agentra"]
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not orphan a fresh issue"))
+    )
+    closed = {}
+    monkeypatch.setattr(
+        github_issues,
+        "close_issue",
+        lambda repo_url, issue_number, comment=None, body_suffix=None: closed.update(issue_number=issue_number),
+    )
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+
+    result = mem.record_shipped("Runs within a loop are listed oldest-first, not newest-first -- fixed", run_id="run1")
+
+    assert closed["issue_number"] == 13
+    assert result == {"issue_number": 13, "board_issue_number": 13}
+
+
+def test_record_shipped_still_creates_a_fresh_issue_when_nothing_similar_is_open(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues, "list_open_issues", lambda repo_url, labels=None: [{"number": 3, "title": "Totally unrelated", "body": ""}]
+    )
+    created = {}
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda repo_url, title, body, labels=None: created.update(title=title) or {"number": 99}
+    )
+    monkeypatch.setattr(github_issues, "close_issue", lambda *a, **k: None)
+    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
+
+    result = mem.record_shipped("Brand new feature nobody asked for yet", run_id="run1")
+
+    assert created["title"] == "Brand new feature nobody asked for yet"
+    assert result == {"issue_number": 99, "board_issue_number": 99}
 
 
 def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):

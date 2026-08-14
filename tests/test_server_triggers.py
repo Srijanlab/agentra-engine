@@ -199,6 +199,30 @@ def test_promote_background_records_released_features(tmp_path, monkeypatch):
     body = response.json()
     assert body["released_count"] == 2
     assert body["released"][1]["release_run_id"] == "promote-run"
+    # Both the newly-released feature and the already-released one get
+    # status:done -- "already released" only tracks the old released.json
+    # ledger, not the label, so a feature released before this label
+    # existed still needs to be marked done as part of the next promotion.
+    shipped_by_name = {f["feature"]: f for f in Memory(repo).shipped_features()}
+    assert shipped_by_name["Ready to ship dashboard"]["status_done"] is True
+    assert shipped_by_name["Already released feature"]["status_done"] is True
+
+
+def test_promote_background_marks_closed_bugs_as_status_done(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    environments.save(repo, environments.EnvironmentConfig(prod_branch="production"))
+    mem = Memory(repo)
+    mem.record_known_bug("run1", "high", "A real bug", "the fix")
+    bug_id = mem.known_bugs()[0]["external_id"]
+    mem.clear_known_bug(bug_id, "Resolved by agentra.")
+
+    monkeypatch.setattr(server, "_branch_head_sha", lambda _repo, branch: None)
+    monkeypatch.setattr(server.deployment, "persist_audit_trail", lambda _repo, branch: None)
+
+    server._record_production_release(repo, "promote-run")
+
+    assert Memory(repo).closed_bugs()[0]["status_done"] is True
 
 
 def test_run_logs_endpoint_streams_existing_lines(tmp_path, monkeypatch):

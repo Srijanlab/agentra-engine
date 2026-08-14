@@ -86,10 +86,11 @@ def create_issue(repo_url: str, title: str, body: str, labels: list[str] | None 
 
 
 def list_open_issues(repo_url: str, labels: list[str] | None = None) -> list[dict]:
-    """Open issues only, optionally filtered to any of `labels` (GitHub's
-    `labels` query param is an OR of exact label names). GitHub's issues
-    endpoint also returns pull requests (a PR is an issue internally) --
-    filtered out here since callers only ever want real issues."""
+    """Open issues only, optionally filtered to `labels` (GitHub's `labels`
+    query param is an AND -- an issue must carry every name given, not just
+    one). GitHub's issues endpoint also returns pull requests (a PR is an
+    issue internally) -- filtered out here since callers only ever want
+    real issues."""
     owner_repo = _owner_repo_or_raise(repo_url)
     params: dict[str, str | int] = {"state": "open", "per_page": 100}
     if labels:
@@ -219,11 +220,14 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
 # repo itself has these because the user created them by hand; every other
 # app onboarded through /apps would not, without ensure_labels below.
 _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
+    "agentra": ("5319e7", "Created by agentra, or for agentra to work on -- everything agentra's dashboard/backlog reads is filtered to this"),
     "bug": ("d73a4a", "Something isn't working"),
     "feature": ("a2eeef", "A whole feature -- may have multiple 'story' sub-issues"),
     "story": ("c5def5", "One part of a multi-part feature"),
     "need_human": ("fbca04", "Needs a human decision or action -- agentra should not attempt this"),
     "blocking_agentra": ("b60205", "Blocks agentra's own further progress until a human resolves it"),
+    "status:in-progress": ("fef2c0", "Real work has started -- see In-Progress-Branch comment for where"),
+    "status:done": ("0e8a16", "Actually deployed to production -- shows in the dashboard's Release to Production view"),
 }
 
 
@@ -299,14 +303,16 @@ def list_comments(repo_url: str, issue_number: int) -> list[dict]:
 
 
 _IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
+_IN_PROGRESS_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
 
 
-def record_in_progress_branch(repo_url: str, issue_number: int, branch: str) -> None:
-    """Marks `branch` as where an interrupted implement_feature call's work
-    lives, so a future cycle can resume it instead of losing it -- posted as
-    a plain comment (get_in_progress_branch below reads the most recent one
-    back), not stamped into the issue body, so it never collides with
-    record_shipped's own body_suffix stamping on the same issue.
+def record_in_progress_branch(repo_url: str, issue_number: int, branch: str, run_id: str | None = None) -> None:
+    """Marks `branch` (and, if given, the run_id that pushed it) as where an
+    interrupted implement_feature call's work lives, so a future cycle can
+    resume it instead of losing it -- posted as a plain comment
+    (get_in_progress_branch/get_in_progress_run_id below read the most
+    recent one back), not stamped into the issue body, so it never collides
+    with record_shipped's own body_suffix stamping on the same issue.
 
     Called right after implementation.py's push_branch succeeds (see
     memory.py/brain.py) -- implement_feature commits locally only
@@ -316,8 +322,16 @@ def record_in_progress_branch(repo_url: str, issue_number: int, branch: str) -> 
     re-cloned (every redeploy). Confirmed live: GitHub issue #13's fix was
     implemented, then lost exactly this way when run_local_tests failed
     and the cycle never reached deploy_pre_prod (the only thing that would
-    otherwise have pushed/merged it)."""
-    add_comment(repo_url, issue_number, f"In-Progress-Branch: {branch}")
+    otherwise have pushed/merged it).
+
+    run_id is included so whoever picks this up (human or agent) can look
+    up the exact run that produced this branch -- its full log/agent-steps
+    trail -- for context on what was already tried, not to literally
+    re-run under the same id (each autonomous cycle mints its own)."""
+    body = f"In-Progress-Branch: {branch}"
+    if run_id:
+        body += f"\nRun-ID: {run_id}"
+    add_comment(repo_url, issue_number, body)
 
 
 def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
@@ -332,6 +346,22 @@ def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
         match = _IN_PROGRESS_BRANCH_RE.search(comment.get("body") or "")
         if match:
             return match.group(1)
+    return None
+
+
+def get_in_progress_run_id(repo_url: str, issue_number: int) -> str | None:
+    """The run_id stamped alongside the most recent in-progress-branch
+    marker (see record_in_progress_branch), or None if there isn't one --
+    a marker recorded before this field existed, or with no run_id given."""
+    comments = list_comments(repo_url, issue_number)
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if not _IN_PROGRESS_BRANCH_RE.search(body):
+            continue
+        match = _IN_PROGRESS_RUN_ID_RE.search(body)
+        if match:
+            return match.group(1)
+        return None  # the most recent marker exists but has no run_id
     return None
 
 
@@ -429,8 +459,8 @@ def close_issue(
 
 
 def list_closed_issues(repo_url: str, labels: list[str] | None = None, limit: int = 30) -> list[dict]:
-    """Closed issues only, newest-closed first, optionally filtered to any of
-    `labels`. Used by memory.py's shipped_features() -- a shipped feature is
+    """Closed issues only, newest-closed first, optionally filtered to
+    `labels` (an AND -- see list_open_issues). Used by memory.py's shipped_features() -- a shipped feature is
     a closed 'feature'-labeled issue, so this is that ledger's only read
     path, no local mirror involved."""
     owner_repo = _owner_repo_or_raise(repo_url)

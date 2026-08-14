@@ -104,19 +104,21 @@ def _format_spec(spec: dict) -> str:
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
-    """Adds a resume_branch field (str | None) to each entry -- one live
-    GitHub call per entry (Memory.resume_branch_for), run concurrently via
-    a thread pool since they're independent and this is called at most
-    once per check_backlog invocation, not on every dashboard poll (see
-    resume_branch_for's own docstring for why this lookup doesn't live
-    inside known_bugs()/feature_queue() themselves). Mutates and returns
-    `entries` in place."""
+    """Adds resume_branch and resume_run_id fields (str | None) to each
+    entry -- live GitHub calls per entry (Memory.resume_branch_for/
+    resume_run_id_for), run concurrently via a thread pool since they're
+    independent and this is called at most once per check_backlog
+    invocation, not on every dashboard poll (see resume_branch_for's own
+    docstring for why this lookup doesn't live inside known_bugs()/
+    feature_queue() themselves). Mutates and returns `entries` in place."""
     if not entries:
         return entries
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         branches = list(pool.map(lambda e: mem.resume_branch_for(e["external_id"]), entries))
-    for entry, branch in zip(entries, branches):
+        run_ids = list(pool.map(lambda e: mem.resume_run_id_for(e["external_id"]), entries))
+    for entry, branch, run_id in zip(entries, branches, run_ids):
         entry["resume_branch"] = branch
+        entry["resume_run_id"] = run_id
     return entries
 
 
@@ -346,7 +348,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         "interrupted implement_feature call's work sitting on that branch (tests "
         "failed, or the cycle got cut off before deploying) -- pass that exact "
         "value as implement_feature's resume_branch argument to continue from "
-        "those commits instead of redoing the work from scratch.",
+        "those commits instead of redoing the work from scratch. resume_run_id, if "
+        "present, names the earlier run that pushed it -- purely informational, for "
+        "understanding what was already tried; nothing to pass anywhere.",
         {},
     )
     async def check_backlog(_args):
@@ -515,7 +519,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         # resolves_id nor sub_feature_of set) has no backlog entry to attach a
         # resume marker to, so there's nothing to do for it here.
         if tracking_issue is not None:
-            session.mem.record_in_progress_branch(tracking_issue, session.feature_branch)
+            session.mem.record_in_progress_branch(tracking_issue, session.feature_branch, session.run_id)
         # Computed before the ok-check, not just on the success path: a
         # commit can exist even when impl.ok is False (implementation.py's
         # _commit_if_dirty safety-net runs unconditionally after the agent

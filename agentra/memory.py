@@ -133,6 +133,14 @@ def _ensure_gitignore(root: Path) -> None:
 # up/dropped by Discovery Agent automatically, without going through
 # agentra's dashboard at all -- the actual point of making GitHub
 # authoritative.
+# Stamped onto every issue agentra itself creates (below), and required by
+# every read filter below too -- a human can file a "bug" or "feature"
+# labeled issue directly on GitHub for their own tracking, unrelated to
+# agentra; without this, that issue would silently show up in agentra's own
+# backlog/dashboard as if agentra were meant to work on it. GitHub's REST
+# `labels` query param is an AND filter across multiple names (an issue
+# must carry all of them to match), which is exactly what's needed here.
+_AGENTRA_LABEL = "agentra"
 _BUG_LABEL = "bug"
 _FEATURE_LABEL = "feature"
 # A multi-part feature's individual pieces (record_shipped's sub_feature_of/
@@ -158,6 +166,18 @@ _STORY_LABEL = "story"
 # and wait for a human instead of trying again.
 _NEED_HUMAN_LABEL = "need_human"
 _BLOCKING_AGENTRA_LABEL = "blocking_agentra"
+
+# Lifecycle status, independent of open/closed: an issue closes the moment
+# its code is committed (record_shipped/clear_known_bug), which is well
+# before it's actually deployed to production -- status:in-progress marks
+# real work having started (added alongside the in-progress-branch marker,
+# see record_in_progress_branch), status:done marks having actually reached
+# production (added at promotion time, see server.py's
+# _record_production_release). The dashboard's "Release to Production"
+# section is gated on status:done specifically, not merely "closed" --
+# closed-but-not-yet-done is what "Ready to Review" shows instead.
+_STATUS_IN_PROGRESS_LABEL = "status:in-progress"
+_STATUS_DONE_LABEL = "status:done"
 
 # ── Failure triage: replaces the old write-only memory/failures/*.md ledger
 # (confirmed nothing in this codebase ever read it back). A permanent
@@ -239,6 +259,7 @@ def _github_closed_bug_to_dict(issue: dict) -> dict:
     # closed_at there -- that dict shape is exact-compared in several
     # existing tests, and closed_at is meaningless for an open issue anyway.
     issue_number = str(issue["number"])
+    label_names = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
     return {
         "run_id": issue_number,
         "severity": "medium",
@@ -248,6 +269,7 @@ def _github_closed_bug_to_dict(issue: dict) -> dict:
         "external_id": issue_number,
         "html_url": issue.get("html_url"),
         "closed_at": issue.get("closed_at"),
+        "status_done": _STATUS_DONE_LABEL in label_names,
     }
 
 
@@ -272,6 +294,7 @@ def _github_shipped_to_dict(issue: dict) -> dict:
     body = issue.get("body") or ""
     run_id_m = _SHIPPED_RUN_ID_RE.search(body)
     commit_m = _SHIPPED_COMMIT_RE.search(body)
+    label_names = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
     return {
         "feature": issue["title"],
         "commit_sha": commit_m.group(1) if commit_m else None,
@@ -279,6 +302,7 @@ def _github_shipped_to_dict(issue: dict) -> dict:
         "ts": issue.get("closed_at"),
         "external_id": str(issue["number"]),
         "html_url": issue.get("html_url"),
+        "status_done": _STATUS_DONE_LABEL in label_names,
     }
 
 
@@ -384,7 +408,7 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            issues = github_issues.list_closed_issues(repo_url, labels=[_FEATURE_LABEL])
+            issues = github_issues.list_closed_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
             return [_github_shipped_to_dict(i) for i in issues]
         except Exception:
             logger.error("shipped_features: GitHub Issues unavailable for %s -- shipped history is unreadable until it recovers", repo_url, exc_info=True)
@@ -452,7 +476,7 @@ class Memory:
             if sub_feature_of and sub_feature_of.isdigit():
                 parent_number = int(sub_feature_of)
                 issue = github_issues.create_sub_issue(
-                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_STORY_LABEL]
+                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_STORY_LABEL, _AGENTRA_LABEL]
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
@@ -475,11 +499,11 @@ class Memory:
                         repo_url,
                         feature,
                         "Tracks a multi-part feature; stays open until every part has shipped.",
-                        labels=[_FEATURE_LABEL],
+                        labels=[_FEATURE_LABEL, _AGENTRA_LABEL],
                     )
                     parent_number = parent_issue["number"]
                 issue = github_issues.create_sub_issue(
-                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_STORY_LABEL]
+                    repo_url, parent_number, feature, "Autonomously shipped by agentra.", labels=[_STORY_LABEL, _AGENTRA_LABEL]
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
@@ -494,9 +518,30 @@ class Memory:
                 board_title = feature
 
             else:
-                issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL])
-                issue_number = issue["number"]
-                github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                # Safety net, not just a prompt hope: implement_feature's caller is
+                # supposed to pass resolves_id/resolves_origin when this call resolves
+                # a known bug or feature-queue item, but confirmed live -- three
+                # separate times (issues #13/#16, #1/#19, #6/#15) -- it doesn't always.
+                # A known-bug fix in particular NEVER reaches this branch's resolves_id
+                # path anyway (brain.py only forwards resolves_id when
+                # resolves_origin=="feature_queue"; a known_bug fix relies entirely on
+                # a SEPARATE clear_known_bug call the caller must also remember to
+                # make), so the original backlog entry silently stayed open forever
+                # while an orphaned fresh issue carried the shipped record -- the same
+                # piece of work then showed up as both still-open (backlog) and
+                # already-shipped (ready to review). Before creating a fresh issue,
+                # check whether a similar bug or feature-queue item is already open and
+                # close THAT as the shipped record instead.
+                duplicate_of = self._find_similar_open(feature, self.known_bugs(), "diagnosis") or self._find_similar_open(
+                    feature, self.feature_queue(), "description"
+                )
+                if duplicate_of and duplicate_of.isdigit():
+                    issue_number = int(duplicate_of)
+                    github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                else:
+                    issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
+                    issue_number = issue["number"]
+                    github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 board_issue_number = issue_number
                 board_title = feature
         except Exception:
@@ -581,7 +626,7 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL])
+            issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
             return [_github_bug_to_dict(i) for i in issues]
         except Exception:
             logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
@@ -598,13 +643,25 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            issues = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL])
+            issues = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
             return [_github_closed_bug_to_dict(i) for i in issues]
         except Exception:
             logger.error("closed_bugs: GitHub Issues unavailable for %s", repo_url, exc_info=True)
             return []
 
     _DUPLICATE_BUG_SIMILARITY_THRESHOLD = 0.6
+
+    def _find_similar_open(self, text: str, candidates: list[dict], field: str) -> str | None:
+        """Shared by _find_similar_open_bug (record_known_bug's duplicate
+        suppression) and record_shipped's own orphan-issue safety net
+        below -- difflib similarity, not exact match, since the text being
+        compared is LLM-generated free text that varies call to call even
+        when describing the same underlying thing."""
+        for candidate in candidates:
+            existing = candidate.get(field) or ""
+            if difflib.SequenceMatcher(None, text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+                return candidate.get("external_id")
+        return None
 
     def _find_similar_open_bug(self, diagnosis: str) -> str | None:
         """Best-effort duplicate suppression: record_failure() fires on
@@ -613,17 +670,10 @@ class Memory:
         without this, each cycle filed its own fresh issue for the
         identical problem (confirmed live: 4 near-identical "403 Write
         access to repository not granted" bugs, #7-#10, from four
-        consecutive cycles hitting the same broken code path). difflib
-        similarity, not exact match, since diagnosis text is LLM-generated
-        free text that varies cycle to cycle even describing the same
-        underlying failure. Only checks OPEN bugs -- a bug that recurs
-        after being marked fixed is a real regression, not a duplicate,
-        and should get its own fresh issue."""
-        for bug in self.known_bugs():
-            existing = bug.get("diagnosis") or ""
-            if difflib.SequenceMatcher(None, diagnosis, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
-                return bug.get("external_id")
-        return None
+        consecutive cycles hitting the same broken code path). Only checks
+        OPEN bugs -- a bug that recurs after being marked fixed is a real
+        regression, not a duplicate, and should get its own fresh issue."""
+        return self._find_similar_open(diagnosis, self.known_bugs(), "diagnosis")
 
     def record_known_bug(
         self,
@@ -668,7 +718,7 @@ class Memory:
             body = f"Severity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL, *extra_labels])
+            github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
         except Exception:
             logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
 
@@ -709,21 +759,44 @@ class Memory:
         should not attempt anything else until a human resolves it."""
         return [b for b in self.known_bugs() if b.get("blocking_agentra")]
 
-    def record_in_progress_branch(self, issue_number: int, branch: str) -> None:
-        """Marks `branch` as where an implement_feature call's work for
-        this issue lives -- see github_issues.record_in_progress_branch
-        and resume_branch_for's docstrings. Best-effort: failure just means
-        a future cycle won't be offered a resume for this branch, not a
-        reason to fail the call that's trying to record it."""
+    def record_in_progress_branch(self, issue_number: int, branch: str, run_id: str | None = None) -> None:
+        """Marks `branch` (and run_id, for traceability -- see
+        github_issues.record_in_progress_branch's docstring) as where an
+        implement_feature call's work for this issue lives. Also adds the
+        status:in-progress label -- this is the "agent action" trigger for
+        the issue's lifecycle status (see _STATUS_IN_PROGRESS_LABEL's
+        comment above): real work has demonstrably started, independent of
+        the issue's own open/closed state. Best-effort throughout: failure
+        just means a future cycle won't be offered a resume / the status
+        label won't update, not a reason to fail the call recording it."""
         repo_url = self._repo_url()
         if not repo_url:
             return
         try:
             from agentra.connectors import github_issues
 
-            github_issues.record_in_progress_branch(repo_url, issue_number, branch)
+            github_issues.record_in_progress_branch(repo_url, issue_number, branch, run_id)
+            github_issues.add_labels(repo_url, issue_number, [_STATUS_IN_PROGRESS_LABEL])
         except Exception:
             logger.warning("record_in_progress_branch: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def mark_status_done(self, issue_number: int) -> None:
+        """The "final deployment" trigger for an issue's lifecycle status
+        (see _STATUS_DONE_LABEL's comment above) -- called once whatever
+        this issue tracks has actually reached production (server.py's
+        _record_production_release), regardless of whether a human clicked
+        Promote in the dashboard or an autonomous cycle triggered it; both
+        paths call the same promotion code. Best-effort, same reasoning as
+        record_in_progress_branch."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.add_labels(repo_url, issue_number, [_STATUS_DONE_LABEL])
+        except Exception:
+            logger.warning("mark_status_done: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
     def record_commit(self, issue_number: int, commit_sha: str) -> None:
         """Links commit_sha on this issue -- see
@@ -760,6 +833,23 @@ class Memory:
             from agentra.connectors import github_issues
 
             return github_issues.get_in_progress_branch(repo_url, int(external_id))
+        except Exception:
+            return None
+
+    def resume_run_id_for(self, external_id: str) -> str | None:
+        """The run_id that pushed resume_branch_for's branch, if recorded --
+        see github_issues.get_in_progress_run_id's docstring. Informational
+        (look up that run's own log for context on what was already tried),
+        not something a resuming call needs to function."""
+        if not external_id.isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_in_progress_run_id(repo_url, int(external_id))
         except Exception:
             return None
 
@@ -803,7 +893,7 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            issues = github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL])
+            issues = github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
             return [_github_feature_to_dict(i) for i in issues]
         except Exception:
             logger.error("feature_queue: GitHub Issues unavailable for %s -- feature backlog is unreadable until it recovers", repo_url, exc_info=True)
@@ -840,7 +930,7 @@ class Memory:
         try:
             from agentra.connectors import github_issues, github_projects
 
-            issues = github_issues.list_in_progress_features(repo_url, labels=[_FEATURE_LABEL])
+            issues = github_issues.list_in_progress_features(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
             if not issues:
                 return []
             # One get_feature_status call per candidate, each a live GraphQL
@@ -885,7 +975,7 @@ class Memory:
             body = f"Source: {source}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            issue = github_issues.create_issue(repo_url, description, body, labels=[_FEATURE_LABEL])
+            issue = github_issues.create_issue(repo_url, description, body, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
         except Exception:
             logger.error("record_feature_request: failed to create a GitHub issue on %s -- feature %r was NOT recorded anywhere", repo_url, description, exc_info=True)
             return
