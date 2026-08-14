@@ -516,11 +516,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         # resume marker to, so there's nothing to do for it here.
         if tracking_issue is not None:
             session.mem.record_in_progress_branch(tracking_issue, session.feature_branch)
-        if not impl.ok:
-            session.mem.record_failure(session.run_id, "implementation", impl.text)
-            session.record_failure("implement_feature")
-            return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
-        session.record_success("implement_feature")
+        # Computed before the ok-check, not just on the success path: a
+        # commit can exist even when impl.ok is False (implementation.py's
+        # _commit_if_dirty safety-net runs unconditionally after the agent
+        # turn, and a self-heal/partial attempt can still have committed
+        # real work) -- link it on the tracking issue regardless, since a
+        # future resumed call continues from exactly this commit either way.
         commit_sha = None
         try:
             head = subprocess.run(
@@ -530,6 +531,13 @@ def _tools_for(session: OrchestratorSession) -> list:
                 commit_sha = head.stdout.strip()
         except Exception:
             pass  # dashboard's shipped list just shows no artifact link -- not worth failing the cycle over
+        if tracking_issue is not None and commit_sha:
+            session.mem.record_commit(tracking_issue, commit_sha)
+        if not impl.ok:
+            session.mem.record_failure(session.run_id, "implementation", impl.text)
+            session.record_failure("implement_feature")
+            return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
+        session.record_success("implement_feature")
         # record_shipped closes a GitHub 'feature'-labeled issue as the shipped record,
         # stamping run_id/commit_sha into it -- the originating feature_queue issue
         # itself when this resolves one, a linked sub-issue of a multi-part

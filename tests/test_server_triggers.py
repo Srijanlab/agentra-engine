@@ -244,3 +244,20 @@ def test_get_app_surfaces_in_progress_multi_part_features(tmp_path, monkeypatch)
     assert entry["sub_issues_total"] == 1
     assert entry["sub_issues_completed"] == 1
     assert entry["project_url"] is not None
+
+
+def test_get_app_surfaces_closed_bugs(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    mem = Memory(repo)
+
+    mem.record_known_bug("run1", "high", "A real bug", "the fix")
+    bug_id = mem.known_bugs()[0]["external_id"]
+    mem.clear_known_bug(bug_id, "Resolved by agentra.")
+
+    response = TestClient(server.app).get("/apps/myapp")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["closed_bugs"]) == 1
+    assert body["closed_bugs"][0]["diagnosis"] == "A real bug"

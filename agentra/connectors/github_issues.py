@@ -335,6 +335,19 @@ def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
     return None
 
 
+def record_commit(repo_url: str, issue_number: int, commit_sha: str) -> None:
+    """Links `commit_sha` on the feature/bug's own tracking issue -- posted
+    as a plain comment (GitHub auto-links a bare 40-char sha to its commit
+    within the same repo, no URL construction needed here). A tracking
+    issue's work can now span more than one commit (multi-part features
+    spanning several implement_feature calls, a resumed call continuing an
+    earlier one's branch, a self-heal fix-up) -- record_shipped's own
+    Shipped-Commit body stamp only ever captures the LAST one, so this is
+    the only place the full commit history for an issue's work is
+    visible."""
+    add_comment(repo_url, issue_number, f"Commit: {commit_sha}")
+
+
 _SPEC_MARKER = "Spec (agentra):"
 _SPEC_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 

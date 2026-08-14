@@ -719,10 +719,11 @@ async def get_app(name: str) -> dict:
     # fetching shipped_features/known_bugs TWICE each (once for the count,
     # once for the list) -- fixed here by calling each once and deriving
     # both from the same result.
-    shipped, released, bugs, queue, in_progress = await asyncio.gather(
+    shipped, released, bugs, closed_bugs, queue, in_progress = await asyncio.gather(
         asyncio.to_thread(mem.shipped_features),
         asyncio.to_thread(mem.released_features),
         asyncio.to_thread(mem.known_bugs),
+        asyncio.to_thread(mem.closed_bugs),
         asyncio.to_thread(mem.feature_queue),
         asyncio.to_thread(mem.in_progress_features),
     )
@@ -754,6 +755,7 @@ async def get_app(name: str) -> dict:
         "shipped": shipped,
         "released": released,
         "bugs": bugs,
+        "closed_bugs": closed_bugs,
         "feature_queue": queue,
         "in_progress_features": in_progress,
         "vercel": env_config.vercel,

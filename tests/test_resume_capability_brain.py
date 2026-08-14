@@ -26,6 +26,7 @@ these tests' own concerns).
 """
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -172,6 +173,76 @@ def test_implement_feature_records_in_progress_branch_even_when_implementation_f
 
     assert result.get("is_error") is True
     assert marker_calls == [(13, session.feature_branch)]
+
+
+def test_implement_feature_links_the_commit_on_the_tracking_issue(tmp_path, monkeypatch):
+    # A tracking issue's work can span more than one commit (multi-part
+    # features, a resumed call, a self-heal fix-up) -- record_shipped's own
+    # Shipped-Commit stamp only ever captures the last one, so every commit
+    # gets linked as its own comment (see github_issues.record_commit).
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    subprocess.run(["git", "init", "-b", "main", str(session.repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "config", "user.email", "test@example.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "config", "user.name", "Test"], check=True, capture_output=True)
+    (session.repo / "file.txt").write_text("content\n")
+    subprocess.run(["git", "-C", str(session.repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "commit", "-m", "a commit"], check=True, capture_output=True)
+    real_sha = subprocess.run(
+        ["git", "-C", str(session.repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    async def fake_run(*a, **k):
+        return _fake_impl_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
+    commit_calls = []
+    monkeypatch.setattr(session.mem, "record_commit", lambda issue_number, commit_sha: commit_calls.append((issue_number, commit_sha)))
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "fix it", "resolves_origin": "known_bug", "resolves_id": "13", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert commit_calls == [(13, real_sha)]
+
+
+def test_implement_feature_links_the_commit_even_when_implementation_fails(tmp_path, monkeypatch):
+    # implementation.py's _commit_if_dirty safety net runs even on a
+    # failed/blocked turn -- a commit made this way must still get linked.
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    subprocess.run(["git", "init", "-b", "main", str(session.repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "config", "user.email", "test@example.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "config", "user.name", "Test"], check=True, capture_output=True)
+    (session.repo / "file.txt").write_text("content\n")
+    subprocess.run(["git", "-C", str(session.repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "commit", "-m", "partial work"], check=True, capture_output=True)
+    real_sha = subprocess.run(
+        ["git", "-C", str(session.repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    async def fake_run(*a, **k):
+        return _fake_impl_result(ok=False, text="blocked")
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_failure", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
+    commit_calls = []
+    monkeypatch.setattr(session.mem, "record_commit", lambda issue_number, commit_sha: commit_calls.append((issue_number, commit_sha)))
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "fix it", "resolves_origin": "known_bug", "resolves_id": "13", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert commit_calls == [(13, real_sha)]
 
 
 def test_implement_feature_does_not_record_a_marker_for_a_self_initiated_idea(tmp_path, monkeypatch):

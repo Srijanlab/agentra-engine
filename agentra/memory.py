@@ -234,6 +234,23 @@ def _github_bug_to_dict(issue: dict) -> dict:
     }
 
 
+def _github_closed_bug_to_dict(issue: dict) -> dict:
+    # Separate from _github_bug_to_dict (open bugs) rather than adding
+    # closed_at there -- that dict shape is exact-compared in several
+    # existing tests, and closed_at is meaningless for an open issue anyway.
+    issue_number = str(issue["number"])
+    return {
+        "run_id": issue_number,
+        "severity": "medium",
+        "diagnosis": issue["title"],
+        "proposed_fix": issue.get("body") or "",
+        "source": "github",
+        "external_id": issue_number,
+        "html_url": issue.get("html_url"),
+        "closed_at": issue.get("closed_at"),
+    }
+
+
 def _github_feature_to_dict(issue: dict) -> dict:
     return {
         "description": issue["title"],
@@ -570,6 +587,23 @@ class Memory:
             logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
             return []
 
+    def closed_bugs(self) -> list[dict]:
+        """Resolved bugs -- closed 'bug'-labeled issues. Paired with
+        shipped_features() (closed 'feature'-labeled issues) by the
+        dashboard's "release to production" view: together they're
+        everything agentra has actually finished, regardless of type."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return []
+        try:
+            from agentra.connectors import github_issues
+
+            issues = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL])
+            return [_github_closed_bug_to_dict(i) for i in issues]
+        except Exception:
+            logger.error("closed_bugs: GitHub Issues unavailable for %s", repo_url, exc_info=True)
+            return []
+
     _DUPLICATE_BUG_SIMILARITY_THRESHOLD = 0.6
 
     def _find_similar_open_bug(self, diagnosis: str) -> str | None:
@@ -690,6 +724,21 @@ class Memory:
             github_issues.record_in_progress_branch(repo_url, issue_number, branch)
         except Exception:
             logger.warning("record_in_progress_branch: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def record_commit(self, issue_number: int, commit_sha: str) -> None:
+        """Links commit_sha on this issue -- see
+        github_issues.record_commit's docstring for why a tracking issue
+        needs every commit linked, not just the last one. Best-effort,
+        same reasoning as record_in_progress_branch."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_commit(repo_url, issue_number, commit_sha)
+        except Exception:
+            logger.warning("record_commit: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
     def resume_branch_for(self, external_id: str) -> str | None:
         """The branch an interrupted implement_feature call for this bug/

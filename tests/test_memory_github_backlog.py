@@ -545,3 +545,85 @@ def test_resume_branch_for_returns_none_when_github_call_fails(tmp_path, monkeyp
     )
 
     assert mem.resume_branch_for("13") is None
+
+
+# ── closed_bugs(): resolved bugs, paired with shipped_features() for the ──
+# dashboard's combined "release to production" view                       ──
+
+
+def test_closed_bugs_reads_from_github(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    captured = {}
+
+    def fake_list(repo_url, labels=None):
+        captured["labels"] = labels
+        return [
+            {
+                "number": 6, "title": "Fixed bug", "body": "details",
+                "html_url": "https://github.com/acme/app/issues/6", "closed_at": "2026-08-13T00:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(github_issues, "list_closed_issues", fake_list)
+
+    bugs = mem.closed_bugs()
+
+    assert captured["labels"] == ["bug"]
+    assert bugs == [
+        {
+            "run_id": "6",
+            "severity": "medium",
+            "diagnosis": "Fixed bug",
+            "proposed_fix": "details",
+            "source": "github",
+            "external_id": "6",
+            "html_url": "https://github.com/acme/app/issues/6",
+            "closed_at": "2026-08-13T00:00:00Z",
+        }
+    ]
+
+
+def test_closed_bugs_returns_empty_without_a_github_remote(tmp_path):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+
+    assert mem.closed_bugs() == []
+
+
+def test_closed_bugs_returns_empty_when_github_call_fails(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "list_closed_issues", lambda *a, **k: (_ for _ in ()).throw(github_issues.GitHubIssuesError("boom"))
+    )
+
+    assert mem.closed_bugs() == []
+
+
+# ── record_commit(): links a commit on the tracking issue ─────────────────
+
+
+def test_record_commit_delegates_to_github_issues(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    captured = {}
+    monkeypatch.setattr(
+        github_issues,
+        "record_commit",
+        lambda repo_url, issue_number, commit_sha: captured.update(issue_number=issue_number, commit_sha=commit_sha),
+    )
+
+    mem.record_commit(13, "abc1234")
+
+    assert captured == {"issue_number": 13, "commit_sha": "abc1234"}
+
+
+def test_record_commit_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "record_commit", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub"))
+    )
+
+    mem.record_commit(13, "abc1234")  # must not raise

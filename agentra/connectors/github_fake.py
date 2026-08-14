@@ -163,6 +163,9 @@ class FakeGitHubBackend:
                 return match.group(1)
         return None
 
+    def record_commit(self, repo_url: str, issue_number: int, commit_sha: str) -> None:
+        self.add_comment(repo_url, issue_number, f"Commit: {commit_sha}")
+
     _SPEC_MARKER = "Spec (agentra):"
 
     def record_spec(self, repo_url: str, issue_number: int, spec: dict) -> None:
@@ -277,6 +280,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "get_in_progress_branch", backend.get_in_progress_branch),
         (github_issues, "record_spec", backend.record_spec),
         (github_issues, "get_spec", backend.get_spec),
+        (github_issues, "record_commit", backend.record_commit),
         (github_issues, "add_labels", backend.add_labels),
         (github_issues, "ensure_labels", backend.ensure_labels),
         (github_variables, "list_variables", backend.list_variables),

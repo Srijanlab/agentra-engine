@@ -397,3 +397,18 @@ def test_get_in_progress_branch_returns_none_without_a_marker(monkeypatch):
     monkeypatch.setattr(github_issues.httpx, "get", fake_get)
 
     assert github_issues.get_in_progress_branch("https://github.com/acme/app.git", 13) is None
+
+
+def test_record_commit_posts_a_comment_with_the_bare_sha(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, json=json)
+        return _fake_response({})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.record_commit("https://github.com/acme/app.git", 13, "abc1234def5678")
+
+    assert captured["url"] == "https://api.github.com/repos/acme/app/issues/13/comments"
+    assert captured["json"] == {"body": "Commit: abc1234def5678"}
