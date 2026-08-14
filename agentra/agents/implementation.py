@@ -73,7 +73,34 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: str) -> None:
+def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: str, resume: bool = False) -> None:
+    if resume:
+        # Resuming an interrupted call's work (see brain.py's resume_branch arg,
+        # memory.py's known_bugs()/feature_queue() resume_branch field) -- the
+        # branch was pushed by a previous implement_feature call (see run()
+        # below) that never made it to deploy_pre_prod. Fetch and check it out
+        # directly instead of forking a fresh one from pre_prod_branch, so this
+        # call continues on top of the same commits rather than redoing them.
+        # Best-effort: any failure here (branch was force-pushed over, deleted,
+        # this VM's clone predates it existing, etc.) falls through to the
+        # normal fresh-fork path below rather than failing the whole call --
+        # resuming is an optimization, not something implement_feature can
+        # depend on succeeding.
+        try:
+            git_ops.fetch_ref(repo, feature_branch)
+            # Same untracked-.agentra/-file conflict the fresh-fork path below
+            # guards against (see its own comment) -- a resume can run against
+            # a checkout whose untracked .agentra/ state differs from what
+            # feature_branch's tree wants there, and checkout refuses rather
+            # than clobber it.
+            subprocess.run(["git", "-C", str(repo), "clean", "-fd", ".agentra/"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{feature_branch}"],
+                check=True, capture_output=True, text=True,
+            )
+            return
+        except (git_ops.GitOpError, subprocess.CalledProcessError):
+            pass
     # git_ops.fetch_ref, not a hand-rolled subprocess call -- confirmed live (4
     # consecutive autonomous-cycle failures, GitHub issues #7-#10, after this repo
     # moved to an org, Srijanlab/srijanlab-agentra): a bare `git fetch` here relied
@@ -135,9 +162,10 @@ async def run(
     codebase_summary: str,
     env: EnvironmentConfig,
     feature_branch: str,
+    resume: bool = False,
 ) -> AgentResult:
     try:
-        _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch)
+        _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch, resume=resume)
     except git_ops.GitOpError as exc:
         return AgentResult(
             ok=False,
@@ -187,5 +215,20 @@ Implement this feature now, following the loop in your system prompt."""
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
         result.text += f"\n\n[agentra] Safety-net commit failed: {stderr}"
+
+    # Push the feature branch now, regardless of what happens next this cycle
+    # (tests failing, deploy never being reached, a hard stop) -- previously
+    # this branch only ever became durable once deploy_pre_prod merged it,
+    # which requires local tests to pass first. Confirmed live: GitHub issue
+    # #13's fix was implemented here, then permanently lost when
+    # run_local_tests failed and deploy_pre_prod never ran -- the next VM
+    # redeploy re-clones REPOS_ROOT from scratch (VM-local only), wiping the
+    # never-pushed branch. Best-effort: a push failure just means this
+    # particular call's work isn't resumable/recoverable, same as before this
+    # existed -- it must not fail the call itself.
+    try:
+        git_ops.push_branch(repo, feature_branch)
+    except git_ops.GitOpError as exc:
+        result.text += f"\n\n[agentra] Could not push feature branch {feature_branch!r} (work is committed locally only, not recoverable after a redeploy): {exc}"
 
     return result

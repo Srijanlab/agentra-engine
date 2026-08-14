@@ -675,6 +675,45 @@ class Memory:
         should not attempt anything else until a human resolves it."""
         return [b for b in self.known_bugs() if b.get("blocking_agentra")]
 
+    def record_in_progress_branch(self, issue_number: int, branch: str) -> None:
+        """Marks `branch` as where an implement_feature call's work for
+        this issue lives -- see github_issues.record_in_progress_branch
+        and resume_branch_for's docstrings. Best-effort: failure just means
+        a future cycle won't be offered a resume for this branch, not a
+        reason to fail the call that's trying to record it."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_in_progress_branch(repo_url, issue_number, branch)
+        except Exception:
+            logger.warning("record_in_progress_branch: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def resume_branch_for(self, external_id: str) -> str | None:
+        """The branch an interrupted implement_feature call for this bug/
+        feature-queue issue pushed its work to, if any (see
+        github_issues.record_in_progress_branch/get_in_progress_branch) --
+        None if it's never had one, the id isn't a real issue number, or
+        the lookup fails. Deliberately NOT folded into known_bugs()/
+        feature_queue() themselves: those are read on every dashboard poll
+        and discover_opportunities call, and this is one extra live GitHub
+        call per entry -- callers that actually act on resume_branch
+        (brain.py's check_backlog) look it up themselves, in parallel,
+        rather than paying that cost everywhere."""
+        if not external_id.isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_in_progress_branch(repo_url, int(external_id))
+        except Exception:
+            return None
+
     # ── Queue: feature requests, from customers or added by an admin. Considered
     # by Discovery Agent above its own autonomous ideation, below real signals. ──
 

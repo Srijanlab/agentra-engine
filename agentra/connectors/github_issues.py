@@ -20,6 +20,7 @@ git operations do if it isn't.
 from __future__ import annotations
 
 import logging
+import re
 
 import httpx
 
@@ -281,6 +282,56 @@ def add_comment(repo_url: str, issue_number: int, comment: str) -> None:
         timeout=15,
     )
     resp.raise_for_status()
+
+
+def list_comments(repo_url: str, issue_number: int) -> list[dict]:
+    """Oldest-first (GitHub's own default order) -- used by
+    get_in_progress_branch below to find the most recent resume marker."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    resp = httpx.get(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/comments",
+        headers=_headers(repo_url),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+_IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
+
+
+def record_in_progress_branch(repo_url: str, issue_number: int, branch: str) -> None:
+    """Marks `branch` as where an interrupted implement_feature call's work
+    lives, so a future cycle can resume it instead of losing it -- posted as
+    a plain comment (get_in_progress_branch below reads the most recent one
+    back), not stamped into the issue body, so it never collides with
+    record_shipped's own body_suffix stamping on the same issue.
+
+    Called right after implementation.py's push_branch succeeds (see
+    memory.py/brain.py) -- implement_feature commits locally only
+    (implementation.py's own docstring: never pushes on its own), so
+    without this, an interrupted cycle's actual code changes exist only on
+    this VM instance's local disk, gone the moment REPOS_ROOT gets
+    re-cloned (every redeploy). Confirmed live: GitHub issue #13's fix was
+    implemented, then lost exactly this way when run_local_tests failed
+    and the cycle never reached deploy_pre_prod (the only thing that would
+    otherwise have pushed/merged it)."""
+    add_comment(repo_url, issue_number, f"In-Progress-Branch: {branch}")
+
+
+def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
+    """The most recently recorded in-progress branch for this issue, or
+    None if it's never had one. Callers (memory.py's known_bugs()/
+    feature_queue()) should only call this for OPEN issues -- once an
+    issue closes (record_shipped/clear_known_bug), any old marker on it is
+    moot, but this function itself doesn't check state, just reads
+    comments."""
+    comments = list_comments(repo_url, issue_number)
+    for comment in reversed(comments):  # oldest-first from GitHub -> walk newest-first
+        match = _IN_PROGRESS_BRANCH_RE.search(comment.get("body") or "")
+        if match:
+            return match.group(1)
+    return None
 
 
 def close_issue(

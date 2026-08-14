@@ -343,3 +343,57 @@ def test_create_sub_issue_still_returns_the_issue_on_a_graphql_error(monkeypatch
     result = github_issues.create_sub_issue("https://github.com/acme/app.git", 10, "Sub task", "details")
 
     assert result["number"] == 43
+
+
+def test_list_comments_returns_the_comments_json(monkeypatch):
+    def fake_get(url, headers, timeout):
+        assert url == "https://api.github.com/repos/acme/app/issues/7/comments"
+        return _fake_response([{"body": "first"}, {"body": "second"}])
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    result = github_issues.list_comments("https://github.com/acme/app.git", 7)
+
+    assert result == [{"body": "first"}, {"body": "second"}]
+
+
+def test_record_in_progress_branch_posts_the_marker_as_a_comment(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, json=json)
+        return _fake_response({})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.record_in_progress_branch("https://github.com/acme/app.git", 13, "dev/abc123-fix-sort-order")
+
+    assert captured["url"] == "https://api.github.com/repos/acme/app/issues/13/comments"
+    assert captured["json"] == {"body": "In-Progress-Branch: dev/abc123-fix-sort-order"}
+
+
+def test_get_in_progress_branch_returns_the_most_recent_marker(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return _fake_response(
+            [
+                {"body": "Still occurring (run r1)."},
+                {"body": "In-Progress-Branch: dev/first-attempt"},
+                {"body": "just chatting"},
+                {"body": "In-Progress-Branch: dev/second-attempt"},
+            ]
+        )
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    result = github_issues.get_in_progress_branch("https://github.com/acme/app.git", 13)
+
+    assert result == "dev/second-attempt"
+
+
+def test_get_in_progress_branch_returns_none_without_a_marker(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return _fake_response([{"body": "unrelated comment"}])
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    assert github_issues.get_in_progress_branch("https://github.com/acme/app.git", 13) is None

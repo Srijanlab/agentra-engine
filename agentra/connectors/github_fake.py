@@ -147,6 +147,22 @@ class FakeGitHubBackend:
             self.issues[repo_url][issue_number].setdefault("comments", []).append(comment)
             self._save()
 
+    def list_comments(self, repo_url: str, issue_number: int) -> list[dict]:
+        return [{"body": c} for c in self.issues[repo_url].get(issue_number, {}).get("comments", [])]
+
+    _IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
+
+    def record_in_progress_branch(self, repo_url: str, issue_number: int, branch: str) -> None:
+        self.add_comment(repo_url, issue_number, f"In-Progress-Branch: {branch}")
+
+    def get_in_progress_branch(self, repo_url: str, issue_number: int) -> str | None:
+        comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
+        for comment in reversed(comments):
+            match = self._IN_PROGRESS_BRANCH_RE.search(comment)
+            if match:
+                return match.group(1)
+        return None
+
     def ensure_labels(self, repo_url: str) -> None:
         pass  # fake backend doesn't validate label existence at all -- nothing to ensure
 
@@ -238,6 +254,9 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_in_progress_features", backend.list_in_progress_features),
         (github_issues, "close_issue", backend.close_issue),
         (github_issues, "add_comment", backend.add_comment),
+        (github_issues, "list_comments", backend.list_comments),
+        (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),
+        (github_issues, "get_in_progress_branch", backend.get_in_progress_branch),
         (github_issues, "add_labels", backend.add_labels),
         (github_issues, "ensure_labels", backend.ensure_labels),
         (github_variables, "list_variables", backend.list_variables),

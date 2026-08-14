@@ -1,0 +1,239 @@
+"""agents/brain.py's half of the resume-capability feature (see
+memory.py's record_in_progress_branch/resume_branch_for and
+implementation.py's resume=True checkout/always-push, both covered by
+their own test files):
+
+- check_backlog attaches a resume_branch field to each known-bug/
+  feature-queue entry (brain._attach_resume_branches), computed
+  concurrently rather than baked into Memory.known_bugs()/feature_queue()
+  themselves (those are read on every dashboard poll).
+- implement_feature records an In-Progress-Branch marker on whichever
+  tracking issue this call names (resolves_id or sub_feature_of),
+  regardless of whether the call itself succeeds -- an interrupted/
+  partially-implemented call still pushed real work (see
+  implementation.py's run()), which is exactly what needs to stay
+  resumable.
+- implement_feature's resume_branch arg is only honored on this run's
+  first call (session.feature_branch is None), and threads through to
+  implementation.run(resume=True).
+
+No real LLM call: implementation.run is monkeypatched throughout.
+"""
+
+import asyncio
+from pathlib import Path
+
+from agentra import registry
+from agentra.agents import brain
+from agentra.agents.base import AgentResult
+from agentra.environments import EnvironmentConfig
+from agentra.memory import Memory
+
+
+def _session(tmp_path: Path, **overrides) -> brain.OrchestratorSession:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    defaults = dict(
+        repo=repo,
+        objective="test objective",
+        env=EnvironmentConfig(),
+        mem=Memory(repo),
+        run_id="testrun1",
+        cb_summary="a codebase summary",
+    )
+    defaults.update(overrides)
+    return brain.OrchestratorSession(**defaults)
+
+
+def _tool(session, name):
+    tools = brain._tools_for(session)
+    return next(t for t in tools if t.name == name)
+
+
+def _patch_registry(monkeypatch):
+    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
+
+
+def _fake_impl_result(**overrides) -> AgentResult:
+    defaults = dict(ok=True, text="done", json_data={"feature": "A feature", "status": "implemented"}, cost_usd=0.01, turns=2)
+    defaults.update(overrides)
+    return AgentResult(**defaults)
+
+
+# -- check_backlog attaches resume_branch --------------------------------------------
+
+
+def test_check_backlog_attaches_resume_branch_to_bugs_and_queue(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+
+    monkeypatch.setattr(session.mem, "shipped_features", lambda: [])
+    monkeypatch.setattr(session.mem, "in_progress_features", lambda: [])
+    monkeypatch.setattr(
+        session.mem,
+        "known_bugs",
+        lambda: [{"external_id": "13", "diagnosis": "sort order bug", "needs_human": False, "blocking_agentra": False}],
+    )
+    monkeypatch.setattr(session.mem, "feature_queue", lambda: [{"external_id": "20", "description": "a feature"}])
+    monkeypatch.setattr(
+        session.mem,
+        "resume_branch_for",
+        lambda external_id: "dev/abc123-fix-sort-order" if external_id == "13" else None,
+    )
+
+    result = asyncio.run(_tool(session, "check_backlog").handler({}))
+
+    text = result["content"][0]["text"]
+    assert "dev/abc123-fix-sort-order" in text
+    assert '"resume_branch": null' in text  # the feature-queue entry has none
+
+
+# -- implement_feature records the marker regardless of ok/fail ----------------------
+
+
+def test_implement_feature_records_in_progress_branch_when_resolving_a_known_bug(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    async def fake_run(*a, **k):
+        return _fake_impl_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
+    marker_calls = []
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch: marker_calls.append((issue_number, branch)))
+
+    result = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "fix it", "resolves_origin": "known_bug", "resolves_id": "13", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert result.get("is_error") is not True
+    assert marker_calls == [(13, session.feature_branch)]
+
+
+def test_implement_feature_records_in_progress_branch_on_the_parent_when_continuing_a_multi_part_feature(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    async def fake_run(*a, **k):
+        return _fake_impl_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 21, "board_issue_number": 20})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    marker_calls = []
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch: marker_calls.append((issue_number, branch)))
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "part 2", "resolves_origin": "", "resolves_id": "", "sub_feature_of": "20", "more_parts_expected": True}
+        )
+    )
+
+    assert marker_calls == [(20, session.feature_branch)]
+
+
+def test_implement_feature_records_in_progress_branch_even_when_implementation_fails(tmp_path, monkeypatch):
+    # An interrupted/blocked call still pushed whatever it managed to commit
+    # (see implementation.py's run()) -- this is exactly the case resume
+    # exists for, so the marker must still be recorded.
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    async def fake_run(*a, **k):
+        return _fake_impl_result(ok=False, text="blocked")
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_failure", lambda *a, **k: None)
+    marker_calls = []
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch: marker_calls.append((issue_number, branch)))
+
+    result = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "fix it", "resolves_origin": "known_bug", "resolves_id": "13", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert result.get("is_error") is True
+    assert marker_calls == [(13, session.feature_branch)]
+
+
+def test_implement_feature_does_not_record_a_marker_for_a_self_initiated_idea(tmp_path, monkeypatch):
+    # No resolves_id/sub_feature_of -- no backlog entry exists to attach a marker to.
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    async def fake_run(*a, **k):
+        return _fake_impl_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 30, "board_issue_number": 30})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(
+        session.mem, "record_in_progress_branch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called"))
+    )
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "my own idea", "resolves_origin": "", "resolves_id": "", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+
+# -- resume_branch arg: only honored on the first call this run, threads to resume= --
+
+
+def test_implement_feature_resume_branch_becomes_the_session_feature_branch(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    calls = []
+
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+        calls.append((feature_branch, resume))
+        return _fake_impl_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {
+                "feature_brief": "resume it", "resolves_origin": "known_bug", "resolves_id": "13",
+                "sub_feature_of": "", "more_parts_expected": False, "resume_branch": "dev/abc123-fix-sort-order",
+            }
+        )
+    )
+
+    assert session.feature_branch == "dev/abc123-fix-sort-order"
+    assert calls == [("dev/abc123-fix-sort-order", True)]
+
+
+def test_implement_feature_resume_branch_ignored_on_a_later_call_this_run(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path, feature_branch="dev/already-set")
+    calls = []
+
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+        calls.append((feature_branch, resume))
+        return _fake_impl_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 20, "board_issue_number": 20})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {
+                "feature_brief": "part 2", "resolves_origin": "", "resolves_id": "",
+                "sub_feature_of": "20", "more_parts_expected": False, "resume_branch": "dev/some-other-branch",
+            }
+        )
+    )
+
+    # session.feature_branch was already set -- resume_branch must not override it.
+    assert session.feature_branch == "dev/already-set"
+    assert calls == [("dev/already-set", False)]

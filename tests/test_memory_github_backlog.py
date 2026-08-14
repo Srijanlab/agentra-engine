@@ -477,3 +477,71 @@ def test_clear_feature_request_closes_the_github_issue(tmp_path, monkeypatch):
     mem.clear_feature_request("11")
 
     assert closed["issue_number"] == 11
+
+
+# ── resume capability: durable branch pointer for interrupted implement_feature work ──
+
+
+def test_record_in_progress_branch_delegates_to_github_issues(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    captured = {}
+    monkeypatch.setattr(
+        github_issues,
+        "record_in_progress_branch",
+        lambda repo_url, issue_number, branch: captured.update(issue_number=issue_number, branch=branch),
+    )
+
+    mem.record_in_progress_branch(13, "dev/abc123-fix-sort-order")
+
+    assert captured == {"issue_number": 13, "branch": "dev/abc123-fix-sort-order"}
+
+
+def test_record_in_progress_branch_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "record_in_progress_branch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub"))
+    )
+
+    mem.record_in_progress_branch(13, "dev/abc123")  # must not raise
+
+
+def test_resume_branch_for_delegates_to_github_issues(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "get_in_progress_branch",
+        lambda repo_url, issue_number: "dev/abc123-fix-sort-order" if issue_number == 13 else None,
+    )
+
+    assert mem.resume_branch_for("13") == "dev/abc123-fix-sort-order"
+    assert mem.resume_branch_for("99") is None
+
+
+def test_resume_branch_for_returns_none_for_a_non_numeric_id(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_in_progress_branch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub"))
+    )
+
+    assert mem.resume_branch_for("not-a-number") is None
+
+
+def test_resume_branch_for_returns_none_without_a_github_remote(tmp_path):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+
+    assert mem.resume_branch_for("13") is None
+
+
+def test_resume_branch_for_returns_none_when_github_call_fails(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_in_progress_branch", lambda *a, **k: (_ for _ in ()).throw(github_issues.GitHubIssuesError("boom"))
+    )
+
+    assert mem.resume_branch_for("13") is None

@@ -30,6 +30,7 @@ code; verify_pre_prod independently verifies the live deployment afterward
 (agents/testing.py has the full reasoning on why these are distinct passes).
 """
 
+import concurrent.futures
 import hashlib
 import json
 import subprocess
@@ -56,6 +57,14 @@ from agentra.ranking import rank
 MAX_CONSECUTIVE_TOOL_FAILURES = 2
 MAX_CYCLE_COST_USD = 3.0
 
+# run_local_tests self-heal: one automatic Implementation Agent fix-up attempt on
+# a local test failure before giving up -- deterministic (a fixed retry, not left
+# to the Orchestrator LLM's own judgment on whether/how to retry), same
+# control-flow-in-Python-not-prompts reasoning as the breakers above. Capped at 1:
+# a failure this one attempt can't fix is more likely pre-existing/deeper debt
+# than something worth burning more cost hammering at automatically.
+MAX_SELF_HEAL_ATTEMPTS = 1
+
 # Stagnation breaker threshold -- deliberately distinct from MAX_CONSECUTIVE_TOOL_FAILURES
 # above. That one catches a tool erroring the same way over and over; this one catches the
 # opposite failure mode, which is just as capable of running the clock (and the cost meter)
@@ -78,6 +87,23 @@ def _actionable_bugs(bugs: list[dict]) -> list[dict]:
     to any need_human bug, blocking or not, since blocking_agentra can be
     cleared before need_human is."""
     return [b for b in bugs if not b.get("needs_human")]
+
+
+def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
+    """Adds a resume_branch field (str | None) to each entry -- one live
+    GitHub call per entry (Memory.resume_branch_for), run concurrently via
+    a thread pool since they're independent and this is called at most
+    once per check_backlog invocation, not on every dashboard poll (see
+    resume_branch_for's own docstring for why this lookup doesn't live
+    inside known_bugs()/feature_queue() themselves). Mutates and returns
+    `entries` in place."""
+    if not entries:
+        return entries
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        branches = list(pool.map(lambda e: mem.resume_branch_for(e["external_id"]), entries))
+    for entry, branch in zip(entries, branches):
+        entry["resume_branch"] = branch
+    return entries
 
 
 def _tool_call_hash(tool_name: str, args: dict) -> str:
@@ -297,7 +323,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         "outranks your own ideation; (4) only if all three are empty, call "
         "discover_opportunities to ideate something new. Also shows what's already "
         "shipped, so you don't repeat it. Bugs labeled need_human are left out of "
-        "the list below on purpose -- they're not something to attempt.",
+        "the list below on purpose -- they're not something to attempt. A bug or "
+        "feature-queue entry with a non-null resume_branch already has an earlier, "
+        "interrupted implement_feature call's work sitting on that branch (tests "
+        "failed, or the cycle got cut off before deploying) -- pass that exact "
+        "value as implement_feature's resume_branch argument to continue from "
+        "those commits instead of redoing the work from scratch.",
         {},
     )
     async def check_backlog(_args):
@@ -305,8 +336,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         shipped = [f["feature"] for f in session.mem.shipped_features()]
         in_progress = session.mem.in_progress_features()
-        bugs = _actionable_bugs(session.mem.known_bugs())
-        queue = session.mem.feature_queue()
+        bugs = _attach_resume_branches(session.mem, _actionable_bugs(session.mem.known_bugs()))
+        queue = _attach_resume_branches(session.mem, session.mem.feature_queue())
         text = (
             f"In-progress multi-part features (resume these first): {json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
             f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
@@ -369,13 +400,18 @@ def _tools_for(session: OrchestratorSession) -> list:
         "check_backlog, until the call where more_parts_expected=false -- that's what marks "
         "the whole feature done, so always set it false on the final part.\n"
         "Leave sub_feature_of empty and more_parts_expected false (the defaults) for a "
-        "single-call, self-contained feature -- the common case.",
+        "single-call, self-contained feature -- the common case.\n"
+        "If check_backlog showed a resume_branch for the bug/feature you're picking up, "
+        "pass that exact value here -- the agent continues from that branch's existing "
+        "commits (from an earlier call that got interrupted before deploying) instead of "
+        "redoing the work from scratch. Leave empty for a fresh start, the common case.",
         {
             "feature_brief": str,
             "resolves_origin": str,
             "resolves_id": str,
             "sub_feature_of": str,
             "more_parts_expected": bool,
+            "resume_branch": str,
         },
     )
     async def implement_feature(args):
@@ -384,11 +420,21 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         brief = args["feature_brief"]
+        resume_branch = args.get("resume_branch") or ""
+        # Only honored on this run's first implement_feature call -- a later
+        # call in a multi-part sequence already has session.feature_branch
+        # set and must keep using it, same as the fresh-branch case below.
+        resuming = bool(resume_branch) and session.feature_branch is None
         if session.feature_branch is None:
-            session.feature_branch = feature_branch_name(session.env, session.run_id, brief)
+            session.feature_branch = resume_branch if resume_branch else feature_branch_name(session.env, session.run_id, brief)
+        resolves_origin = args.get("resolves_origin") or ""
+        resolves_id = args.get("resolves_id") or ""
+        sub_feature_of = args.get("sub_feature_of") or ""
+        more_parts_expected = bool(args.get("more_parts_expected"))
         try:
             impl = await implementation.run(
-                session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch
+                session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch,
+                resume=resuming,
             )
         except Exception as exc:
             # A raised exception here (as opposed to AgentResult(ok=False, ...)) means
@@ -409,6 +455,21 @@ def _tools_for(session: OrchestratorSession) -> list:
             cost_usd=impl.cost_usd,
             turns=impl.turns,
         )
+        # implementation.run() pushes session.feature_branch regardless of ok/fail
+        # (see its own docstring) -- record where that work is, whether this call
+        # is later marked "shipped" or fails/blocks, so a future cycle can resume
+        # it instead of it silently vanishing on the next redeploy (confirmed
+        # live: GitHub issue #13's fix, lost exactly this way). The tracking
+        # issue is whichever of resolves_id/sub_feature_of names one; a
+        # self-initiated idea (neither set) has no backlog entry to attach a
+        # resume marker to, so there's nothing to do for it here.
+        tracking_issue = None
+        if resolves_id and resolves_id.isdigit():
+            tracking_issue = int(resolves_id)
+        elif sub_feature_of and sub_feature_of.isdigit():
+            tracking_issue = int(sub_feature_of)
+        if tracking_issue is not None:
+            session.mem.record_in_progress_branch(tracking_issue, session.feature_branch)
         if not impl.ok:
             session.mem.record_failure(session.run_id, "implementation", impl.text)
             session.record_failure("implement_feature")
@@ -423,10 +484,6 @@ def _tools_for(session: OrchestratorSession) -> list:
                 commit_sha = head.stdout.strip()
         except Exception:
             pass  # dashboard's shipped list just shows no artifact link -- not worth failing the cycle over
-        resolves_origin = args.get("resolves_origin") or ""
-        resolves_id = args.get("resolves_id") or ""
-        sub_feature_of = args.get("sub_feature_of") or ""
-        more_parts_expected = bool(args.get("more_parts_expected"))
         # record_shipped closes a GitHub 'feature'-labeled issue as the shipped record,
         # stamping run_id/commit_sha into it -- the originating feature_queue issue
         # itself when this resolves one, a linked sub-issue of a multi-part
@@ -482,7 +539,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         "Independently verify the code itself (lint/typecheck/unit/integration) in the "
         "working directory. Required before deploy_pre_prod will do anything — it refuses "
         "if this hasn't passed since the last implementation. This does not touch anything "
-        "deployed; see verify_pre_prod for that.",
+        "deployed; see verify_pre_prod for that. On failure, automatically asks "
+        "Implementation Agent to fix it once before returning -- you don't need to call "
+        "implement_feature yourself just to fix a failing test.",
         {},
     )
     async def run_local_tests(_args):
@@ -494,6 +553,46 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.cost_usd += test.cost_usd
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
+
+        # Self-heal: a local failure is usually a real code problem, unlike
+        # pre-prod's often environment-only concerns -- try to fix it via
+        # Implementation Agent automatically, deterministically bounded at
+        # MAX_SELF_HEAL_ATTEMPTS, rather than filing a bug (see the comment
+        # below) or leaving "should I retry" to the Orchestrator LLM's own
+        # judgment (this module's usual reasoning: a fixed loop in Python,
+        # not a hope the model remembers to). resume=True on the fix-up
+        # call is load-bearing -- session.feature_branch was already pushed
+        # by the implement_feature call that got us here (see
+        # implementation.py's run()), so this continues those exact commits
+        # instead of _checkout_feature_branch's non-resume path forking a
+        # fresh branch from pre_prod_branch's tip, which would silently
+        # discard the very feature this is supposed to be fixing tests for.
+        attempts = 0
+        while not passed and attempts < MAX_SELF_HEAL_ATTEMPTS and session.feature_branch is not None:
+            attempts += 1
+            failing = data.get("failed_tests") or [test.text[:1000]]
+            fix = await implementation.run(
+                session.repo,
+                session.objective,
+                f"Fix the currently failing local tests: {failing}. "
+                "Do not change unrelated code or tests that are already passing.",
+                session.cb_summary,
+                session.env,
+                session.feature_branch,
+                resume=True,
+            )
+            session.cost_usd += fix.cost_usd
+            session.note(
+                f"run_local_tests: self-heal attempt {attempts} ok={fix.ok}",
+                ok=fix.ok, cost_usd=fix.cost_usd, turns=fix.turns,
+            )
+            if not fix.ok:
+                break  # couldn't even produce a coherent fix attempt -- no point re-testing
+            test = await testing.run_local(session.repo, session.cb_summary, session.mem)
+            session.cost_usd += test.cost_usd
+            data = test.json_data or {}
+            passed = test.ok and data.get("status") != "fail"
+
         session.tests_passed = passed
         # The structured result (lint/typecheck status, which tests failed) used to only
         # get durably recorded on failure (mem.record_failure(...) below) -- on a pass
