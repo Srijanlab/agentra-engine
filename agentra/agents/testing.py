@@ -48,12 +48,23 @@ conclude. Do not keep searching for test infrastructure that a couple of \
 Glob/Read calls already told you doesn't exist -- report "not_configured" \
 for whatever's genuinely absent rather than burning turns looking for it.
 
+Separately from the pass/fail verdict above: if you notice anything else that \
+looks broken while you're in there -- unrelated to the specific feature you \
+were sent to verify (e.g. a console error on an unrelated page, a broken \
+favicon, a stale dependency warning) -- do not fold it into failed_tests or \
+just mention it in notes where nothing reads it back. Record it as its own \
+entry in incidental_findings below so it can be filed and picked up later, \
+even when the overall run is otherwise a clean "pass".
+
 End your response with a fenced ```json block shaped like:
 {
   "status": "pass" | "fail",
   "failed_tests": ["..."],
   "lint_status": "pass" | "fail" | "not_configured",
   "typecheck_status": "pass" | "fail" | "not_configured",
+  "incidental_findings": [
+    {"diagnosis": "...", "severity": "low" | "medium" | "high", "proposed_fix": "..."}
+  ],
   "notes": "..."
 }
 """
@@ -83,11 +94,22 @@ app is actually deployed and serving traffic:
 A deploy that returns HTTP 200 on the homepage but whose actual feature is \
 broken is a failure you must catch — "the server started" is not the bar.
 
+Separately from the pass/fail verdict above: if you notice anything else that \
+looks broken on the live site while you're in there -- unrelated to the \
+specific feature you were sent to verify (e.g. a console error on an \
+unrelated page, a broken favicon, a stale dependency warning) -- do not fold \
+it into notes where nothing reads it back. Record it as its own entry in \
+incidental_findings below so it can be filed and picked up later, even when \
+the overall run is otherwise a clean "pass".
+
 End your response with a fenced ```json block shaped like:
 {{
   "status": "pass" | "fail",
   "reachable": true | false,
   "feature_verified": true | false,
+  "incidental_findings": [
+    {{"diagnosis": "...", "severity": "low" | "medium" | "high", "proposed_fix": "..."}}
+  ],
   "notes": "..."
 }}
 """
