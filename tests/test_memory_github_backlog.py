@@ -14,20 +14,8 @@ are monkeypatched -- no real GitHub API traffic.
 import subprocess
 from pathlib import Path
 
-import pytest
-
-from agentra.connectors import github_issues, github_projects
+from agentra.connectors import github_issues
 from agentra.memory import Memory
-
-
-@pytest.fixture(autouse=True)
-def _stub_project_sync(monkeypatch):
-    # record_feature_request also adds the new issue to the app's GitHub
-    # Project (see memory.py/github_projects.py) -- stubbed to a no-op here
-    # so these Issues-focused tests don't also need a fake Project backend.
-    # test_github_projects.py covers github_projects.py itself; a couple of
-    # tests below assert this gets called with the right arguments.
-    monkeypatch.setattr(github_projects, "add_item_to_feature_project", lambda *a, **k: None)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -121,6 +109,26 @@ def test_blocking_bugs_filters_to_only_blocking_agentra(tmp_path, monkeypatch):
     assert [b["external_id"] for b in blocking] == ["7"]
 
 
+def test_known_bugs_excludes_a_bug_already_marked_shipped(tmp_path, monkeypatch):
+    # A fixed bug awaiting production promotion is still open (mark_shipped
+    # leaves it that way), but it's no longer "a bug still needing a fix" --
+    # see closed_bugs() for where it surfaces instead.
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [
+            {"number": 7, "title": "Fixed already", "labels": [{"name": "bug"}, {"name": "status:shipped"}]},
+            {"number": 8, "title": "Still broken", "labels": [{"name": "bug"}]},
+        ],
+    )
+
+    bugs = mem.known_bugs()
+
+    assert [b["external_id"] for b in bugs] == ["8"]
+
+
 def test_known_bugs_returns_empty_without_a_github_remote(tmp_path):
     repo = _init_repo(tmp_path / "repo", remote=None)
     mem = Memory(repo)
@@ -159,6 +167,29 @@ def test_record_known_bug_creates_a_github_issue(tmp_path, monkeypatch):
 
     assert created["title"] == "Checkout crashes"
     assert created["labels"] == ["bug", "agentra"]
+
+
+def test_record_known_bug_with_a_title_uses_it_as_the_issue_title_and_keeps_diagnosis_in_the_body(tmp_path, monkeypatch):
+    # Dashboard submissions collect a short title separately from the fuller
+    # description -- the title becomes the issue's actual title (instead of
+    # a possibly much longer diagnosis), diagnosis lands as a "Description:"
+    # body line that known_bugs()/_issue_description parse back out.
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    created = {}
+    monkeypatch.setattr(
+        github_issues,
+        "create_issue",
+        lambda repo_url, title, body, labels=None: created.update(title=title, body=body) or {"number": 99},
+    )
+
+    mem.record_known_bug(
+        "run1", "high", "Checkout crashes on an empty cart, seen on the mobile app only", "null-check the cart",
+        title="Checkout crashes on mobile",
+    )
+
+    assert created["title"] == "Checkout crashes on mobile"
+    assert "Description: Checkout crashes on an empty cart, seen on the mobile app only" in created["body"]
 
 
 def test_record_known_bug_adds_need_human_and_blocking_agentra_labels(tmp_path, monkeypatch):
@@ -272,47 +303,47 @@ def test_record_known_bug_logs_when_github_create_fails(tmp_path, monkeypatch, c
     mem.record_known_bug("run1", "high", "Checkout crashes", "null-check the cart")  # must not raise
 
 
-# ── clear_known_bug() closes the GitHub issue when the id is numeric ────────
+# ── clear_known_bug() marks the GitHub issue shipped (stays open) when the id is numeric ────────
 
 
-def test_clear_known_bug_closes_the_github_issue(tmp_path, monkeypatch):
+def test_clear_known_bug_marks_the_github_issue_shipped(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
-    closed = {}
+    marked = {}
 
-    def fake_close(repo_url, issue_number, comment=None):
-        closed["issue_number"] = issue_number
-        closed["comment"] = comment
+    def fake_mark_shipped(repo_url, issue_number, comment=None):
+        marked["issue_number"] = issue_number
+        marked["comment"] = comment
 
-    monkeypatch.setattr(github_issues, "close_issue", fake_close)
+    monkeypatch.setattr(github_issues, "mark_shipped", fake_mark_shipped)
 
     mem.clear_known_bug("42")
 
-    assert closed["issue_number"] == 42
+    assert marked["issue_number"] == 42
 
 
 def test_clear_known_bug_passes_through_a_custom_resolution_note(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
-    closed = {}
+    marked = {}
 
     monkeypatch.setattr(
-        github_issues, "close_issue", lambda repo_url, issue_number, comment=None: closed.update(comment=comment)
+        github_issues, "mark_shipped", lambda repo_url, issue_number, comment=None: marked.update(comment=comment)
     )
 
     mem.clear_known_bug("42", "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)")
 
-    assert closed["comment"] == "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)"
+    assert marked["comment"] == "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)"
 
 
 def test_clear_known_bug_with_non_numeric_id_does_not_call_github(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
-    def fail_close(*a, **k):
+    def fail_mark_shipped(*a, **k):
         raise AssertionError("should not call GitHub for a non-numeric id")
 
-    monkeypatch.setattr(github_issues, "close_issue", fail_close)
+    monkeypatch.setattr(github_issues, "mark_shipped", fail_mark_shipped)
 
     mem.clear_known_bug("run-abc")  # must not raise
 
@@ -344,6 +375,23 @@ def test_feature_queue_returns_empty_without_a_github_remote(tmp_path):
     assert mem.feature_queue() == []
 
 
+def test_feature_queue_excludes_a_feature_already_marked_shipped(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [
+            {"number": 5, "title": "Already shipped", "labels": [{"name": "feature"}, {"name": "status:shipped"}]},
+            {"number": 6, "title": "Not started", "labels": [{"name": "feature"}]},
+        ],
+    )
+
+    queue = mem.feature_queue()
+
+    assert [f["external_id"] for f in queue] == ["6"]
+
+
 def test_in_progress_features_reads_from_github(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
@@ -363,7 +411,6 @@ def test_in_progress_features_reads_from_github(tmp_path, monkeypatch):
         ]
 
     monkeypatch.setattr(github_issues, "list_in_progress_features", fake_list)
-    monkeypatch.setattr(github_projects, "get_feature_status", lambda repo_url, feature_issue_number: "In Progress")
 
     result = mem.in_progress_features()
 
@@ -386,12 +433,11 @@ def test_in_progress_features_returns_empty_without_a_github_remote(tmp_path):
     assert mem.in_progress_features() == []
 
 
-def test_in_progress_features_filters_out_a_feature_whose_card_is_still_todo(tmp_path, monkeypatch):
+def test_in_progress_features_filters_out_a_feature_with_nothing_shipped_yet(tmp_path, monkeypatch):
     # The real bug this fixes: a feature can have open sub-issues (a manual
     # breakdown/plan) with nothing actually shipped yet -- subIssuesSummary.total
-    # > 0 alone can't tell that apart from genuine progress. The Project card's
-    # own Status is the authoritative signal (see memory.py's record_shipped
-    # parent_status writes) -- still "Todo" means nothing has started.
+    # > 0 alone can't tell that apart from genuine progress. sub_issues_completed
+    # > 0 is the authoritative "has work actually begun" signal instead.
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     monkeypatch.setattr(
@@ -404,31 +450,8 @@ def test_in_progress_features_filters_out_a_feature_whose_card_is_still_todo(tmp
             }
         ],
     )
-    monkeypatch.setattr(github_projects, "get_feature_status", lambda repo_url, feature_issue_number: "Todo")
 
     assert mem.in_progress_features() == []
-
-
-def test_in_progress_features_keeps_a_feature_with_no_board_at_all(tmp_path, monkeypatch):
-    # No Project (provisioning failed, or hasn't happened) -- fall back to the
-    # sub-issue-count signal alone rather than silently hiding real progress.
-    repo = _init_repo(tmp_path / "repo")
-    mem = Memory(repo)
-    monkeypatch.setattr(
-        github_issues,
-        "list_in_progress_features",
-        lambda repo_url, labels=None: [
-            {
-                "number": 10, "title": "Big feature", "body": None,
-                "html_url": "https://github.com/acme/app/issues/10", "sub_issues_total": 3, "sub_issues_completed": 1,
-            }
-        ],
-    )
-    monkeypatch.setattr(github_projects, "get_feature_status", lambda repo_url, feature_issue_number: None)
-
-    result = mem.in_progress_features()
-
-    assert [f["external_id"] for f in result] == ["10"]
 
 
 def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):
@@ -449,20 +472,20 @@ def test_record_feature_request_creates_a_github_issue(tmp_path, monkeypatch):
     assert created["labels"] == ["feature", "agentra"]
 
 
-def test_record_feature_request_adds_the_new_issue_to_the_project_as_todo(tmp_path, monkeypatch):
+def test_record_feature_request_with_a_title_uses_it_as_the_issue_title(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
-    monkeypatch.setattr(github_issues, "create_issue", lambda *a, **k: {"number": 11})
-    project_calls = []
+    created = {}
     monkeypatch.setattr(
-        github_projects,
-        "add_item_to_feature_project",
-        lambda repo_url, feature_issue_number, title, status="Todo": project_calls.append((feature_issue_number, title, status)),
+        github_issues,
+        "create_issue",
+        lambda repo_url, title, body, labels=None: created.update(title=title, body=body) or {"number": 11},
     )
 
-    mem.record_feature_request("Add keyboard shortcuts")
+    mem.record_feature_request("Let power users jump between panels without the mouse", title="Keyboard shortcuts")
 
-    assert project_calls == [(11, "Add keyboard shortcuts", "Todo")]
+    assert created["title"] == "Keyboard shortcuts"
+    assert "Description: Let power users jump between panels without the mouse" in created["body"]
 
 
 def test_clear_feature_request_closes_the_github_issue(tmp_path, monkeypatch):
@@ -560,8 +583,9 @@ def test_closed_bugs_reads_from_github(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     captured = {}
+    monkeypatch.setattr(github_issues, "list_open_issues", lambda repo_url, labels=None: [])
 
-    def fake_list(repo_url, labels=None):
+    def fake_list(repo_url, labels=None, limit=30):
         captured["labels"] = labels
         return [
             {
@@ -638,25 +662,36 @@ def test_record_commit_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
 # ── mark_status_done() / resume_run_id_for() ───────────────────────────────
 
 
-def test_mark_status_done_delegates_to_add_labels(tmp_path, monkeypatch):
+def test_mark_status_done_labels_and_closes_the_issue(tmp_path, monkeypatch):
+    # status:done and "closed" happen together under the current model -- an
+    # issue stays open through the shipped stage (mark_shipped), and only
+    # production promotion (this method) finally closes it.
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
-    captured = {}
+    labeled = {}
+    closed = {}
     monkeypatch.setattr(
         github_issues,
         "add_labels",
-        lambda repo_url, issue_number, labels: captured.update(issue_number=issue_number, labels=labels),
+        lambda repo_url, issue_number, labels: labeled.update(issue_number=issue_number, labels=labels),
+    )
+    monkeypatch.setattr(
+        github_issues,
+        "close_issue",
+        lambda repo_url, issue_number, comment=None: closed.update(issue_number=issue_number, comment=comment),
     )
 
     mem.mark_status_done(13)
 
-    assert captured == {"issue_number": 13, "labels": ["status:done"]}
+    assert labeled == {"issue_number": 13, "labels": ["status:done"]}
+    assert closed["issue_number"] == 13
 
 
 def test_mark_status_done_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo", remote=None)
     mem = Memory(repo)
     monkeypatch.setattr(github_issues, "add_labels", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub")))
+    monkeypatch.setattr(github_issues, "close_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub")))
 
     mem.mark_status_done(13)  # must not raise
 

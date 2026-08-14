@@ -4,12 +4,17 @@ plumbing, just a new use of the token git_ops.py already mints for pushes.
 
 GitHub Issues is the sole backlog store now (see memory.py's known_bugs()/
 feature_queue()/shipped_features() -- no local .agentra/*.json mirror). A
-shipped feature is a closed issue labeled "feature" too: record_shipped()
-either closes an existing feature_queue issue or opens-and-immediately-closes
-a fresh one, so "what's pending" and "what shipped" are just open vs. closed
-issues under the same label, with no separate ledger to keep in sync. A
+shipped feature/bug fix stays OPEN, stamped "status:shipped" (mark_shipped
+below) -- only actual production promotion closes it (memory.py's
+mark_status_done). So an issue's own open/closed state maps 1:1 onto the
+dashboard's "Ready to Review" (open, status:shipped) vs "Release to
+Production" (closed) split, and "what's pending" vs "what shipped" is
+open-without-status:shipped vs open-with-status:shipped, both still just
+label state on the one issue -- no separate ledger to keep in sync. A
 multi-part feature's individual pieces (create_sub_issue) are labeled
-"story" instead -- only the whole feature's own issue carries "feature".
+"story" instead -- only the whole feature's own issue carries "feature";
+those still close immediately on shipping (GitHub's own sub-issue
+"completed" count is inherently open/closed-based, not label-based).
 
 Requires the GitHub App to actually be installed with Issues read/write
 permission on the target repo (confirmed granted, per the user) -- raises
@@ -51,9 +56,7 @@ def _headers(repo_url: str) -> dict[str, str]:
 def get_issue(repo_url: str, issue_number: int) -> dict | None:
     """Single issue's REST JSON, or None if it doesn't exist. Used to look
     up a parent issue's title when recording a sub-feature (memory.py's
-    record_shipped, sub_feature_of) -- the sub-feature's Project board is
-    the parent's, titled after the parent, so a fresh board needs the
-    parent's actual title, not the sub-feature's own."""
+    record_shipped, sub_feature_of, board_title)."""
     owner_repo = _owner_repo_or_raise(repo_url)
     resp = httpx.get(
         f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}", headers=_headers(repo_url), timeout=15
@@ -109,9 +112,8 @@ def _graphql(repo_url: str, query: str, variables: dict) -> dict:
     """GitHub's REST API has no sub-issue endpoint -- addSubIssue only
     exists in GraphQL v4. Every other function in this module stays REST
     (simpler, and it's all GitHub's REST Issues API already covers); this
-    is the one GraphQL escape hatch, kept local to create_sub_issue rather
-    than importing connectors/github_projects.py's own copy, so this
-    module has no dependency on that one."""
+    is the one GraphQL escape hatch, shared with list_in_progress_features
+    below (also GraphQL-only, for subIssuesSummary)."""
     token = get_installation_token(repo_url)
     resp = httpx.post(
         f"{GITHUB_API}/graphql",
@@ -170,13 +172,17 @@ def create_sub_issue(
 def list_in_progress_features(repo_url: str, labels: list[str] | None = None) -> list[dict]:
     """Open issues that already have at least one sub-issue -- a
     multi-part feature the Orchestrator started splitting up but hasn't
-    yet signaled complete (memory.py's record_shipped only closes the
-    parent once more_parts_expected=False on a later sub_feature_of
-    call). A plain not-yet-started feature_queue entry has zero
-    sub-issues, so this and list_open_issues never overlap. Each entry
-    carries sub_issues_total/sub_issues_completed (GitHub's own
-    subIssuesSummary) so a caller can tell "half done" from "just
-    started" without a follow-up call per issue."""
+    yet signaled complete (memory.py's record_shipped only stamps the
+    parent "status:shipped" once more_parts_expected=False on a later
+    sub_feature_of call -- it stays open even then, see mark_shipped). A
+    plain not-yet-started feature_queue entry has zero sub-issues, so this
+    and list_open_issues never overlap. Each entry carries
+    sub_issues_total/sub_issues_completed (GitHub's own subIssuesSummary)
+    so a caller can tell "half done" from "just started" without a
+    follow-up call per issue. Issues already labeled "status:shipped" are
+    excluded here too -- a fully-shipped multi-part feature's parent stays
+    open (see above) but has no further "in progress" work left to
+    resume."""
     owner, name = _owner_repo_or_raise(repo_url).split("/", 1)
     data = _graphql(
         repo_url,
@@ -190,6 +196,7 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
                 body
                 url
                 subIssuesSummary { total completed }
+                labels(first: 20) { nodes { name } }
               }
             }
           }
@@ -208,6 +215,7 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
         }
         for i in data["repository"]["issues"]["nodes"]
         if i["subIssuesSummary"]["total"] > 0
+        and "status:shipped" not in {l["name"] for l in i["labels"]["nodes"]}
     ]
 
 
@@ -227,6 +235,7 @@ _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
     "need_human": ("fbca04", "Needs a human decision or action -- agentra should not attempt this"),
     "blocking_agentra": ("b60205", "Blocks agentra's own further progress until a human resolves it"),
     "status:in-progress": ("fef2c0", "Real work has started -- see In-Progress-Branch comment for where"),
+    "status:shipped": ("bfd4f2", "Implemented and committed, still open awaiting production promotion -- shows in the dashboard's Ready to Review view"),
     "status:done": ("0e8a16", "Actually deployed to production -- shows in the dashboard's Release to Production view"),
 }
 
@@ -456,6 +465,48 @@ def close_issue(
         timeout=15,
     )
     resp.raise_for_status()
+
+
+def mark_shipped(repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None) -> None:
+    """Like close_issue, but leaves the issue OPEN and stamps "status:shipped"
+    instead of closing it -- a shipped feature/bug fix stays open through
+    the "Ready to Review" stage; only actual production promotion closes
+    it (memory.py's mark_status_done, called from server.py's
+    _record_production_release). This makes an issue's own open/closed
+    state match the dashboard's Ready to Review/Release to Production
+    split 1:1, instead of a separate closed-but-not-yet-done state to
+    track on top of it.
+
+    `comment`/`body_suffix` mirror close_issue's own params (same audit-
+    trail/structured-field-in-body intent) -- kept as a separate function
+    rather than an close_issue(..., state="shipped") flag since the two
+    diverge enough (this never touches `state` at all) that sharing one
+    signature would just make close_issue's callers reason about a state
+    they can't actually reach."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    headers = _headers(repo_url)
+    if comment:
+        resp = httpx.post(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/comments",
+            headers=headers,
+            json={"body": comment},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    if body_suffix:
+        get_resp = httpx.get(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}", headers=headers, timeout=15
+        )
+        get_resp.raise_for_status()
+        current_body = get_resp.json().get("body") or ""
+        patch_resp = httpx.patch(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}",
+            headers=headers,
+            json={"body": current_body.rstrip() + "\n\n" + body_suffix},
+            timeout=15,
+        )
+        patch_resp.raise_for_status()
+    add_labels(repo_url, issue_number, ["status:shipped"])
 
 
 def list_closed_issues(repo_url: str, labels: list[str] | None = None, limit: int = 30) -> list[dict]:

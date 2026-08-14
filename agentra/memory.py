@@ -21,16 +21,18 @@ objective/environments -- GitHub Issues/Actions Variables directly, with no
 local mirror at all (this module's own _repo_url() requires a github.com
 remote; there is deliberately no local-file fallback if GitHub is
 unreachable or unconfigured, a known availability tradeoff -- see
-known_bugs()'s own docstring). A shipped feature is a closed 'feature'-
-labeled issue (record_shipped()/shipped_features()) -- its individual parts,
-if it has any, are separate 'story'-labeled sub-issues, only the whole
-feature's own issue carries 'feature' -- so the whole feature lifecycle
--- requested, in progress, shipped -- lives as one GitHub Issue with a
-run_id/commit_sha trail, not a JSON ledger duplicating it. That same Issue
-also gets its own dedicated GitHub Project board, titled after the feature
-itself (connectors/github_projects.py, "Todo" on record_feature_request,
-"Done" on record_shipped) -- "feature mapped to project, bug mapped to
-issue": bugs stay Issues-only, features get both, one Project per feature.
+known_bugs()'s own docstring). A shipped feature is an open 'feature'-
+labeled issue stamped "status:shipped" (record_shipped()/shipped_features(),
+connectors/github_issues.py's mark_shipped) -- it only actually closes once
+promoted to production (mark_status_done, called from server.py's
+_record_production_release), so an issue's own open/closed state maps 1:1
+onto the dashboard's "Ready to Review"/"Release to Production" split. Its
+individual parts, if it has any, are separate 'story'-labeled sub-issues
+(those DO close immediately on shipping -- GitHub's own sub-issue
+"completed" tracking is open/closed-based, not label-based); only the whole
+feature's own issue carries 'feature' -- so the whole feature lifecycle --
+requested, in progress, shipped, released -- lives as one GitHub Issue with
+a run_id/commit_sha trail, not a JSON ledger duplicating it.
 Getting real data INTO the backlog
 (customer feedback from whatever database a given app uses) is the job of
 a per-app adapter command
@@ -58,7 +60,6 @@ entirely too -- see chat_store.py -- they were never a fit for a customer's own
 git history in the first place.
 """
 
-import concurrent.futures
 import datetime as dt
 import difflib
 import json
@@ -167,16 +168,19 @@ _STORY_LABEL = "story"
 _NEED_HUMAN_LABEL = "need_human"
 _BLOCKING_AGENTRA_LABEL = "blocking_agentra"
 
-# Lifecycle status, independent of open/closed: an issue closes the moment
-# its code is committed (record_shipped/clear_known_bug), which is well
-# before it's actually deployed to production -- status:in-progress marks
-# real work having started (added alongside the in-progress-branch marker,
-# see record_in_progress_branch), status:done marks having actually reached
-# production (added at promotion time, see server.py's
-# _record_production_release). The dashboard's "Release to Production"
-# section is gated on status:done specifically, not merely "closed" --
-# closed-but-not-yet-done is what "Ready to Review" shows instead.
+# Lifecycle status: status:in-progress marks real work having started
+# (added alongside the in-progress-branch marker, see
+# record_in_progress_branch); status:shipped marks code committed --
+# record_shipped/clear_known_bug stamp this but deliberately leave the
+# issue OPEN (github_issues.mark_shipped); status:done marks having
+# actually reached production (added at promotion time, see server.py's
+# _record_production_release, which is also what finally CLOSES the
+# issue -- see mark_status_done below). So an issue's own open/closed
+# state and these two labels move together, not independently: the
+# dashboard's "Ready to Review" section is open issues carrying
+# status:shipped; "Release to Production" is closed ones.
 _STATUS_IN_PROGRESS_LABEL = "status:in-progress"
+_STATUS_SHIPPED_LABEL = "status:shipped"
 _STATUS_DONE_LABEL = "status:done"
 
 # ── Failure triage: replaces the old write-only memory/failures/*.md ledger
@@ -232,6 +236,28 @@ def cannot_be_fixed_by_agentra(text: str) -> bool:
     return any(p.search(text) for p in _UNFIXABLE_BY_AGENTRA_PATTERNS)
 
 
+def _label_names(issue: dict) -> set[str]:
+    return {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
+
+
+# A dashboard submission (memory.py's record_known_bug/record_feature_request,
+# `title` param) puts the short human-written title on the issue itself and
+# the fuller free-text description as a "Description: ..." line in the body,
+# so the dashboard's backlog list can keep showing the substantive text
+# (diagnosis/description) rather than a title that might be much shorter (or,
+# for a caller with no separate title -- every non-dashboard/autonomous
+# caller -- much longer, since the whole diagnosis becomes the title then).
+# Falls back to the title when there's no such line, which covers every
+# issue created before this existed and every autonomous-filed one, both of
+# which only ever had a single piece of text to begin with.
+_DESCRIPTION_RE = re.compile(r"^Description: (.+)$", re.MULTILINE)
+
+
+def _issue_description(issue: dict) -> str:
+    match = _DESCRIPTION_RE.search(issue.get("body") or "")
+    return match.group(1) if match else issue["title"]
+
+
 def _github_bug_to_dict(issue: dict) -> dict:
     # run_id set to the same value as external_id (not None): discovery.py's
     # prompt tells the LLM to reference a known_bug by its run_id
@@ -240,17 +266,17 @@ def _github_bug_to_dict(issue: dict) -> dict:
     # so giving both fields the issue number keeps that resolution path
     # working for GitHub-sourced bugs without having to change discovery.py.
     issue_number = str(issue["number"])
-    label_names = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
+    labels = _label_names(issue)
     return {
         "run_id": issue_number,
         "severity": "medium",
-        "diagnosis": issue["title"],
+        "diagnosis": _issue_description(issue),
         "proposed_fix": issue.get("body") or "",
         "source": "github",
         "external_id": issue_number,
         "html_url": issue.get("html_url"),
-        "needs_human": _NEED_HUMAN_LABEL in label_names,
-        "blocking_agentra": _BLOCKING_AGENTRA_LABEL in label_names,
+        "needs_human": _NEED_HUMAN_LABEL in labels,
+        "blocking_agentra": _BLOCKING_AGENTRA_LABEL in labels,
     }
 
 
@@ -259,33 +285,34 @@ def _github_closed_bug_to_dict(issue: dict) -> dict:
     # closed_at there -- that dict shape is exact-compared in several
     # existing tests, and closed_at is meaningless for an open issue anyway.
     issue_number = str(issue["number"])
-    label_names = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
+    labels = _label_names(issue)
     return {
         "run_id": issue_number,
         "severity": "medium",
-        "diagnosis": issue["title"],
+        "diagnosis": _issue_description(issue),
         "proposed_fix": issue.get("body") or "",
         "source": "github",
         "external_id": issue_number,
         "html_url": issue.get("html_url"),
         "closed_at": issue.get("closed_at"),
-        "status_done": _STATUS_DONE_LABEL in label_names,
+        "status_done": _STATUS_DONE_LABEL in labels,
     }
 
 
 def _github_feature_to_dict(issue: dict) -> dict:
     return {
-        "description": issue["title"],
+        "description": _issue_description(issue),
         "source": "github",
         "external_id": str(issue["number"]),
         "html_url": issue.get("html_url"),
     }
 
 
-# Shipped features are closed 'feature'-labeled issues too -- record_shipped()
-# stamps run_id/commit_sha into the issue body as structured lines right
-# before closing it, so shipped_features() can parse them back out of the
-# same list call, no per-issue follow-up request needed.
+# A shipped feature/bug fix -- open+status:shipped or closed+status:done
+# (see shipped_features()/closed_bugs()) -- has run_id/commit_sha stamped
+# into its issue body as structured lines by mark_shipped's body_suffix, so
+# these can be parsed back out of the same list call, no per-issue
+# follow-up request needed.
 _SHIPPED_RUN_ID_RE = re.compile(r"^Shipped-Run-ID: (.+)$", re.MULTILINE)
 _SHIPPED_COMMIT_RE = re.compile(r"^Shipped-Commit: (.+)$", re.MULTILINE)
 
@@ -294,7 +321,7 @@ def _github_shipped_to_dict(issue: dict) -> dict:
     body = issue.get("body") or ""
     run_id_m = _SHIPPED_RUN_ID_RE.search(body)
     commit_m = _SHIPPED_COMMIT_RE.search(body)
-    label_names = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
+    labels = _label_names(issue)
     return {
         "feature": issue["title"],
         "commit_sha": commit_m.group(1) if commit_m else None,
@@ -302,7 +329,7 @@ def _github_shipped_to_dict(issue: dict) -> dict:
         "ts": issue.get("closed_at"),
         "external_id": str(issue["number"]),
         "html_url": issue.get("html_url"),
-        "status_done": _STATUS_DONE_LABEL in label_names,
+        "status_done": _STATUS_DONE_LABEL in labels,
     }
 
 
@@ -391,16 +418,20 @@ class Memory:
         return self.log(run_id, format_safety_denial_line(tool_name, pattern, detail))
 
     def shipped_features(self) -> list[dict]:
-        """Each entry: {feature, commit_sha, run_id, ts, external_id}. A
-        shipped feature IS a closed GitHub issue labeled 'feature' --
-        commit_sha/run_id are parsed back out of the closing body stamp
-        record_shipped() writes; there is no local shipped.json anymore
-        (see record_shipped's docstring for why one ledger is enough).
-        commit_sha links the dashboard's Shipped list to the actual
-        artifact (a GitHub commit URL, built client-side from the app's
-        repo_url + this sha); run_id links it back to the exact
-        run/agent-steps/log that produced it; external_id is the GitHub
-        issue number, for building a direct link to the audit trail."""
+        """Each entry: {feature, commit_sha, run_id, ts, external_id,
+        status_done}. A shipped feature is a 'feature'-labeled issue that's
+        either open with "status:shipped" (implemented, awaiting production
+        promotion -- the dashboard's "Ready to Review") or closed (already
+        promoted -- status_done is True, "Release to Production"; see
+        mark_status_done, the only thing that ever closes one). commit_sha/
+        run_id are parsed back out of the body stamp record_shipped()
+        writes; there is no local shipped.json anymore (see record_shipped's
+        docstring for why one ledger is enough). commit_sha links the
+        dashboard's Shipped list to the actual artifact (a GitHub commit
+        URL, built client-side from the app's repo_url + this sha); run_id
+        links it back to the exact run/agent-steps/log that produced it;
+        external_id is the GitHub issue number, for building a direct link
+        to the audit trail."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("shipped_features: %s has no github.com remote -- shipped history is unreadable", self.repo)
@@ -408,8 +439,13 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            issues = github_issues.list_closed_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
-            return [_github_shipped_to_dict(i) for i in issues]
+            open_shipped = [
+                i
+                for i in github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
+                if _STATUS_SHIPPED_LABEL in _label_names(i)
+            ]
+            closed = github_issues.list_closed_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
+            return [_github_shipped_to_dict(i) for i in open_shipped + closed]
         except Exception:
             logger.error("shipped_features: GitHub Issues unavailable for %s -- shipped history is unreadable until it recovers", repo_url, exc_info=True)
             return []
@@ -423,19 +459,24 @@ class Memory:
         sub_feature_of: str | None = None,
         more_parts_expected: bool = False,
     ) -> dict | None:
-        """Records a shipped feature (or one part of one) as a closed
-        GitHub 'feature'-labeled issue (a part is 'story'-labeled instead --
-        see sub_feature_of below) -- the same ledger feature_queue() reads
-        (open) and shipped_features() reads (closed), so "pending" vs.
-        "shipped" is just an issue's state, never two things to keep in
-        sync.
+        """Records a shipped feature (or one part of one) as an open GitHub
+        'feature'-labeled issue stamped "status:shipped" (a part is
+        'story'-labeled instead and DOES close immediately -- see
+        sub_feature_of below) -- the same ledger feature_queue() reads (open,
+        no status:shipped) and shipped_features() reads (status:shipped or
+        status:done), so "pending" vs. "shipped" vs. "released" is just an
+        issue's own state/labels, never separate things to keep in sync. The
+        issue only actually closes once mark_status_done runs it through
+        production promotion (server.py's _record_production_release).
 
         - sub_feature_of set: this part continues a multi-part feature
           already started (its parent issue number). A new sub-issue is
-          created and closed for THIS part; the parent itself only closes
-          too once more_parts_expected=False signals the whole feature is
-          now done -- until then it stays open, discoverable via
-          in_progress_features() so a later cycle resumes it instead of
+          created and closed for THIS part (sub-issues always close
+          immediately -- GitHub's own sub-issue "completed" count is
+          open/closed-based); the parent itself only gets status:shipped
+          once more_parts_expected=False signals the whole feature is now
+          done -- until then it stays open with no such label, discoverable
+          via in_progress_features() so a later cycle resumes it instead of
           abandoning it.
         - sub_feature_of unset, more_parts_expected=True: starts a new
           multi-part feature. If resolves_id names a feature_queue issue,
@@ -443,33 +484,20 @@ class Memory:
           parent issue is created and left open. Either way this call's
           own part becomes the parent's first sub-issue, closed as usual.
         - Neither set: today's simple, single-call feature. resolves_id
-          (a feature_queue issue) is closed directly as the shipped
-          record; with no resolves_id, a fresh issue is opened and closed
-          immediately. Unchanged from before multi-part features existed.
+          (a feature_queue issue) is marked shipped directly as the record;
+          with no resolves_id, a fresh issue is opened and marked shipped.
+          Unchanged from before multi-part features existed.
 
-        Returns {"issue_number": N, "board_issue_number": M} on success --
-        M is this call's own issue except for the sub_feature_of/
+        Returns {"issue_number": N, "board_issue_number": M} on success -- M
+        is this call's own issue except for the sub_feature_of/
         more_parts_expected paths, where it's the parent's number (the one
-        to reference on a following call, and the one the Project board is
-        anchored to). None if recording failed."""
+        to reference on a following call). None if recording failed."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_shipped: %s has no github.com remote -- shipped feature %r was NOT recorded anywhere", self.repo, feature)
             return None
         note = f"Shipped as {feature!r}" + (f" (run {run_id})" if run_id else "") + (f" (commit {commit_sha})" if commit_sha else "") + "."
         body_suffix = "---\n" + (f"Shipped-Run-ID: {run_id}\n" if run_id else "") + (f"Shipped-Commit: {commit_sha}\n" if commit_sha else "")
-        # Set only for the sub_feature_of/more_parts_expected paths below --
-        # the parent's own board card needs an explicit status move too
-        # (separate from the sub-issue/simple-feature item's own "Done"
-        # below), since nothing else ever touches it: a feature filed via
-        # record_feature_request starts its card at "Todo" and nothing
-        # previously moved it off that once work actually began. Without
-        # this, in_progress_features() reading Status back (see below) would
-        # never see anything but "Todo" even for a feature genuinely
-        # underway -- the same gap that let issue #2's card sit at "Todo"
-        # with two open, unshipped sub-issues and no way to distinguish
-        # "planned into parts" from "actually started."
-        parent_status: str | None = None
         try:
             from agentra.connectors import github_issues
 
@@ -481,15 +509,10 @@ class Memory:
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 if not more_parts_expected:
-                    github_issues.close_issue(
+                    github_issues.mark_shipped(
                         repo_url, parent_number, comment=f"All parts shipped (run {run_id})." if run_id else "All parts shipped."
                     )
-                    parent_status = "Done"
-                else:
-                    parent_status = "In Progress"
                 board_issue_number = parent_number
-                parent = github_issues.get_issue(repo_url, parent_number)
-                board_title = parent["title"] if parent else feature
 
             elif more_parts_expected:
                 if resolves_id and resolves_id.isdigit():
@@ -507,15 +530,12 @@ class Memory:
                 )
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
-                parent_status = "In Progress"
                 board_issue_number = parent_number
-                board_title = feature
 
             elif resolves_id and resolves_id.isdigit():
                 issue_number = int(resolves_id)
-                github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                github_issues.mark_shipped(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 board_issue_number = issue_number
-                board_title = feature
 
             else:
                 # Safety net, not just a prompt hope: implement_feature's caller is
@@ -531,34 +551,22 @@ class Memory:
                 # piece of work then showed up as both still-open (backlog) and
                 # already-shipped (ready to review). Before creating a fresh issue,
                 # check whether a similar bug or feature-queue item is already open and
-                # close THAT as the shipped record instead.
+                # mark THAT as shipped instead.
                 duplicate_of = self._find_similar_open(feature, self.known_bugs(), "diagnosis") or self._find_similar_open(
                     feature, self.feature_queue(), "description"
                 )
                 if duplicate_of and duplicate_of.isdigit():
                     issue_number = int(duplicate_of)
-                    github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                    github_issues.mark_shipped(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 else:
                     issue = github_issues.create_issue(repo_url, feature, "Autonomously shipped by agentra.", labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
                     issue_number = issue["number"]
-                    github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                    github_issues.mark_shipped(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 board_issue_number = issue_number
-                board_title = feature
         except Exception:
             logger.error("record_shipped: failed to record shipped feature %r on %s", feature, repo_url, exc_info=True)
             return None
 
-        from agentra.connectors import github_projects
-
-        github_projects.add_item_to_feature_project(
-            repo_url,
-            board_issue_number,
-            title=board_title,
-            issue_number=issue_number if board_issue_number != issue_number else None,
-            status="Done",
-        )
-        if parent_status is not None:
-            github_projects.add_item_to_feature_project(repo_url, board_issue_number, title=board_title, status=parent_status)
         return {"issue_number": issue_number, "board_issue_number": board_issue_number}
 
     def released_features(self) -> list[dict]:
@@ -619,6 +627,10 @@ class Memory:
         return result.stdout.strip() if result.returncode == 0 else None
 
     def known_bugs(self) -> list[dict]:
+        """Open 'bug'-labeled issues still needing a fix -- excludes ones
+        already stamped "status:shipped" by clear_known_bug (fixed,
+        awaiting production promotion; see closed_bugs()) even though
+        those are technically still open too."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("known_bugs: %s has no github.com remote -- no bug backlog is visible at all", self.repo)
@@ -627,24 +639,32 @@ class Memory:
             from agentra.connectors import github_issues
 
             issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
+            issues = [i for i in issues if _STATUS_SHIPPED_LABEL not in _label_names(i)]
             return [_github_bug_to_dict(i) for i in issues]
         except Exception:
             logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
             return []
 
     def closed_bugs(self) -> list[dict]:
-        """Resolved bugs -- closed 'bug'-labeled issues. Paired with
-        shipped_features() (closed 'feature'-labeled issues) by the
-        dashboard's "release to production" view: together they're
-        everything agentra has actually finished, regardless of type."""
+        """Resolved bugs -- open+status:shipped (fixed, awaiting production
+        promotion) or closed (already promoted; status_done True -- see
+        mark_status_done). Paired with shipped_features() by the
+        dashboard's "Ready to Review"/"Release to Production" views:
+        together they're everything agentra has actually finished,
+        regardless of type."""
         repo_url = self._repo_url()
         if not repo_url:
             return []
         try:
             from agentra.connectors import github_issues
 
-            issues = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
-            return [_github_closed_bug_to_dict(i) for i in issues]
+            open_shipped = [
+                i
+                for i in github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
+                if _STATUS_SHIPPED_LABEL in _label_names(i)
+            ]
+            closed = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
+            return [_github_closed_bug_to_dict(i) for i in open_shipped + closed]
         except Exception:
             logger.error("closed_bugs: GitHub Issues unavailable for %s", repo_url, exc_info=True)
             return []
@@ -685,6 +705,7 @@ class Memory:
         external_id: str | None = None,
         needs_human: bool = False,
         blocking_agentra: bool = False,
+        title: str | None = None,
     ) -> None:
         """needs_human/blocking_agentra: set when the caller already knows
         agentra cannot fix this itself (see cannot_be_fixed_by_agentra) --
@@ -693,7 +714,16 @@ class Memory:
         and run_autonomous_cycle's pre-flight check read back. If a similar
         bug is already open, these are added to THAT issue instead (GitHub's
         add-labels endpoint is additive) -- the original occurrence might not
-        have been recognized as unfixable, but a later one can be."""
+        have been recognized as unfixable, but a later one can be.
+
+        `title`: a short human-written title (the dashboard's "add to
+        backlog" form collects one) -- becomes the issue's actual title,
+        with `diagnosis` recorded as a "Description: ..." body line instead
+        (see _issue_description) so known_bugs() still surfaces the
+        substantive text rather than a title that might be much shorter.
+        Every non-dashboard caller (autonomous bug filing) leaves this
+        unset, so diagnosis becomes the title directly -- unchanged from
+        before this param existed."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_known_bug: %s has no github.com remote -- bug %r was NOT recorded anywhere", self.repo, diagnosis)
@@ -715,19 +745,23 @@ class Memory:
                 )
                 return
 
-            body = f"Severity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
+            body = f"Description: {diagnosis}\n\nSeverity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
+            github_issues.create_issue(repo_url, title or diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
         except Exception:
             logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
 
     def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
         # resolution_note: what actually shipped to fix this (feature name + commit) --
-        # callers that know it should pass it, so the closed GitHub issue itself carries
-        # a real "shipped" record instead of a content-free "Resolved by agentra."
+        # callers that know it should pass it, so the issue itself carries a real
+        # "shipped" record instead of a content-free "Resolved by agentra." Marks
+        # status:shipped and leaves the issue OPEN (github_issues.mark_shipped) --
+        # it only actually closes once production promotion runs it through
+        # mark_status_done (server.py's _record_production_release), same as a
+        # shipped feature (see record_shipped's docstring).
         if not id_.isdigit():
-            logger.warning("clear_known_bug: %r is not a GitHub issue number, nothing to close", id_)
+            logger.warning("clear_known_bug: %r is not a GitHub issue number, nothing to mark shipped", id_)
             return
         repo_url = self._repo_url()
         if not repo_url:
@@ -735,9 +769,9 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            github_issues.close_issue(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
+            github_issues.mark_shipped(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
         except Exception:
-            logger.warning("clear_known_bug: failed to close GitHub issue #%s on %s", id_, repo_url, exc_info=True)
+            logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
 
     def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
         """The one place a failed agent turn's full output should be
@@ -786,8 +820,13 @@ class Memory:
         this issue tracks has actually reached production (server.py's
         _record_production_release), regardless of whether a human clicked
         Promote in the dashboard or an autonomous cycle triggered it; both
-        paths call the same promotion code. Best-effort, same reasoning as
-        record_in_progress_branch."""
+        paths call the same promotion code. Also closes the issue -- under
+        the current model status:done and "closed" happen together (see
+        record_shipped/clear_known_bug's mark_shipped, which stamps
+        status:shipped but deliberately leaves it open); closing an
+        already-closed issue is a harmless no-op, so this is safe to call
+        on something promoted before this label existed too. Best-effort,
+        same reasoning as record_in_progress_branch."""
         repo_url = self._repo_url()
         if not repo_url:
             return
@@ -795,6 +834,7 @@ class Memory:
             from agentra.connectors import github_issues
 
             github_issues.add_labels(repo_url, issue_number, [_STATUS_DONE_LABEL])
+            github_issues.close_issue(repo_url, issue_number, comment="Released to production.")
         except Exception:
             logger.warning("mark_status_done: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
@@ -886,6 +926,10 @@ class Memory:
     # by Discovery Agent above its own autonomous ideation, below real signals. ──
 
     def feature_queue(self) -> list[dict]:
+        """Open 'feature'-labeled issues not yet shipped -- excludes ones
+        already stamped "status:shipped" (implemented, awaiting production
+        promotion; see shipped_features()) even though those are
+        technically still open too."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("feature_queue: %s has no github.com remote -- no feature backlog is visible at all", self.repo)
@@ -894,6 +938,7 @@ class Memory:
             from agentra.connectors import github_issues
 
             issues = github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
+            issues = [i for i in issues if _STATUS_SHIPPED_LABEL not in _label_names(i)]
             return [_github_feature_to_dict(i) for i in issues]
         except Exception:
             logger.error("feature_queue: GitHub Issues unavailable for %s -- feature backlog is unreadable until it recovers", repo_url, exc_info=True)
@@ -914,47 +959,29 @@ class Memory:
         other than record_shipped actually completing one) with zero of
         them shipped -- confirmed live, issue #2 sat with two open,
         unstarted sub-issues and nothing done, yet still got surfaced here
-        ahead of real bugs. The Project board's own Status field is the
-        authoritative "has work actually begun" signal (record_shipped
-        moves a feature's card off its initial "Todo" the moment a part
-        ships -- see parent_status there); a candidate whose card is
-        explicitly still "Todo" is filtered out. A candidate with no board
-        at all (get_feature_status returns None -- provisioning failed, or
-        hasn't happened yet) falls back to the sub-issue-count signal alone
-        rather than being silently hidden, so a Projects hiccup never masks
-        real progress."""
+        ahead of real bugs. sub_issues_completed > 0 is the "has work
+        actually begun" signal instead: a candidate with zero completed
+        sub-issues is filtered out (github_issues.list_in_progress_features
+        already excludes fully-shipped parents via "status:shipped")."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("in_progress_features: %s has no github.com remote -- no in-progress features are visible", self.repo)
             return []
         try:
-            from agentra.connectors import github_issues, github_projects
+            from agentra.connectors import github_issues
 
             issues = github_issues.list_in_progress_features(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
-            if not issues:
-                return []
-            # One get_feature_status call per candidate, each a live GraphQL
-            # round-trip -- run them concurrently rather than one at a time,
-            # same reasoning as server.py's asyncio.gather calls (this method
-            # itself is sync, called from CLI/agent code as well as the
-            # server, so a thread pool here rather than making the whole
-            # method async).
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                statuses = list(pool.map(lambda i: github_projects.get_feature_status(repo_url, i["number"]), issues))
-            result = []
-            for i, status in zip(issues, statuses):
-                if status == "Todo":
-                    continue
-                result.append(
-                    {
-                        "description": i["title"],
-                        "external_id": str(i["number"]),
-                        "sub_issues_total": i["sub_issues_total"],
-                        "sub_issues_completed": i["sub_issues_completed"],
-                        "html_url": i.get("html_url"),
-                    }
-                )
-            return result
+            return [
+                {
+                    "description": i["title"],
+                    "external_id": str(i["number"]),
+                    "sub_issues_total": i["sub_issues_total"],
+                    "sub_issues_completed": i["sub_issues_completed"],
+                    "html_url": i.get("html_url"),
+                }
+                for i in issues
+                if i["sub_issues_completed"] > 0
+            ]
         except Exception:
             logger.error("in_progress_features: GitHub Issues unavailable for %s", repo_url, exc_info=True)
             return []
@@ -964,7 +991,13 @@ class Memory:
         description: str,
         source: str = "customer",
         external_id: str | None = None,
+        title: str | None = None,
     ) -> None:
+        """`title`: a short human-written title (the dashboard's "add to
+        backlog" form collects one) -- becomes the issue's actual title,
+        with `description` recorded as a "Description: ..." body line
+        instead (see _issue_description/record_known_bug's own `title`
+        param, same pattern on the bug side)."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_feature_request: %s has no github.com remote -- feature %r was NOT recorded anywhere", self.repo, description)
@@ -972,17 +1005,12 @@ class Memory:
         try:
             from agentra.connectors import github_issues
 
-            body = f"Source: {source}"
+            body = f"Description: {description}\n\nSource: {source}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            issue = github_issues.create_issue(repo_url, description, body, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
+            github_issues.create_issue(repo_url, title or description, body, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
         except Exception:
             logger.error("record_feature_request: failed to create a GitHub issue on %s -- feature %r was NOT recorded anywhere", repo_url, description, exc_info=True)
-            return
-
-        from agentra.connectors import github_projects
-
-        github_projects.add_item_to_feature_project(repo_url, issue["number"], title=description, status="Todo")
 
     def clear_feature_request(self, external_id: str, resolution_note: str | None = None) -> None:
         if not external_id.isdigit():

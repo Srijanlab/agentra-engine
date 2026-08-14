@@ -301,6 +301,7 @@ def submit_request(
     description: str,
     severity: str | None = None,
     screenshot_url: str | None = None,
+    title: str | None = None,
 ) -> str:
     """Durably enqueue a request for `app`. Returns the request id.
 
@@ -309,6 +310,14 @@ def submit_request(
     based adapter script, or an HTTP handler (server.py's /trigger/queue).
     Either way, by the time this returns, the request is durably stored,
     not held anywhere in memory only.
+
+    `title`: a short human-written title, distinct from `description` --
+    the dashboard's "add to backlog" form collects both and _apply_request
+    forwards it to Memory.record_known_bug/record_feature_request's own
+    `title` param, which uses it as the GitHub issue's actual title instead
+    of the (possibly much longer) description. Optional -- every other
+    caller (webhook adapters, autonomous filing) leaves it unset, same as
+    before this param existed.
     """
     if request_type not in REQUEST_TYPES:
         raise ValueError(f"unknown request type: {request_type!r}, must be one of {REQUEST_TYPES}")
@@ -323,6 +332,7 @@ def submit_request(
                 "id": request_id,
                 "app": app,
                 "type": request_type,
+                "title": title,
                 "description": description,
                 "severity": severity,
                 "screenshot_url": screenshot_url,
@@ -338,6 +348,7 @@ def submit_request(
         "id": request_id,
         "app": app,
         "type": request_type,
+        "title": title,
         "description": description,
         "severity": severity,
         "screenshot_url": screenshot_url,
@@ -370,12 +381,14 @@ def _apply_request(repo: Path, request: dict) -> None:
             proposed_fix="",
             source="customer",
             external_id=request["id"],
+            title=request.get("title"),
         )
     elif request_type == "feature_request":
         mem.record_feature_request(
             description=request["description"],
             source="customer",
             external_id=request["id"],
+            title=request.get("title"),
         )
     elif request_type == "objective_change":
         mem.set_objective(request["description"])

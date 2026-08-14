@@ -658,25 +658,19 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
 
-    # Eager, unlike Project provisioning below -- these labels are repo-wide,
-    # one-time setup (not per-feature), and every create_issue call this app
-    # ever makes silently drops any label GitHub doesn't already recognize
-    # (see github_issues.ensure_labels' docstring), so waiting until the
-    # first bug/feature would mean the first several went out unlabeled with
-    # no error to notice. Best-effort: a failure here (e.g. the App lacks
-    # repo admin permission) just logs, same as push_warning below.
+    # Eager, one-time setup (not per-feature): every create_issue call this
+    # app ever makes silently drops any label GitHub doesn't already
+    # recognize (see github_issues.ensure_labels' docstring), so waiting
+    # until the first bug/feature would mean the first several went out
+    # unlabeled with no error to notice. Best-effort: a failure here (e.g.
+    # the App lacks repo admin permission) just logs, same as push_warning
+    # below.
     try:
         from agentra.connectors import github_issues
 
         github_issues.ensure_labels(payload.repo_url)
     except Exception as exc:
         _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
-
-    # No Project provisioning here at all -- a Project belongs to a feature,
-    # not an app (see github_projects.py's module docstring), so there's
-    # nothing app-level to create at onboarding. Each feature's own board
-    # gets provisioned lazily by memory.py's record_feature_request/
-    # record_shipped, the first time that feature has an item to add.
 
     push_warning = _apply_app_config(
         dest,
@@ -738,21 +732,6 @@ async def get_app(name: str) -> dict:
         asyncio.to_thread(mem.feature_queue),
         asyncio.to_thread(mem.in_progress_features),
     )
-
-    # A per-feature Project board only exists once a feature's been split into
-    # parts (see github_projects.py) -- read-only lookup, one per in-progress
-    # entry, never provisions a board just because this page got loaded.
-    if repo_url and in_progress:
-        from agentra.connectors import github_projects
-
-        urls = await asyncio.gather(
-            *(
-                asyncio.to_thread(github_projects.get_feature_project_url, repo_url, int(entry["external_id"]))
-                for entry in in_progress
-            )
-        )
-        for entry, url in zip(in_progress, urls):
-            entry["project_url"] = url
 
     return {
         "name": name,
@@ -851,6 +830,7 @@ async def get_all_loops() -> dict:
 
 class BacklogRequestPayload(BaseModel):
     type: str = "feature_request"
+    title: str | None = None
     description: str
     severity: str | None = None
 
@@ -861,15 +841,24 @@ async def submit_backlog_request(name: str, payload: BacklogRequestPayload) -> d
     /trigger/queue uses (registry.submit_request then dispatch_once,
     cheap/synchronous, no LLM calls), just submitted directly instead of
     via a Pub/Sub envelope. The request type determines whether it appears
-    in known_bugs or feature_queue immediately, not after the next queue tick."""
+    in known_bugs or feature_queue immediately, not after the next queue tick.
+
+    `title` is required here specifically (the dashboard form always
+    collects both) even though registry.submit_request/Memory.record_*
+    treat it as optional everywhere else -- an external caller of
+    /trigger/queue without a title still falls back to description-as-title,
+    same as before this field existed."""
     if payload.type not in {"bug", "feature_request"}:
         raise HTTPException(status_code=400, detail="type must be 'bug' or 'feature_request'")
+    if not payload.title or not payload.title.strip():
+        raise HTTPException(status_code=400, detail="title is required")
     if payload.type == "bug" and payload.severity not in {"critical", "high", "medium", "low"}:
         raise HTTPException(status_code=400, detail="bug severity must be critical, high, medium, or low")
     try:
         request_id = registry.submit_request(
             app=name,
             request_type=payload.type,
+            title=payload.title.strip(),
             description=payload.description,
             severity=payload.severity if payload.type == "bug" else None,
         )
@@ -882,9 +871,12 @@ async def submit_backlog_request(name: str, payload: BacklogRequestPayload) -> d
 
 @app.post("/apps/{name}/feature-requests")
 async def submit_feature_request(name: str, payload: BacklogRequestPayload) -> dict:
-    """Compatibility endpoint for older dashboard clients."""
+    """Compatibility endpoint for older dashboard clients -- predates the
+    title/description split, so falls back to description-as-title rather
+    than requiring one like submit_backlog_request does."""
     payload.type = "feature_request"
     payload.severity = None
+    payload.title = payload.title.strip() if payload.title and payload.title.strip() else payload.description
     return await submit_backlog_request(name, payload)
 
 
@@ -1603,6 +1595,7 @@ async def trigger_queue(envelope: dict) -> dict:
         request_id = registry.submit_request(
             app=request["app"],
             request_type=request["type"],
+            title=request.get("title"),
             description=request["description"],
             severity=request.get("severity"),
             screenshot_url=request.get("screenshot_url"),

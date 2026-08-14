@@ -147,7 +147,12 @@ def test_dashboard_bug_submission_reaches_bug_backlog(tmp_path, monkeypatch):
 
     response = TestClient(server.app).post(
         "/apps/myapp/backlog",
-        json={"type": "bug", "severity": "high", "description": "Export crashes on an empty result set."},
+        json={
+            "type": "bug",
+            "title": "Export crashes on empty results",
+            "severity": "high",
+            "description": "Export crashes on an empty result set.",
+        },
     )
 
     assert response.status_code == 200
@@ -155,6 +160,18 @@ def test_dashboard_bug_submission_reaches_bug_backlog(tmp_path, monkeypatch):
     bugs = Memory(repo).known_bugs()
     assert len(bugs) == 1
     assert bugs[0]["diagnosis"] == "Export crashes on an empty result set."
+
+
+def test_dashboard_bug_submission_without_a_title_is_rejected(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    response = TestClient(server.app).post(
+        "/apps/myapp/backlog",
+        json={"type": "bug", "severity": "high", "description": "Export crashes on an empty result set."},
+    )
+
+    assert response.status_code == 400
 
 
 def test_promote_endpoint_records_human_approved_run(tmp_path, monkeypatch):
@@ -267,7 +284,6 @@ def test_get_app_surfaces_in_progress_multi_part_features(tmp_path, monkeypatch)
     assert entry["description"] == "Big feature"
     assert entry["sub_issues_total"] == 1
     assert entry["sub_issues_completed"] == 1
-    assert entry["project_url"] is not None
 
 
 def test_get_app_surfaces_closed_bugs(tmp_path, monkeypatch):

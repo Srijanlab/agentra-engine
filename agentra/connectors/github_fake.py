@@ -1,15 +1,8 @@
-"""In-memory fake for github_issues/github_variables/github_projects --
-used by dev_seed.py (AGENTRA_DEV_MODE has no real GitHub App credentials,
-but known_bugs/feature_queue/objective/environments/Projects are
-GitHub-only now, with no local file fallback) and by tests that need a
-real create -> list -> close round-trip without a live GitHub API call.
-
-github_projects.py talks GraphQL, not the REST shape the rest of this
-module fakes -- rather than faking individual GraphQL mutations, its two
-public functions (ensure_feature_project/add_item_to_feature_project) are
-faked directly at the same level github_issues.create_issue etc. already
-are. Projects are keyed by "{repo_url}#{feature_issue_number}" -- one per
-feature, not one per repo.
+"""In-memory fake for github_issues/github_variables -- used by dev_seed.py
+(AGENTRA_DEV_MODE has no real GitHub App credentials, but known_bugs/
+feature_queue/objective/environments are GitHub-only now, with no local
+file fallback) and by tests that need a real create -> list -> mark-shipped/
+close round-trip without a live GitHub API call.
 """
 
 from __future__ import annotations
@@ -46,12 +39,9 @@ class FakeGitHubBackend:
     own .agentra/ -- that's the real "no local file" boundary this fake
     doesn't cross)."""
 
-    _STATUS_OPTIONS = ["Todo", "In Progress", "Done"]
-
     def __init__(self, persist_path: Path | None = None) -> None:
         self.issues: dict[str, dict[int, dict]] = defaultdict(dict)
         self.variables: dict[str, dict[str, str]] = defaultdict(dict)
-        self.projects: dict[str, dict] = {}
         self._next_issue_number: dict[str, int] = defaultdict(lambda: 1)
         self._persist_path = persist_path
         if persist_path and persist_path.exists():
@@ -59,7 +49,6 @@ class FakeGitHubBackend:
                 data = json.loads(persist_path.read_text())
                 self.issues = defaultdict(dict, {k: {int(n): v for n, v in issues.items()} for k, issues in data.get("issues", {}).items()})
                 self.variables = defaultdict(dict, data.get("variables", {}))
-                self.projects = data.get("projects", {})
                 self._next_issue_number = defaultdict(lambda: 1, data.get("next_issue_number", {}))
             except Exception:
                 pass  # corrupt/partial fixture state -- start fresh rather than crash dev mode
@@ -73,7 +62,6 @@ class FakeGitHubBackend:
                 {
                     "issues": self.issues,
                     "variables": self.variables,
-                    "projects": self.projects,
                     "next_issue_number": self._next_issue_number,
                 },
                 indent=2,
@@ -122,7 +110,9 @@ class FakeGitHubBackend:
 
     def list_in_progress_features(self, repo_url: str, labels: list[str] | None = None) -> list[dict]:
         results = [
-            i for i in self.issues[repo_url].values() if i["state"] == "open" and i.get("sub_issue_numbers")
+            i
+            for i in self.issues[repo_url].values()
+            if i["state"] == "open" and i.get("sub_issue_numbers") and "status:shipped" not in i["labels"]
         ]
         if labels:
             results = [i for i in results if any(label in i["labels"] for label in labels)]
@@ -217,49 +207,25 @@ class FakeGitHubBackend:
                 issue["body"] = (issue.get("body") or "").rstrip() + "\n\n" + body_suffix
             self._save()
 
+    def mark_shipped(
+        self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
+    ) -> None:
+        if issue_number not in self.issues[repo_url]:
+            return
+        if comment:
+            self.add_comment(repo_url, issue_number, comment)
+        if body_suffix:
+            issue = self.issues[repo_url][issue_number]
+            issue["body"] = (issue.get("body") or "").rstrip() + "\n\n" + body_suffix
+            self._save()
+        self.add_labels(repo_url, issue_number, ["status:shipped"])
+
     def list_variables(self, repo_url: str) -> dict[str, str]:
         return dict(self.variables[repo_url])
 
     def set_variable(self, repo_url: str, name: str, value: str) -> None:
         self.variables[repo_url][name] = value
         self._save()
-
-    def ensure_feature_project(self, repo_url: str, feature_issue_number: int, title: str) -> dict | None:
-        key = f"{repo_url}#{feature_issue_number}"
-        project = self.projects.get(key)
-        if project is None:
-            project = {
-                "project_id": f"PVT_fake_{key}",
-                "url": f"{_repo_https_url(repo_url)}/projects/fake-{feature_issue_number}",
-                "title": title,
-                "status_field_id": "PVTSSF_fake_status",
-                "status_options": {name: f"OPT_fake_{name.lower().replace(' ', '_')}" for name in self._STATUS_OPTIONS},
-                "items": {},
-            }
-            self.projects[key] = project
-            self._save()
-        return {k: v for k, v in project.items() if k != "items"}
-
-    def add_item_to_feature_project(
-        self, repo_url: str, feature_issue_number: int, title: str, issue_number: int | None = None, status: str = "Todo"
-    ) -> None:
-        target_issue_number = feature_issue_number if issue_number is None else issue_number
-        project = self.ensure_feature_project(repo_url, feature_issue_number, title)
-        if project is None or status not in project["status_options"]:
-            return
-        key = f"{repo_url}#{feature_issue_number}"
-        self.projects[key]["items"][str(target_issue_number)] = status
-        self._save()
-
-    def get_feature_project_url(self, repo_url: str, feature_issue_number: int) -> str | None:
-        project = self.projects.get(f"{repo_url}#{feature_issue_number}")
-        return project["url"] if project else None
-
-    def get_feature_status(self, repo_url: str, feature_issue_number: int) -> str | None:
-        project = self.projects.get(f"{repo_url}#{feature_issue_number}")
-        if project is None:
-            return None
-        return project["items"].get(str(feature_issue_number))
 
 
 def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_path: Path | None = None) -> FakeGitHubBackend:
@@ -276,7 +242,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
     meant to live for the whole `agentra dev` process. Without this, a
     test-only direct assignment would permanently mutate these modules
     for every test file that runs afterward in the same pytest process."""
-    from agentra.connectors import github_issues, github_projects, github_variables
+    from agentra.connectors import github_issues, github_variables
 
     backend = backend or FakeGitHubBackend(persist_path=persist_path)
     patches = [
@@ -287,6 +253,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_closed_issues", backend.list_closed_issues),
         (github_issues, "list_in_progress_features", backend.list_in_progress_features),
         (github_issues, "close_issue", backend.close_issue),
+        (github_issues, "mark_shipped", backend.mark_shipped),
         (github_issues, "add_comment", backend.add_comment),
         (github_issues, "list_comments", backend.list_comments),
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),
@@ -299,10 +266,6 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "ensure_labels", backend.ensure_labels),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
-        (github_projects, "ensure_feature_project", backend.ensure_feature_project),
-        (github_projects, "add_item_to_feature_project", backend.add_item_to_feature_project),
-        (github_projects, "get_feature_project_url", backend.get_feature_project_url),
-        (github_projects, "get_feature_status", backend.get_feature_status),
     ]
     for module, attr, fn in patches:
         if monkeypatch is not None:

@@ -179,6 +179,81 @@ def test_close_issue_rejects_non_github_url():
         github_issues.close_issue("git@gitlab.com:acme/app.git", 1)
 
 
+def test_mark_shipped_comments_appends_body_and_labels_without_closing(monkeypatch):
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(("get", url))
+        return _fake_response({"body": "Original body."})
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(("post", url, json))
+        return _fake_response({})
+
+    def fake_patch(url, headers, json, timeout):
+        calls.append(("patch", url, json))
+        return _fake_response({})
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+    monkeypatch.setattr(github_issues.httpx, "patch", fake_patch)
+
+    github_issues.mark_shipped(
+        "https://github.com/acme/app.git", 42, comment="Shipped as 'Dark mode'.", body_suffix="---\nShipped-Run-ID: run1\n"
+    )
+
+    assert calls == [
+        ("post", "https://api.github.com/repos/acme/app/issues/42/comments", {"body": "Shipped as 'Dark mode'."}),
+        ("get", "https://api.github.com/repos/acme/app/issues/42"),
+        ("patch", "https://api.github.com/repos/acme/app/issues/42", {"body": "Original body.\n\n---\nShipped-Run-ID: run1\n"}),
+        ("post", "https://api.github.com/repos/acme/app/issues/42/labels", {"labels": ["status:shipped"]}),
+    ]
+    # Crucially, no "state" key anywhere -- unlike close_issue, the issue stays open.
+    assert all("state" not in call[2] for call in calls if call[0] == "patch")
+
+
+def test_mark_shipped_with_no_comment_or_body_suffix_only_adds_the_label(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        github_issues.httpx, "post", lambda url, headers, json, timeout: calls.append((url, json)) or _fake_response({})
+    )
+
+    github_issues.mark_shipped("https://github.com/acme/app.git", 42)
+
+    assert calls == [("https://api.github.com/repos/acme/app/issues/42/labels", {"labels": ["status:shipped"]})]
+
+
+def test_list_in_progress_features_excludes_issues_already_marked_shipped(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = None
+        resp.json.return_value = {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "title": "Fully shipped parent",
+                                "body": None,
+                                "url": "https://github.com/acme/app/issues/10",
+                                "subIssuesSummary": {"total": 3, "completed": 3},
+                                "labels": {"nodes": [{"name": "feature"}, {"name": "status:shipped"}]},
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+        return resp
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    result = github_issues.list_in_progress_features("https://github.com/acme/app.git", labels=["feature"])
+
+    assert result == []
+
+
 def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch):
     captured = {}
 
@@ -197,6 +272,7 @@ def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch
                                 "body": "Tracks a multi-part feature.",
                                 "url": "https://github.com/acme/app/issues/10",
                                 "subIssuesSummary": {"total": 3, "completed": 1},
+                                "labels": {"nodes": [{"name": "feature"}]},
                             },
                             {
                                 "number": 11,
@@ -204,6 +280,7 @@ def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch
                                 "body": None,
                                 "url": "https://github.com/acme/app/issues/11",
                                 "subIssuesSummary": {"total": 0, "completed": 0},
+                                "labels": {"nodes": []},
                             },
                         ]
                     }
@@ -246,7 +323,9 @@ def test_ensure_labels_creates_only_the_missing_ones(monkeypatch):
 
     github_issues.ensure_labels("https://github.com/acme/app.git")
 
-    assert sorted(created) == ["agentra", "blocking_agentra", "feature", "need_human", "status:done", "status:in-progress"]
+    assert sorted(created) == [
+        "agentra", "blocking_agentra", "feature", "need_human", "status:done", "status:in-progress", "status:shipped",
+    ]
 
 
 def test_ensure_labels_tolerates_a_concurrent_create(monkeypatch):
