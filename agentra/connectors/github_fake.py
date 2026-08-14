@@ -163,6 +163,24 @@ class FakeGitHubBackend:
                 return match.group(1)
         return None
 
+    _SPEC_MARKER = "Spec (agentra):"
+
+    def record_spec(self, repo_url: str, issue_number: int, spec: dict) -> None:
+        self.add_comment(repo_url, issue_number, f"{self._SPEC_MARKER}\n\n```json\n{json.dumps(spec, indent=2)}\n```")
+
+    def get_spec(self, repo_url: str, issue_number: int) -> dict | None:
+        comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
+        for comment in reversed(comments):
+            if not comment.startswith(self._SPEC_MARKER):
+                continue
+            match = re.search(r"```json\s*\n(.*?)\n```", comment, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    continue
+        return None
+
     def ensure_labels(self, repo_url: str) -> None:
         pass  # fake backend doesn't validate label existence at all -- nothing to ensure
 
@@ -257,6 +275,8 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_comments", backend.list_comments),
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),
         (github_issues, "get_in_progress_branch", backend.get_in_progress_branch),
+        (github_issues, "record_spec", backend.record_spec),
+        (github_issues, "get_spec", backend.get_spec),
         (github_issues, "add_labels", backend.add_labels),
         (github_issues, "ensure_labels", backend.ensure_labels),
         (github_variables, "list_variables", backend.list_variables),
