@@ -168,44 +168,119 @@ def test_merge_and_push_push_failure_is_reported_without_raising(tmp_path, monke
 
 
 # -- persist_audit_trail --------------------------------------------------------------
+# Real git repos, not mocked git_ops calls, for the same reason
+# test_implementation_git_auth.py uses them: this is exactly the kind of
+# cross-branch git-state bug ("assumed HEAD is already on `branch`, wasn't")
+# a mocked-out git_ops call would never have caught. A bare "origin" gives
+# pull_latest/push_branch something real to fetch from and push to.
 
 
-def test_persist_audit_trail_delegates_to_git_ops_commit_and_push(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    calls = []
+def _bare_origin_with_branches(tmp_path: Path, *branches: str) -> Path:
+    """A bare repo with each of `branches` pointing at its own initial
+    commit (content: the branch name) -- enough for pull_latest(repo,
+    branch) to have something real to fetch."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", branches[0], str(origin)], check=True, capture_output=True)
+    seed = tmp_path / "_seed"
+    _git_clone_and_seed(seed, origin, branches)
+    return origin
 
-    def _fake_commit_and_push(r, branch, message, paths):
-        calls.append((r, branch, message, paths))
-        return True
 
-    monkeypatch.setattr(git_ops, "commit_and_push", _fake_commit_and_push)
+def _git_clone_and_seed(seed: Path, origin: Path, branches: tuple[str, ...]) -> None:
+    subprocess.run(["git", "clone", str(origin), str(seed)], check=True, capture_output=True)
+    _git(seed, "config", "user.email", "test@example.com")
+    _git(seed, "config", "user.name", "Test")
+    for branch in branches:
+        _git(seed, "checkout", "-B", branch)
+        (seed / "app.txt").write_text(f"{branch}\n")
+        _git(seed, "add", "app.txt")
+        _git(seed, "commit", "-m", f"seed {branch}")
+        _git(seed, "push", "origin", branch)
+
+
+def _clone_single_branch(origin: Path, dest: Path, branch: str) -> Path:
+    subprocess.run(
+        ["git", "clone", "--branch", branch, "--single-branch", str(origin), str(dest)],
+        check=True, capture_output=True,
+    )
+    _git(dest, "config", "user.email", "test@example.com")
+    _git(dest, "config", "user.name", "Test")
+    return dest
+
+
+def test_persist_audit_trail_returns_none_when_nothing_is_dirty(tmp_path, monkeypatch):
+    origin = _bare_origin_with_branches(tmp_path, "main")
+    repo = _clone_single_branch(origin, tmp_path / "repo", "main")
+    monkeypatch.setattr(git_ops, "_extra_auth_args", lambda repo_url: [])
+
+    error = deployment.persist_audit_trail(repo, "main")
+
+    assert error is None
+    assert _current_branch(repo) == "main"  # never touched -- nothing to sync for
+
+
+def test_persist_audit_trail_pushes_onto_branch_even_when_head_is_on_a_different_one(tmp_path, monkeypatch):
+    """The real bug (GitHub issue from this session): a cycle that never
+    reached deploy_pre_prod leaves HEAD on the feature branch (or, on a
+    checkout fresh since the last redeploy, on `main` with no local `beta`
+    ref at all) -- persist_audit_trail must still get dirty .agentra/
+    changes onto `branch` and pushed, not fail with "src refspec beta does
+    not match any"."""
+    origin = _bare_origin_with_branches(tmp_path, "main", "beta")
+    # Single-branch clone of `main` only -- no local `beta` ref, matching a
+    # freshly re-cloned VM checkout (clone_repo is always --single-branch).
+    repo = _clone_single_branch(origin, tmp_path / "repo", "main")
+    monkeypatch.setattr(git_ops, "_extra_auth_args", lambda repo_url: [])
+    assert _current_branch(repo) == "main"
+
+    (repo / ".agentra").mkdir()
+    (repo / ".agentra" / "note.txt").write_text("dirty audit trail content\n")
 
     error = deployment.persist_audit_trail(repo, "beta")
 
     assert error is None
-    assert len(calls) == 1
-    called_repo, called_branch, called_message, called_paths = calls[0]
-    assert called_repo == repo
-    assert called_branch == "beta"
-    assert called_paths == [".agentra/"]
-    assert "audit trail" in called_message.lower()
+    assert _current_branch(repo) == "beta"
+    assert (repo / ".agentra" / "note.txt").read_text() == "dirty audit trail content\n"
+    assert (repo / "app.txt").read_text() == "beta\n"  # beta's own content, untouched
+
+    # Prove it actually landed on the remote, not just the local checkout.
+    verify = _clone_single_branch(origin, tmp_path / "verify", "beta")
+    assert (verify / ".agentra" / "note.txt").read_text() == "dirty audit trail content\n"
 
 
-def test_persist_audit_trail_reports_git_op_error(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_persist_audit_trail_works_when_head_is_already_on_branch(tmp_path, monkeypatch):
+    """The normal case (deploy_pre_prod already merged and left HEAD on
+    `branch`) must keep working -- specifically, pull_latest's hard reset
+    (which runs AFTER the temp commit capturing .agentra/'s dirty state)
+    must not lose that commit just because it's on the same branch name
+    pull_latest is about to reset."""
+    origin = _bare_origin_with_branches(tmp_path, "beta")
+    repo = _clone_single_branch(origin, tmp_path / "repo", "beta")
+    monkeypatch.setattr(git_ops, "_extra_auth_args", lambda repo_url: [])
 
-    def _raise(r, branch, message, paths):
-        raise git_ops.GitOpError("simulated failure")
-
-    monkeypatch.setattr(git_ops, "commit_and_push", _raise)
+    (repo / ".agentra").mkdir()
+    (repo / ".agentra" / "note.txt").write_text("already on beta\n")
 
     error = deployment.persist_audit_trail(repo, "beta")
 
+    assert error is None
+    assert (repo / ".agentra" / "note.txt").read_text() == "already on beta\n"
+    verify = _clone_single_branch(origin, tmp_path / "verify", "beta")
+    assert (verify / ".agentra" / "note.txt").read_text() == "already on beta\n"
+
+
+def test_persist_audit_trail_reports_an_error_when_branch_does_not_exist_anywhere(tmp_path, monkeypatch):
+    origin = _bare_origin_with_branches(tmp_path, "main")
+    repo = _clone_single_branch(origin, tmp_path / "repo", "main")
+    monkeypatch.setattr(git_ops, "_extra_auth_args", lambda repo_url: [])
+
+    (repo / ".agentra").mkdir()
+    (repo / ".agentra" / "note.txt").write_text("dirty\n")
+
+    error = deployment.persist_audit_trail(repo, "does-not-exist")
+
     assert error is not None
-    assert "beta" in error
-    assert "simulated failure" in error
+    assert "does-not-exist" in error
 
 
 # -- deploy_pre_prod: must never reach prod_branch -----------------------------------

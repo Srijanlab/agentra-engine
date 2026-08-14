@@ -230,27 +230,81 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
 
 def persist_audit_trail(repo: Path, branch: str) -> str | None:
     """Commit and push any dirty .agentra/ bookkeeping (released.json, memory/*,
-    feedback_sync_state.json, codebase_spec_commit.json) onto `branch`, which the
-    caller must already have merged and pushed to (i.e. call this right after a
-    successful deploy_pre_prod/promote_prod). shipped/known_bugs/feature_queue
-    live on GitHub Issues now (see memory.py), not in this directory at all.
+    feedback_sync_state.json, codebase_spec_commit.json) onto `branch`.
+    shipped/known_bugs/feature_queue live on GitHub Issues now (see memory.py),
+    not in this directory at all.
 
     Without this, Memory.write() calls only ever land in the working copy --
     nothing ever committed them, so a fresh checkout (the next scheduled CI run)
     starts with an empty memory/ every time.
 
-    Scoped to .agentra/ only -- same "always safe to clear/commit" reasoning as
-    implementation.py's _checkout_feature_branch applies here to committing, not just
-    cleaning. Returns an error message on failure, None on success or if nothing was dirty.
+    run_autonomous_cycle calls this unconditionally at the end of EVERY cycle,
+    not just ones that reached deploy_pre_prod -- so, unlike the docstring this
+    replaced claimed, HEAD is NOT reliably already on `branch` here. Confirmed
+    live: a cycle that hit its cost cap right after implement_feature (still on
+    the feature branch, deploy_pre_prod never reached) failed outright with
+    "src refspec beta does not match any" -- on a checkout fresh since the last
+    redeploy (REPOS_ROOT is re-cloned single-branch from the app's registered
+    branch), `branch` may not even exist locally yet, let alone be checked out.
 
-    Delegates to git_ops.commit_and_push rather than a hand-rolled add/
-    commit/push here, so this benefits from the same GitHub-App-then-
-    static-token auth fallback clone_repo/push_branch already have --
-    otherwise this would 403 on any repo only reachable via the App
+    Fixed by decoupling "capture the dirty .agentra/ state" from "which branch
+    is it going onto": commit the dirty paths onto whatever's currently checked
+    out first (an orphaned, harmless commit if that's a feature branch nothing
+    else ever merges), record that commit's sha, THEN sync `branch` to its
+    remote tip (git_ops.pull_latest -- creates it locally if it doesn't exist),
+    overlay just the .agentra/ tree from the captured sha onto that now-current
+    `branch` (a plain `git checkout <sha> -- .agentra/`, not a merge/cherry-pick
+    -- always takes the freshest regeneration, same "ours"-wins reasoning
+    _merge_and_push's _AUTO_RESOLVE_OURS_PREFIX already applies to a real merge
+    conflict here applied directly instead), and commit+push that. The
+    intermediate sha stays reachable by its own hash through all of this even
+    when `branch` turns out to already be the checked-out branch (pull_latest's
+    hard reset only moves branch pointers, never garbage-collects an object
+    still referenced by name within the same process).
+
+    Delegates to git_ops.pull_latest/commit_and_push for the actual git
+    plumbing rather than hand-rolling it, so this benefits from the same
+    GitHub-App-then-static-token auth fallback clone_repo/push_branch already
+    have -- otherwise this would 403 on any repo only reachable via the App
     connector, same bug TASK-016's registration hit before that fallback
-    existed.
+    existed. Returns an error message on failure, None on success or if
+    nothing was dirty.
     """
-    from agentra.agents.git_ops import GitOpError, commit_and_push
+    from agentra.agents.git_ops import GitOpError, commit_and_push, pull_latest
+
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", ".agentra/"],
+        capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        return None
+
+    try:
+        subprocess.run(["git", "-C", str(repo), "add", ".agentra/"], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "agentra: capture audit trail (pre-sync)"],
+            check=True, capture_output=True, text=True,
+        )
+        source_sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        return f"Failed to persist audit trail to {branch!r}: could not capture .agentra/ changes: {stderr}"
+
+    try:
+        pull_latest(repo, branch)
+    except GitOpError as exc:
+        return f"Failed to persist audit trail to {branch!r}: {exc}"
+
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", source_sha, "--", ".agentra/"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        return f"Failed to persist audit trail to {branch!r}: could not restore captured .agentra/ state onto {branch!r}: {stderr}"
 
     try:
         commit_and_push(repo, branch, "agentra: persist audit trail (shipped/backlog/memory)", [".agentra/"])
