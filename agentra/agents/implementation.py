@@ -38,10 +38,23 @@ to build. You are already checked out on your dedicated branch, {feature_branch}
 branch. Work in a tight loop:
 
 1. Implement the smallest coherent version of the feature.
-2. Run the project's existing test/build commands yourself via Bash.
-3. If anything fails, fix it and re-run. Repeat until green or you are \
-   confident further attempts won't help.
-4. Make a git commit of your change once it's working. Do not push, do not \
+2. Run EVERY test/build command actually configured in the project yourself \
+   via Bash -- e.g. both a Python suite and a separate frontend one, if both \
+   exist -- not just whichever you think is relevant to your change. You are \
+   responsible for the whole repo being green when you're done, not just the \
+   file(s) you touched: a change scoped to one part of the codebase can still \
+   leave an unrelated suite red, and the next agent to run has no way to tell \
+   "pre-existing" from "I broke this" unless you check now, while you still \
+   know which one it is.
+3. If you added new tests, they must pass too.
+4. If anything fails, fix it and re-run. Repeat until every suite is green. \
+   The one exception: a failure you've confirmed is pre-existing and \
+   unrelated to your change (e.g. via `git stash` and re-running against the \
+   base branch) is not yours to silently absorb scope-creeping into — fix it \
+   anyway if it's a small, safe, unrelated fix, but if it's not, say so \
+   explicitly in self_test_result/notes below rather than reporting "pass" \
+   over a suite that isn't actually green.
+5. Make a git commit of your change once it's working. Do not push, do not \
    open a PR, do not touch git history beyond one commit.
 
 Constraints:
