@@ -17,17 +17,32 @@ their own test files):
   first call (session.feature_branch is None), and threads through to
   implementation.run(resume=True).
 
-No real LLM call: implementation.run is monkeypatched throughout.
+No real LLM call: implementation.run and requirements.run are both
+monkeypatched throughout (see the autouse _stub_requirements fixture --
+implement_feature now calls Requirements Agent before Implementation Agent,
+see test_requirements_agent.py for that behavior's own dedicated coverage;
+here it's stubbed to a no-op "no spec" result so it doesn't interfere with
+these tests' own concerns).
 """
 
 import asyncio
 from pathlib import Path
+
+import pytest
 
 from agentra import registry
 from agentra.agents import brain
 from agentra.agents.base import AgentResult
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
+
+
+@pytest.fixture(autouse=True)
+def _stub_requirements(monkeypatch):
+    async def fake_run(*a, **k):
+        return AgentResult(ok=False, text="stubbed -- no spec", json_data=None, cost_usd=0.0, turns=0)
+
+    monkeypatch.setattr(brain.requirements, "run", fake_run)
 
 
 def _session(tmp_path: Path, **overrides) -> brain.OrchestratorSession:
@@ -188,7 +203,7 @@ def test_implement_feature_resume_branch_becomes_the_session_feature_branch(tmp_
     session = _session(tmp_path)
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 
@@ -216,7 +231,7 @@ def test_implement_feature_resume_branch_ignored_on_a_later_call_this_run(tmp_pa
     session = _session(tmp_path, feature_branch="dev/already-set")
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 

@@ -714,6 +714,35 @@ class Memory:
         except Exception:
             return None
 
+    def record_spec(self, issue_number: int, spec: dict) -> None:
+        """Persists Requirements Agent's finalized spec on this issue -- see
+        github_issues.record_spec's docstring. Best-effort, same reasoning
+        as record_in_progress_branch: a failure here just means a resumed
+        cycle regenerates the spec instead of reusing it, not a reason to
+        fail the implement_feature call that's trying to record it."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_spec(repo_url, issue_number, spec)
+        except Exception:
+            logger.warning("record_spec: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def get_spec(self, issue_number: int) -> dict | None:
+        """The most recently recorded spec for this issue, or None if it's
+        never had one or the lookup fails."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_spec(repo_url, issue_number)
+        except Exception:
+            return None
+
     # ── Queue: feature requests, from customers or added by an admin. Considered
     # by Discovery Agent above its own autonomous ideation, below real signals. ──
 

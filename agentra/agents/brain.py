@@ -40,7 +40,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query, tool
 
-from agentra.agents import codebase, deployment, discovery, feedback, implementation, testing
+from agentra.agents import codebase, deployment, discovery, feedback, implementation, requirements, testing
 from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
 from agentra.environments import EnvironmentConfig, feature_branch_name
@@ -87,6 +87,20 @@ def _actionable_bugs(bugs: list[dict]) -> list[dict]:
     to any need_human bug, blocking or not, since blocking_agentra can be
     cleared before need_human is."""
     return [b for b in bugs if not b.get("needs_human")]
+
+
+def _format_spec(spec: dict) -> str:
+    """Requirements Agent's JSON (agents/requirements.py) as readable text --
+    used both for Implementation Agent's extra context and, unchanged, as
+    what Testing Agent's pre-prod pass verifies the live deployment against
+    (see verify_pre_prod). Acceptance criteria are the load-bearing part for
+    the latter -- that's what black-box verification actually checks."""
+    lines = [f"Spec: {spec.get('spec', '')}"]
+    criteria = spec.get("acceptance_criteria") or []
+    if criteria:
+        lines.append("\nAcceptance criteria:")
+        lines.extend(f"- {c}" for c in criteria)
+    return "\n".join(lines)
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
@@ -140,6 +154,10 @@ class OrchestratorSession:
     deploy_attempted: bool = False
     pre_prod_verified: bool = False
     current_feature: str | None = None
+    # Set by implement_feature (Requirements Agent's finalized spec, formatted --
+    # see _format_spec) and read by verify_pre_prod instead of cb_summary, since
+    # pre-prod verification is deliberately black-box (see testing.py's docstring).
+    current_spec: str | None = None
     # Set on the first implement_feature call and reused for every later call in this
     # same session -- this run's whole line of work (possibly several implement_feature
     # calls before one deploy_pre_prod) belongs on one branch, not a fresh one each call,
@@ -431,10 +449,43 @@ def _tools_for(session: OrchestratorSession) -> list:
         resolves_id = args.get("resolves_id") or ""
         sub_feature_of = args.get("sub_feature_of") or ""
         more_parts_expected = bool(args.get("more_parts_expected"))
+        # Whichever of resolves_id/sub_feature_of names a real tracking issue --
+        # used both below (spec reuse) and further down (the resume-branch
+        # marker). A self-initiated idea (neither set) has no backlog entry,
+        # so nothing here persists across calls for it.
+        tracking_issue = None
+        if resolves_id and resolves_id.isdigit():
+            tracking_issue = int(resolves_id)
+        elif sub_feature_of and sub_feature_of.isdigit():
+            tracking_issue = int(sub_feature_of)
+
+        # Requirements Agent: turns brief into a finalized spec Implementation
+        # Agent builds to and Testing Agent's pre-prod pass later verifies
+        # against (see agents/requirements.py's own docstring). Reuse an
+        # existing spec on the tracking issue if this is resuming/continuing
+        # one -- regenerating would pay for the same work twice and could
+        # drift from what an earlier, already-shipped part was built against.
+        spec_dict = session.mem.get_spec(tracking_issue) if tracking_issue is not None else None
+        if spec_dict is not None:
+            session.note(f"requirements: reusing existing spec for issue #{tracking_issue}", ok=True)
+        else:
+            req = await requirements.run(session.repo, session.objective, brief, session.cb_summary)
+            session.cost_usd += req.cost_usd
+            session.note(f"requirements: ok={req.ok}", ok=req.ok, cost_usd=req.cost_usd, turns=req.turns)
+            if req.ok and req.json_data and req.json_data.get("spec"):
+                spec_dict = req.json_data
+                if tracking_issue is not None:
+                    session.mem.record_spec(tracking_issue, spec_dict)
+            # Best-effort: Requirements Agent failing (or producing no usable
+            # spec) must not block implementation -- fall through with
+            # spec_dict still None, same as before this agent existed.
+        spec_text = _format_spec(spec_dict) if spec_dict else ""
+        session.current_spec = spec_text or None
+
         try:
             impl = await implementation.run(
                 session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch,
-                resume=resuming,
+                resume=resuming, spec=spec_text,
             )
         except Exception as exc:
             # A raised exception here (as opposed to AgentResult(ok=False, ...)) means
@@ -459,15 +510,10 @@ def _tools_for(session: OrchestratorSession) -> list:
         # (see its own docstring) -- record where that work is, whether this call
         # is later marked "shipped" or fails/blocks, so a future cycle can resume
         # it instead of it silently vanishing on the next redeploy (confirmed
-        # live: GitHub issue #13's fix, lost exactly this way). The tracking
-        # issue is whichever of resolves_id/sub_feature_of names one; a
-        # self-initiated idea (neither set) has no backlog entry to attach a
+        # live: GitHub issue #13's fix, lost exactly this way). tracking_issue was
+        # already resolved above (spec lookup); a self-initiated idea (neither
+        # resolves_id nor sub_feature_of set) has no backlog entry to attach a
         # resume marker to, so there's nothing to do for it here.
-        tracking_issue = None
-        if resolves_id and resolves_id.isdigit():
-            tracking_issue = int(resolves_id)
-        elif sub_feature_of and sub_feature_of.isdigit():
-            tracking_issue = int(sub_feature_of)
         if tracking_issue is not None:
             session.mem.record_in_progress_branch(tracking_issue, session.feature_branch)
         if not impl.ok:
@@ -691,7 +737,14 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Call deploy_pre_prod first — no live URL to verify yet."}],
                 "is_error": True,
             }
-        test = await testing.run_pre_prod(session.repo, session.cb_summary or "", session.pre_prod_url, session.run_id)
+        # current_spec (set by implement_feature -- see Requirements Agent
+        # wiring there), not cb_summary: run_pre_prod is deliberately
+        # black-box, verifying against the feature's acceptance criteria,
+        # not codebase knowledge (see testing.py's own docstring). Falls
+        # back to cb_summary only if verify_pre_prod somehow got called
+        # without implement_feature having run this cycle.
+        spec_for_verification = session.current_spec or session.cb_summary or "No spec available."
+        test = await testing.run_pre_prod(session.repo, spec_for_verification, session.pre_prod_url, session.run_id)
         session.cost_usd += test.cost_usd
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"

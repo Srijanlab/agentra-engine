@@ -163,6 +163,7 @@ async def run(
     env: EnvironmentConfig,
     feature_branch: str,
     resume: bool = False,
+    spec: str = "",
 ) -> AgentResult:
     try:
         _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch, resume=resume)
@@ -180,10 +181,11 @@ async def run(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
+    spec_section = f"\nFinalized spec (Requirements Agent):\n{spec}\n" if spec else ""
     prompt = f"""Business objective: {objective}
 
 Feature to implement: {feature}
-
+{spec_section}
 Codebase summary:
 {codebase_summary}
 

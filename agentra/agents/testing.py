@@ -17,6 +17,16 @@ deterministically (agents/screenshot.py, not left to the LLM to script
 itself) to .agentra/test_artifacts/{run_id}/screenshot.png, for a human
 reviewing the run to see the actual live page rather than only reading the
 agent's prose report of it.
+
+run_pre_prod is deliberately black-box: it's given the feature's spec
+(agents/requirements.py's acceptance_criteria, not a codebase summary) and
+no Read/Glob/Grep on the repo at all -- only Bash, for curl-ing the live URL
+or running an already-configured e2e suite against it. Used to also receive
+codebase_summary and full filesystem access, which defeated the point: an
+agent that can just read the source to "verify" a feature is no longer
+independently checking the deployed artifact actually behaves correctly,
+it's re-reading code that might look right and still not work once
+deployed -- exactly the class of bug this pass exists to catch.
 """
 
 from pathlib import Path
@@ -74,22 +84,32 @@ product engineering system, running in PRE-PROD mode. The code already \
 passed local testing and has just been deployed to a live pre-prod URL: \
 {preview_url}
 
+You are deliberately black-box here: you have no access to the source code \
+(no Read/Glob/Grep -- only Bash, for curl-ing the live URL or running an \
+already-configured e2e suite against it), and you're given the feature's \
+spec/acceptance criteria instead of a codebase summary. Verify strictly \
+against what the app actually does from the outside, the way a real user or \
+API caller would -- never assume something works because it would make \
+sense given the spec; check it.
+
 Your job here is different from local mode — do not re-run the unit test \
 suite, that already happened. Focus on what can only be verified once the \
 app is actually deployed and serving traffic:
 
 1. Check basic reachability: does {preview_url} actually respond, and with \
    a healthy status code (not 500s, not a crash page)?
-2. Check that the specific feature that was just shipped actually works \
-   against the live URL — exercise it directly (curl the relevant \
-   endpoint/route, or drive it through the UI) rather than assuming the \
-   deploy succeeding means the feature works.
+2. Check each acceptance criterion below against the live URL directly -- \
+   curl the relevant endpoint/route, or drive it through the UI. Do not \
+   mark a criterion verified because the deploy succeeded or because it \
+   sounds plausible; only because you actually exercised it and saw the \
+   result.
 3. If the project has e2e/browser tests configured (e.g. Playwright) that \
    support pointing at an external base URL, run them against {preview_url} \
    instead of a local dev server. Do not set up new e2e infrastructure \
    yourself if none exists.
-4. Do not modify source files — you are verifying a deployed artifact, not \
-   fixing it. Report problems; do not patch them.
+4. You cannot modify source files (no Read/Write access) — you are \
+   verifying a deployed artifact, not fixing it. Report problems; you \
+   couldn't patch them even if you wanted to.
 
 A deploy that returns HTTP 200 on the homepage but whose actual feature is \
 broken is a failure you must catch — "the server started" is not the bar.
@@ -149,7 +169,11 @@ def screenshot_path(repo: Path, run_id: str) -> Path:
     return repo / ".agentra" / "test_artifacts" / run_id / "screenshot.png"
 
 
-async def run_pre_prod(repo: Path, codebase_summary: str, preview_url: str, run_id: str) -> AgentResult:
+async def run_pre_prod(repo: Path, spec: str, preview_url: str, run_id: str) -> AgentResult:
+    """`spec` is the feature's requirements/acceptance criteria (agents/
+    requirements.py, formatted by the caller -- see brain.py's
+    verify_pre_prod), NOT a codebase summary -- this pass is deliberately
+    black-box, see this module's own docstring for why."""
     from agentra.agents import screenshot
 
     ok, detail = await screenshot.capture(preview_url, screenshot_path(repo, run_id))
@@ -160,8 +184,7 @@ async def run_pre_prod(repo: Path, codebase_summary: str, preview_url: str, run_
         else f"Screenshot capture failed ({detail}) -- note this in your report, but don't let it block the rest of your verification."
     )
 
-    prompt = f"""Codebase summary:
-{codebase_summary}
+    prompt = f"""{spec}
 
 The feature was just deployed to: {preview_url}
 
@@ -173,7 +196,7 @@ Independently verify the live deployment now, following your system prompt."""
         prompt=prompt,
         system_prompt=system_prompt,
         cwd=repo,
-        allowed_tools=["Read", "Bash", "Glob", "Grep"],
+        allowed_tools=["Bash"],
         permission_mode="bypassPermissions",
         max_turns=20,
         agent_label="Testing Agent",

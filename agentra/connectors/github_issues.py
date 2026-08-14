@@ -19,6 +19,7 @@ git operations do if it isn't.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -331,6 +332,44 @@ def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
         match = _IN_PROGRESS_BRANCH_RE.search(comment.get("body") or "")
         if match:
             return match.group(1)
+    return None
+
+
+_SPEC_MARKER = "Spec (agentra):"
+_SPEC_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+
+
+def record_spec(repo_url: str, issue_number: int, spec: dict) -> None:
+    """Persists Requirements Agent's finalized spec (agents/requirements.py)
+    as a comment on the feature/bug's own tracking issue -- the same
+    "post as a comment, read the most recent one back" shape as
+    record_in_progress_branch/get_in_progress_branch above, so a resumed
+    cycle (brain.py's resume_branch path) can reuse this spec instead of
+    paying to regenerate one from scratch, and so Testing Agent's pre-prod
+    pass has real acceptance_criteria to verify the live deployment
+    against without ever reading the source (see testing.py's own
+    docstring on why it deliberately has no codebase access there)."""
+    body = f"{_SPEC_MARKER}\n\n```json\n{json.dumps(spec, indent=2)}\n```"
+    add_comment(repo_url, issue_number, body)
+
+
+def get_spec(repo_url: str, issue_number: int) -> dict | None:
+    """The most recently recorded spec for this issue, or None if it's
+    never had one (or the stored JSON is somehow malformed -- treated the
+    same as "no spec yet" rather than raising, so a corrupt old comment
+    can't ever block a new spec from being generated)."""
+    comments = list_comments(repo_url, issue_number)
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if not body.startswith(_SPEC_MARKER):
+            continue
+        match = _SPEC_JSON_RE.search(body)
+        if not match:
+            continue
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
     return None
 
 
