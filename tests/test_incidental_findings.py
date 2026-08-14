@@ -3,12 +3,16 @@ something the Testing Agent noticed incidentally (unrelated to the specific thin
 being verified) through the free-text `notes` field, which nothing ever read back --
 so on an otherwise-passing run, a real observed bug was silently lost forever.
 
-agents/testing.py's LOCAL_SYSTEM_PROMPT/PRE_PROD_SYSTEM_PROMPT now ask the Testing
-Agent for a structured `incidental_findings` list; agents/brain.py's run_local_tests
-and verify_pre_prod tool handlers must file each entry via mem.record_known_bug --
-the same known-bug path used for outright failures -- regardless of whether the
-overall run's status is "pass" or "fail", so it surfaces in a later check_backlog
-call instead of vanishing.
+agents/testing.py's LOCAL_SYSTEM_PROMPT/PRE_PROD_SYSTEM_PROMPT both ask the Testing
+Agent for a structured `incidental_findings` list, but only verify_pre_prod's tool
+handler actually files them (and outright failures) via mem.record_known_bug --
+run_local_tests deliberately does neither anymore. Local test failures/findings are
+frequently pre-existing, unrelated test-infra debt rather than a new defect (see
+brain.py's run_local_tests comment, and the false positive that became GitHub issue
+#17) -- a failure there still fully gates deploy_pre_prod via session.tests_passed,
+it just no longer auto-files a bug report every time an already-known-broken local
+test runs again. verify_pre_prod checks the actual deployed artifact, where a
+failure or incidental finding is a much stronger signal of something real and novel.
 
 Drives the real tool handlers returned by brain._tools_for (not just the
 _file_incidental_findings helper in isolation), with testing.run_local/run_pre_prod
@@ -74,10 +78,10 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-# -- (a) status="pass" AND non-empty incidental_findings still files each one --------
+# -- (a) verify_pre_prod: status="pass" AND non-empty incidental_findings files each one --
 
 
-def test_run_local_tests_pass_with_incidental_findings_files_known_bugs(tmp_path, monkeypatch):
+def test_run_local_tests_never_files_incidental_findings_even_on_pass(tmp_path, monkeypatch):
     known_bug_calls, failure_calls = _patch_common(monkeypatch)
     findings = [
         {"diagnosis": "login page favicon is broken", "severity": "low", "proposed_fix": "add favicon.ico"},
@@ -94,13 +98,9 @@ def test_run_local_tests_pass_with_incidental_findings_files_known_bugs(tmp_path
 
     assert result.get("is_error") is not True
     assert session.tests_passed is True
-    assert len(known_bug_calls) == 2
-    diagnoses = {c["diagnosis"] for c in known_bug_calls}
-    assert diagnoses == {"login page favicon is broken", "console warning about deprecated API on /settings"}
-    assert known_bug_calls[0]["source"] == "testing-agent-local"
-    assert known_bug_calls[0]["severity"] == "low"
-    assert known_bug_calls[1]["severity"] == "medium"
-    # A clean pass must not also go through the outright-failure path.
+    # run_local_tests never files anything, regardless of what the Testing
+    # Agent reported incidentally -- only verify_pre_prod does (see below).
+    assert known_bug_calls == []
     assert failure_calls == []
 
 
@@ -160,7 +160,7 @@ def test_verify_pre_prod_pass_with_empty_incidental_findings_is_a_noop(tmp_path,
 # -- (c) existing pass/fail behavior is otherwise unchanged --------------------------
 
 
-def test_run_local_tests_fail_still_records_failure_and_also_files_incidental_findings(tmp_path, monkeypatch):
+def test_run_local_tests_fail_does_not_file_a_bug_or_call_record_failure(tmp_path, monkeypatch):
     known_bug_calls, failure_calls = _patch_common(monkeypatch)
     findings = [{"diagnosis": "unrelated broken favicon", "severity": "low"}]
 
@@ -174,14 +174,14 @@ def test_run_local_tests_fail_still_records_failure_and_also_files_incidental_fi
     session = _session(tmp_path)
     result = asyncio.run(_tool(session, "run_local_tests").handler({}))
 
+    # The failure still gates deploy_pre_prod...
     assert result.get("is_error") is True
     assert session.tests_passed is False
-    # The outright failure still goes through the pre-existing record_failure path.
-    assert len(failure_calls) == 1
-    assert failure_calls[0]["step_name"] == "testing"
-    # ...and the incidental finding is filed too, independent of the overall verdict.
-    assert len(known_bug_calls) == 1
-    assert known_bug_calls[0]["diagnosis"] == "unrelated broken favicon"
+    # ...but neither the outright-failure path nor incidental findings file a
+    # GitHub bug anymore -- a local test failure/finding might just be
+    # pre-existing debt, not something this run caused.
+    assert failure_calls == []
+    assert known_bug_calls == []
 
 
 def test_run_local_tests_fail_without_incidental_findings_unchanged(tmp_path, monkeypatch):
@@ -197,7 +197,7 @@ def test_run_local_tests_fail_without_incidental_findings_unchanged(tmp_path, mo
 
     assert result.get("is_error") is True
     assert session.tests_passed is False
-    assert len(failure_calls) == 1
+    assert failure_calls == []
     assert known_bug_calls == []
 
 

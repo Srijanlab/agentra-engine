@@ -505,11 +505,19 @@ def _tools_for(session: OrchestratorSession) -> list:
         if data.get("failed_tests"):
             detail += f" failed={data['failed_tests']}"
         session.note(f"run_local_tests: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
-        # Incidental findings are filed regardless of pass/fail -- a clean overall run
-        # doesn't mean nothing was noticed (see _file_incidental_findings' docstring).
-        _file_incidental_findings(session.mem, session.run_id, data, source="testing-agent-local")
+        # Deliberately does NOT file a GitHub bug here (neither a failed-suite
+        # bug nor incidental_findings), unlike verify_pre_prod below -- local
+        # test failures are frequently pre-existing, unrelated test-infra
+        # debt (confirmed live: issue #17's false positive, and #6's own
+        # dynamic), not a new defect this run introduced. A failure here
+        # still fully gates deploy_pre_prod via session.tests_passed above,
+        # and the failed-test detail is still durably recorded via note()
+        # (mem.log()) -- it just doesn't create a misleading bug report
+        # every time an already-known-broken local test runs again.
+        # verify_pre_prod checks the actual deployed artifact -- a failure
+        # or incidental finding there is a much stronger signal of a real,
+        # novel bug, so that's where automatic bug filing stays.
         if not passed:
-            session.mem.record_failure(session.run_id, "testing", test.text)
             session.record_failure("run_local_tests")
         else:
             session.record_success("run_local_tests")
