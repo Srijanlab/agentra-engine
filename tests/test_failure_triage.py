@@ -72,6 +72,21 @@ def test_cannot_be_fixed_by_agentra_false_for_an_ordinary_bug():
     assert not cannot_be_fixed_by_agentra("3 tests failed: test_login, test_logout, test_signup")
 
 
+def test_cannot_be_fixed_by_agentra_ignores_a_bare_status_code_in_unrelated_prose():
+    # Real false positive, GitHub issue #17: a Testing Agent report mentioning
+    # "401 instead of 200" while describing an already-diagnosed, unrelated
+    # ambient env var tripping a webhook auth test (nothing blocking agentra
+    # itself) got classified as unfixable, labeled blocking_agentra, and
+    # halted every future autonomous cycle. A bare status code alone must
+    # never be enough -- only the phrase-based patterns should trigger.
+    assert not cannot_be_fixed_by_agentra(
+        "test_alarm_trigger_respects_per_app_alarm_enabled, 401 instead of 200. "
+        "Root-caused to an ambient sandbox env var ALARM_WEBHOOK_PASSWORD tripping "
+        "the webhook's Basic-auth gate -- unrelated to this feature."
+    )
+    assert not cannot_be_fixed_by_agentra("HTTP 403 returned by a third-party API the app under test calls")
+
+
 def test_record_failure_flags_an_unfixable_failure_as_needing_a_human_and_blocking(tmp_path, monkeypatch):
     mem = Memory(tmp_path)
     recorded = {}

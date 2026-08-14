@@ -58,6 +58,7 @@ entirely too -- see chat_store.py -- they were never a fit for a customer's own
 git history in the first place.
 """
 
+import concurrent.futures
 import datetime as dt
 import difflib
 import json
@@ -190,13 +191,21 @@ def is_transient_failure(text: str) -> bool:
 # retried normally (today's behavior); a false positive would wrongly halt the
 # whole orchestrator, so this only matches the unambiguous cases.
 _UNFIXABLE_BY_AGENTRA_PATTERNS = [
-    re.compile(r"\b401\b"),
-    re.compile(r"\b403\b"),
     re.compile(r"unauthorized", re.IGNORECASE),
     re.compile(r"permission denied", re.IGNORECASE),
     re.compile(r"access.{0,20}not granted", re.IGNORECASE),
     re.compile(r"write access.{0,20}not granted", re.IGNORECASE),
 ]
+# Deliberately no bare \b401\b/\b403\b pattern -- confirmed live (GitHub
+# issue #17): a Testing Agent report that mentioned "401 instead of 200"
+# in unrelated prose (describing an already-diagnosed, unrelated ambient
+# env var tripping an auth test -- not anything blocking agentra itself)
+# got classified as unfixable and labeled blocking_agentra, which halted
+# every future autonomous cycle over a false positive. A bare status code
+# is too common in ordinary diagnostic/test-report text to be a reliable
+# signal on its own; the phrase-based patterns above still catch the real
+# cases ("403 Write access to repository not granted", "401 Unauthorized")
+# without matching an incidental number.
 
 
 def cannot_be_fixed_by_agentra(text: str) -> bool:
@@ -715,9 +724,19 @@ class Memory:
             from agentra.connectors import github_issues, github_projects
 
             issues = github_issues.list_in_progress_features(repo_url, labels=[_FEATURE_LABEL])
+            if not issues:
+                return []
+            # One get_feature_status call per candidate, each a live GraphQL
+            # round-trip -- run them concurrently rather than one at a time,
+            # same reasoning as server.py's asyncio.gather calls (this method
+            # itself is sync, called from CLI/agent code as well as the
+            # server, so a thread pool here rather than making the whole
+            # method async).
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                statuses = list(pool.map(lambda i: github_projects.get_feature_status(repo_url, i["number"]), issues))
             result = []
-            for i in issues:
-                if github_projects.get_feature_status(repo_url, i["number"]) == "Todo":
+            for i, status in zip(issues, statuses):
+                if status == "Todo":
                     continue
                 result.append(
                     {
