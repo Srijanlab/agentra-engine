@@ -519,26 +519,52 @@ async def github_connector_repos() -> dict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+async def _app_digest(name: str, info: dict) -> tuple[str, dict]:
+    repo = Path(info["repo_path"])
+    if not repo.exists():
+        defaults = environments.EnvironmentConfig()
+        return name, {
+            "repo_path": info["repo_path"],
+            "objective": None,
+            "shipped_count": 0,
+            "released_count": 0,
+            "known_bugs": 0,
+            "pre_prod_branch": defaults.pre_prod_branch,
+            "prod_branch": defaults.prod_branch,
+            "schedule_hours": defaults.schedule_hours,
+            "alarm_enabled": defaults.alarm_enabled,
+        }
+    mem = Memory(repo)
+    env_config = environments.load(repo) or environments.EnvironmentConfig()
+    # shipped_features/known_bugs each hit GitHub live -- run the two apps'
+    # worth of calls concurrently (via a thread, since github_issues.py's
+    # httpx calls are synchronous) rather than blocking this app's response
+    # on one before starting the other.
+    shipped, bugs = await asyncio.gather(
+        asyncio.to_thread(mem.shipped_features), asyncio.to_thread(mem.known_bugs)
+    )
+    return name, {
+        "repo_path": info["repo_path"],
+        "objective": mem.get_objective(),
+        "shipped_count": len(shipped),
+        "released_count": len(mem.released_features()),
+        "known_bugs": len(bugs),
+        "pre_prod_branch": env_config.pre_prod_branch,
+        "prod_branch": env_config.prod_branch,
+        "schedule_hours": env_config.schedule_hours,
+        "alarm_enabled": env_config.alarm_enabled,
+    }
+
+
 @app.get("/apps")
 async def list_apps() -> dict:
     apps = registry.list_apps()
-    result = {}
-    for name, info in apps.items():
-        repo = Path(info["repo_path"])
-        mem = Memory(repo) if repo.exists() else None
-        env_config = environments.load(repo) if repo.exists() else None
-        result[name] = {
-            "repo_path": info["repo_path"],
-            "objective": mem.get_objective() if mem else None,
-            "shipped_count": len(mem.shipped_features()) if mem else 0,
-            "released_count": len(mem.released_features()) if mem else 0,
-            "known_bugs": len(mem.known_bugs()) if mem else 0,
-            "pre_prod_branch": env_config.pre_prod_branch if env_config else environments.EnvironmentConfig().pre_prod_branch,
-            "prod_branch": env_config.prod_branch if env_config else environments.EnvironmentConfig().prod_branch,
-            "schedule_hours": env_config.schedule_hours if env_config else environments.EnvironmentConfig().schedule_hours,
-            "alarm_enabled": env_config.alarm_enabled if env_config else environments.EnvironmentConfig().alarm_enabled,
-        }
-    return {"apps": result}
+    # Every registered app's digest is independent -- fetch all of them
+    # concurrently instead of one at a time, same reasoning as the
+    # per-app gather above (this is what made a multi-app dashboard load
+    # scale linearly with app count before).
+    results = await asyncio.gather(*(_app_digest(name, info) for name, info in apps.items()))
+    return {"apps": dict(results)}
 
 
 def _apply_app_config(
@@ -669,9 +695,11 @@ async def register_app(payload: RegisterAppRequest) -> dict:
 
 @app.get("/apps/{name}")
 async def get_app(name: str) -> dict:
-    """Full config for the dashboard's edit modal -- the list view (GET
-    /apps) deliberately stays a cheap digest since it's polled every 5s;
-    this one is fetched on demand when a user opens Edit."""
+    """Full config for the dashboard's edit modal and per-app detail views --
+    heavier than GET /apps' cheap digest (several live GitHub calls), fetched
+    on demand (an app row expanding, a run-detail drawer opening) rather than
+    polled; the frontend no longer auto-refreshes any of this on an interval,
+    see App.tsx."""
     apps = registry.list_apps()
     if name not in apps:
         raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
@@ -683,17 +711,36 @@ async def get_app(name: str) -> dict:
 
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
+    repo_url = info.get("repo_url")
+
+    # Each of these hits GitHub live and is independent of the others --
+    # run them concurrently (each on its own thread, since github_issues.py's
+    # httpx calls are synchronous) instead of one after another. Was also
+    # fetching shipped_features/known_bugs TWICE each (once for the count,
+    # once for the list) -- fixed here by calling each once and deriving
+    # both from the same result.
+    shipped, released, bugs, queue, in_progress = await asyncio.gather(
+        asyncio.to_thread(mem.shipped_features),
+        asyncio.to_thread(mem.released_features),
+        asyncio.to_thread(mem.known_bugs),
+        asyncio.to_thread(mem.feature_queue),
+        asyncio.to_thread(mem.in_progress_features),
+    )
 
     # A per-feature Project board only exists once a feature's been split into
     # parts (see github_projects.py) -- read-only lookup, one per in-progress
     # entry, never provisions a board just because this page got loaded.
-    repo_url = info.get("repo_url")
-    in_progress = mem.in_progress_features()
     if repo_url and in_progress:
         from agentra.connectors import github_projects
 
-        for entry in in_progress:
-            entry["project_url"] = github_projects.get_feature_project_url(repo_url, int(entry["external_id"]))
+        urls = await asyncio.gather(
+            *(
+                asyncio.to_thread(github_projects.get_feature_project_url, repo_url, int(entry["external_id"]))
+                for entry in in_progress
+            )
+        )
+        for entry, url in zip(in_progress, urls):
+            entry["project_url"] = url
 
     return {
         "name": name,
@@ -701,13 +748,13 @@ async def get_app(name: str) -> dict:
         "repo_url": repo_url,
         "branch": info.get("branch"),
         "objective": mem.get_objective(),
-        "shipped_count": len(mem.shipped_features()),
-        "released_count": len(mem.released_features()),
-        "known_bugs": len(mem.known_bugs()),
-        "shipped": mem.shipped_features(),
-        "released": mem.released_features(),
-        "bugs": mem.known_bugs(),
-        "feature_queue": mem.feature_queue(),
+        "shipped_count": len(shipped),
+        "released_count": len(released),
+        "known_bugs": len(bugs),
+        "shipped": shipped,
+        "released": released,
+        "bugs": bugs,
+        "feature_queue": queue,
         "in_progress_features": in_progress,
         "vercel": env_config.vercel,
         "firebase": env_config.firebase,
