@@ -62,12 +62,12 @@ def test_self_heals_a_failing_suite_and_passes_on_the_retest(tmp_path, monkeypat
         _test_result("pass", lint_status="pass", typecheck_status="pass"),
     ]
 
-    async def fake_run_local(repo, cb_summary, mem=None):
+    async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
         return test_results.pop(0)
 
     fix_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         fix_calls.append({"brief": brief, "feature_branch": feature_branch, "resume": resume})
         return AgentResult(ok=True, text="fixed it", json_data={"status": "implemented"}, cost_usd=0.02, turns=3)
 
@@ -90,12 +90,12 @@ def test_gives_up_after_max_self_heal_attempts_if_still_failing(tmp_path, monkey
     _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
-    async def fake_run_local(repo, cb_summary, mem=None):
+    async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
         return _test_result("fail", failed_tests=["test_x"], lint_status="pass", typecheck_status="pass")
 
     fix_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         fix_calls.append(1)
         return AgentResult(ok=True, text="tried", json_data={"status": "implemented"}, cost_usd=0.02, turns=3)
 
@@ -114,17 +114,17 @@ def test_stops_retesting_if_the_fix_attempt_itself_fails(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
-    async def fake_run_local(repo, cb_summary, mem=None):
+    async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
         return _test_result("fail", failed_tests=["test_x"], lint_status="pass", typecheck_status="pass")
 
     retest_calls = []
     real_fake_run_local = fake_run_local
 
-    async def counting_run_local(repo, cb_summary, mem=None):
+    async def counting_run_local(repo, cb_summary, mem=None, session_id=None):
         retest_calls.append(1)
-        return await real_fake_run_local(repo, cb_summary, mem)
+        return await real_fake_run_local(repo, cb_summary, mem, session_id)
 
-    async def failing_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False):
+    async def failing_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         return AgentResult(ok=False, text="could not fix it", json_data=None, cost_usd=0.02, turns=5)
 
     monkeypatch.setattr(brain.testing, "run_local", counting_run_local)
@@ -143,7 +143,7 @@ def test_does_not_self_heal_without_a_feature_branch(tmp_path, monkeypatch):
     session = _session(tmp_path)
     assert session.feature_branch is None
 
-    async def fake_run_local(repo, cb_summary, mem=None):
+    async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
         return _test_result("fail", failed_tests=["test_x"], lint_status="pass", typecheck_status="pass")
 
     monkeypatch.setattr(brain.testing, "run_local", fake_run_local)
@@ -161,7 +161,7 @@ def test_does_not_self_heal_when_the_suite_already_passes(tmp_path, monkeypatch)
     _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
-    async def fake_run_local(repo, cb_summary, mem=None):
+    async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
         return _test_result("pass", lint_status="pass", typecheck_status="pass")
 
     monkeypatch.setattr(brain.testing, "run_local", fake_run_local)

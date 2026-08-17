@@ -60,7 +60,16 @@ For an opportunity sourced from a known bug or the feature queue, copy its \
 system marks the original backlog entry resolved once shipped, instead of it \
 resurfacing every future cycle. Omit/null `id` for your own autonomous ideas.
 
-End your response with a fenced ```json block shaped like:
+If the objective itself is genuinely ambiguous in a way where you cannot responsibly rank \
+ANY opportunities without a strategic decision only a human can make (e.g. two mutually \
+exclusive directions with no way to tell which takes priority, or every plausible next step \
+is gated on a real, unresolvable-by-you business/legal/policy call) -- do not guess and do \
+not force a ranked list. This should be rare: almost every objective has at least one \
+actionable, non-strategic opportunity (a bug fix, a queued request, a small improvement) -- \
+reach for this only when truly nothing is safely actionable without that decision, the same \
+"last resort" bar as being asked to discover opportunities at all.
+
+End your response with a fenced ```json block shaped like EITHER:
 {
   "opportunities": [
     {
@@ -73,6 +82,13 @@ End your response with a fenced ```json block shaped like:
       "id": "the bug's run_id or the feature request's external_id, or null"
     }
   ]
+}
+OR, only if truly blocked on a strategic decision only a human can make:
+{
+  "status": "HUMAN_INPUT_REQUIRED",
+  "reason": "...",
+  "question": "...",
+  "options": ["...", "..."]
 }
 """
 

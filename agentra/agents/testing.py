@@ -135,7 +135,9 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-async def run_local(repo: Path, codebase_summary: str, mem: Memory | None = None) -> AgentResult:
+async def run_local(
+    repo: Path, codebase_summary: str, mem: Memory | None = None, session_id: str | None = None
+) -> AgentResult:
     prompt = f"""Codebase summary:
 {codebase_summary}
 
@@ -148,6 +150,7 @@ Run the full local test/QA pass now, following your system prompt."""
         permission_mode="bypassPermissions",
         max_turns=30,
         agent_label="Testing Agent",
+        resume=session_id,
     )
     if mem is not None and result.ok and result.json_data:
         # architecture/testing-notes.md: a live, agent-maintained snapshot
@@ -169,7 +172,9 @@ def screenshot_path(repo: Path, run_id: str) -> Path:
     return repo / ".agentra" / "test_artifacts" / run_id / "screenshot.png"
 
 
-async def run_pre_prod(repo: Path, spec: str, preview_url: str, run_id: str) -> AgentResult:
+async def run_pre_prod(
+    repo: Path, spec: str, preview_url: str, run_id: str, session_id: str | None = None
+) -> AgentResult:
     """`spec` is the feature's requirements/acceptance criteria (agents/
     requirements.py, formatted by the caller -- see brain.py's
     verify_pre_prod), NOT a codebase summary -- this pass is deliberately
@@ -200,4 +205,5 @@ Independently verify the live deployment now, following your system prompt."""
         permission_mode="bypassPermissions",
         max_turns=20,
         agent_label="Testing Agent",
+        resume=session_id,
     )

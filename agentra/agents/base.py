@@ -5,7 +5,7 @@ import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     HookEventMessage,
+    ProcessError,
     RateLimitEvent,
     ResultMessage,
     StreamEvent,
@@ -87,6 +88,9 @@ def current_run_logger() -> RunLogger | None:
     skip logging rather than raise.
     """
     return _RUN_LOGGER.get()
+
+
+# ── Message formatting: SDK message/block objects -> compact log lines ──────
 
 
 def _compact_text(text: str, limit: int = 240) -> str:
@@ -284,18 +288,20 @@ async def run_agent(
         resume=resume,
     )
 
-    attempts = 2 if retry_on_contradictory_result else 1
+    max_contradictory_attempts = 2 if retry_on_contradictory_result else 1
+    contradictory_attempts_used = 0
+    resume_fallback_used = False
     raw_logger = _RUN_LOGGER.get()
     label = agent_label or "Agent"
     logger = (lambda line: raw_logger(f"[{label}] {line}")) if raw_logger else None
-    for attempt in range(attempts):
+    while True:
         result_msg: ResultMessage | None = None
         try:
             if logger:
                 logger(
                     "claude agent start | "
                     f"cwd={cwd} tools={allowed_tools} permission_mode={permission_mode!r} "
-                    f"max_turns={max_turns} allow_prod={allow_prod}"
+                    f"max_turns={max_turns} allow_prod={allow_prod} resume={options.resume!r}"
                 )
             async for message in query(prompt=single_prompt_stream(prompt), options=options):
                 log_claude_message(message, logger)
@@ -303,8 +309,29 @@ async def run_agent(
                     result_msg = message
             break
         except Exception as exc:
+            # A `resume` session_id can go stale -- e.g. it lived only on local
+            # disk and the VM was redeployed since (session_store isn't wired up
+            # here). The CLI reports this as a plain ProcessError; the SDK
+            # doesn't surface the real stderr text ("No conversation found with
+            # session ID: ...") on the exception object, only a placeholder, so
+            # exit_code==1 + a resume actually being set is the closest signal
+            # available without reaching into SDK internals. Bounded to exactly
+            # one extra cold-start attempt so a genuinely different exit-1
+            # failure still surfaces for real afterward, just one attempt later.
+            if (
+                options.resume
+                and not resume_fallback_used
+                and isinstance(exc, ProcessError)
+                and exc.exit_code == 1
+            ):
+                if logger:
+                    logger(f"resume={options.resume!r} failed to load ({exc}); retrying as a fresh session")
+                options = replace(options, resume=None)
+                resume_fallback_used = True
+                continue
             is_contradictory = str(exc).endswith(_CONTRADICTORY_RESULT_SUFFIX)
-            if is_contradictory and attempt < attempts - 1:
+            contradictory_attempts_used += 1
+            if is_contradictory and contradictory_attempts_used < max_contradictory_attempts:
                 continue
             # Either a different, real error, or retries are exhausted/disabled -- same
             # graceful-failure path as before: report it, don't crash the whole cycle.

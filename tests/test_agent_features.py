@@ -352,5 +352,6 @@ def test_agent_metadata_endpoint_covers_every_roster_entry():
     for agent_id, meta in body["agents"].items():
         assert meta["skills"], f"{agent_id} has no skills listed"
         assert meta["tools"], f"{agent_id} has no tools listed"
+        assert meta.get("capability"), f"{agent_id} has no capability set"
         for tool in meta["tools"]:
             assert tool["permission"] in valid_permissions

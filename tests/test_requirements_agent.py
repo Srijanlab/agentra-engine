@@ -88,7 +88,7 @@ def test_implement_feature_generates_and_persists_a_new_spec(tmp_path, monkeypat
 
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
@@ -125,7 +125,7 @@ def test_implement_feature_reuses_an_existing_spec_without_calling_requirements_
     )
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
@@ -161,7 +161,7 @@ def test_implement_feature_proceeds_without_a_spec_if_requirements_agent_fails(t
 
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
@@ -187,7 +187,7 @@ def test_verify_pre_prod_uses_current_spec_not_codebase_summary(tmp_path, monkey
 
     captured = {}
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
         captured["spec"] = spec
         return AgentResult(ok=True, text="ok", json_data={"status": "pass", "reachable": True, "feature_verified": True}, cost_usd=0.01, turns=2)
 
@@ -205,7 +205,7 @@ def test_verify_pre_prod_falls_back_to_codebase_summary_without_a_spec(tmp_path,
 
     captured = {}
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
         captured["spec"] = spec
         return AgentResult(ok=True, text="ok", json_data={"status": "pass"}, cost_usd=0.01, turns=2)
 

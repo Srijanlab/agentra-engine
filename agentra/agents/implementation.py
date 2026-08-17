@@ -37,6 +37,12 @@ to build. You are already checked out on your dedicated branch, {feature_branch}
 — stay on it; never switch to {pre_prod_branch}, {prod_branch}, or any other \
 branch. Work in a tight loop:
 
+0. Before writing any code: if the brief requires a decision outside your authority to make \
+   unilaterally -- an ambiguous choice with no clear default, a breaking schema change with \
+   no safe backward-compatible path, a security/credential-handling decision, or an \
+   irreversible destructive migration -- do not guess and do not implement. Stop and report \
+   status HUMAN_INPUT_REQUIRED instead, with a concrete reason, the specific question, and \
+   the discrete options if there are any.
 1. Implement the smallest coherent version of the feature.
 2. Run EVERY test/build command actually configured in the project yourself \
    via Bash -- e.g. both a Python suite and a separate frontend one, if both \
@@ -65,10 +71,13 @@ Constraints:
 End your response with a fenced ```json block shaped like:
 {{
   "feature": "...",
-  "status": "implemented" | "partially_implemented" | "blocked",
+  "status": "implemented" | "partially_implemented" | "blocked" | "HUMAN_INPUT_REQUIRED",
   "files_changed": ["..."],
   "self_test_result": "pass" | "fail" | "not_run",
-  "notes": "..."
+  "notes": "...",
+  "reason": "... (only when status is HUMAN_INPUT_REQUIRED)",
+  "question": "... (only when status is HUMAN_INPUT_REQUIRED)",
+  "options": ["..."]
 }}
 """
 
@@ -164,7 +173,12 @@ async def run(
     feature_branch: str,
     resume: bool = False,
     spec: str = "",
+    session_id: str | None = None,
 ) -> AgentResult:
+    """resume (bool) continues an interrupted call's git branch (see
+    _checkout_feature_branch); session_id (Claude CLI session) continues the
+    same conversation across this issue's implement/test/feedback steps --
+    unrelated to each other, both named around "resuming" different things."""
     try:
         _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch, resume=resume)
     except git_ops.GitOpError as exc:
@@ -209,6 +223,7 @@ Implement this feature now, following the loop in your system prompt."""
         # any uncommitted work either way.
         retry_on_contradictory_result=False,
         agent_label="Implementation Agent",
+        resume=session_id,
     )
 
     try:

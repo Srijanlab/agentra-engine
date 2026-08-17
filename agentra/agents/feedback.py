@@ -37,7 +37,7 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-async def run(repo: Path, objective: str, feature: str) -> AgentResult:
+async def run(repo: Path, objective: str, feature: str, session_id: str | None = None) -> AgentResult:
     prompt = f"""Business objective: {objective}
 Feature just shipped: {feature}
 
@@ -50,4 +50,5 @@ Assess measurability of this feature's impact, following your system prompt."""
         permission_mode="bypassPermissions",
         max_turns=15,
         agent_label="Analytics Feedback Agent",
+        resume=session_id,
     )

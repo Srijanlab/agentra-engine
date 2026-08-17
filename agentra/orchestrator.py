@@ -108,9 +108,17 @@ async def run_cycle(
             feature_brief = f"{top['feature']}: {top.get('description', '')} (reason: {top.get('reason', '')})"
             mem.log(run_id, f"discovery agent: selected {feature!r} from {len(opportunities)} candidates")
 
+        # session_id: threads one Claude session across implementation -> testing ->
+        # deployment -> feedback for this feature, mirroring agents/brain/tools.py's
+        # OrchestratorSession.session_id -- captured from each AgentResult and fed
+        # into the next call so this fixed-pipeline cycle is also one SIM/session,
+        # not a chain of disconnected cold starts.
+        session_id: str | None = None
+
         feature_branch = feature_branch_name(env, run_id, feature)
         mem.log(run_id, f"implementation agent: starting on dedicated branch {feature_branch!r}")
-        impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch)
+        impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch, session_id=session_id)
+        session_id = impl.session_id or session_id
         mem.log(run_id, f"implementation agent: ok={impl.ok} turns={impl.turns} cost=${impl.cost_usd:.4f}")
         if not impl.ok:
             mem.record_failure(run_id, "implementation", impl.text)
@@ -121,14 +129,15 @@ async def run_cycle(
         # still needs its own bug issue cleared separately, since that's a different
         # label/ledger than the shipped-feature record.
         resolves_id = top["id"] if top and top.get("origin") == "feature_queue" else None
-        mem.record_shipped(feature, run_id=run_id, resolves_id=resolves_id)
+        mem.record_shipped(feature, run_id=run_id, resolves_id=resolves_id, session_id=session_id)
         mem.append_documentation(f"Shipped **{feature}**: {feature_brief[:300]}")
         if top and top.get("id") and top.get("origin") == "known_bug":
             resolution_note = f"Resolved by agentra: shipped as {feature!r} (run {run_id})"
             mem.clear_known_bug(top["id"], resolution_note)
 
         mem.log(run_id, "testing agent: starting (local)")
-        test = await testing.run_local(repo, cb.text, mem)
+        test = await testing.run_local(repo, cb.text, mem, session_id=session_id)
+        session_id = test.session_id or session_id
         mem.log(run_id, f"testing agent (local): ok={test.ok} turns={test.turns} cost=${test.cost_usd:.4f}")
         test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
         if not test_passed:
@@ -138,7 +147,8 @@ async def run_cycle(
         pre_prod_verified = None
         if not skip_deploy and test_passed:
             mem.log(run_id, "deployment agent: deploying to pre-prod")
-            deploy = await deployment.deploy_pre_prod(repo, env, feature_branch)
+            deploy = await deployment.deploy_pre_prod(repo, env, feature_branch, session_id=session_id)
+            session_id = deploy.session_id or session_id
             mem.log(run_id, f"deployment agent: ok={deploy.ok} turns={deploy.turns} cost=${deploy.cost_usd:.4f}")
             deploy_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
             if not deploy_ok:
@@ -147,7 +157,8 @@ async def run_cycle(
                 preview_url = (deploy.json_data or {}).get("preview_url")
                 if preview_url:
                     mem.log(run_id, "testing agent: starting (live pre-prod verification)")
-                    pre_prod_test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id)
+                    pre_prod_test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id, session_id=session_id)
+                    session_id = pre_prod_test.session_id or session_id
                     mem.log(
                         run_id,
                         f"testing agent (pre-prod): ok={pre_prod_test.ok} turns={pre_prod_test.turns} "
@@ -165,7 +176,8 @@ async def run_cycle(
         feedback_ready = test_passed if skip_deploy else bool(pre_prod_verified)
         if feedback_ready:
             mem.log(run_id, "feedback agent: starting")
-            fb = await feedback.run(repo, objective, feature)
+            fb = await feedback.run(repo, objective, feature, session_id=session_id)
+            session_id = fb.session_id or session_id
             mem.log(run_id, f"feedback agent: ok={fb.ok} turns={fb.turns} cost=${fb.cost_usd:.4f}")
 
         if deploy_ok:
@@ -199,14 +211,45 @@ async def run_promote(repo: Path, run_id: str | None = None) -> dict:
     """Human-triggered prod promotion: `agentra promote`, or the dashboard's
     Promote button (server.py's /apps/{name}/promote). Always
     allow_prod=True here because a human explicitly invoked it -- this is
-    the approval gate. run_id: see run_autonomous_cycle's docstring."""
+    the approval gate. run_id: see run_autonomous_cycle's docstring -- this
+    is promote's own log-trail id, separate from whichever build's Claude
+    session gets resumed below.
+
+    Resumes the Claude session of whichever pending feature was shipped most
+    recently (by updated_at, falling back to ts/external_id when that's
+    missing), so promotion continues the same conversation that built and
+    tested the change instead of a disconnected cold start. If several
+    features from different issues are queued for promotion at once, only
+    the most-recent one's session is actually resumed; the rest are just
+    logged as carried by this promote run."""
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
     with run_log_scope(lambda line: mem.log(run_id, line)):
         env = _load_env(repo, mem, run_id)
+        pending = mem.pending_promotion_features()
+        session_id = None
+        if pending:
+            def _recency_key(f: dict) -> tuple:
+                ext_id = f.get("external_id") or ""
+                return (f.get("updated_at") or f.get("ts") or "", int(ext_id) if ext_id.isdigit() else 0)
+
+            chosen = max(pending, key=_recency_key)
+            session_id = chosen.get("session_id")
+            mem.log(
+                run_id,
+                f"promote: resuming build session from {chosen['feature']!r} "
+                f"(external_id={chosen.get('external_id')}, session_id={session_id!r})",
+            )
+            for other in pending:
+                if other is not chosen:
+                    mem.log(
+                        run_id,
+                        f"promote: {other['feature']!r} (external_id={other.get('external_id')}) "
+                        f"carried by this promote run, not independently resumed",
+                    )
         mem.log(run_id, "promote: human-approved promotion to production starting")
-        promote = await deployment.promote_prod(repo, env)
+        promote = await deployment.promote_prod(repo, env, session_id=session_id)
         ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
         mem.log(run_id, f"promote: ok={ok}")
         if not ok:
@@ -255,10 +298,14 @@ async def run_prod_debug_cycle(
             return ProdDebugReport(run_id, True, severity, False, False, diag.text)
 
         mem.log(run_id, "prod-debug: auto_remediate_prod is on; building fix")
+        # One Claude session across build -> deploy -> verify -> promote for this
+        # hotfix, same reasoning as run_cycle's session_id (see its comment).
+        session_id: str | None = None
         cb = await codebase.run_cached(repo, mem)
         registry.record_agent_step(repo.name, run_id, "understand_codebase", cb.ok, cb.cost_usd, cb.turns, "understand_codebase: ok=%s" % cb.ok)
         feature_branch = feature_branch_name(env, run_id, f"hotfix-{severity}")
-        impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch)
+        impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch, session_id=session_id)
+        session_id = impl.session_id or session_id
         mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
         registry.record_agent_step(
             repo.name, run_id, "implement_feature", impl.ok, impl.cost_usd, impl.turns, f"hotfix implementation: ok={impl.ok}"
@@ -268,7 +315,8 @@ async def run_prod_debug_cycle(
             return ProdDebugReport(run_id, True, severity, False, False, diag.text)
 
         mem.log(run_id, "prod-debug: deploying hotfix to pre-prod for verification")
-        deploy = await deployment.deploy_pre_prod(repo, env, feature_branch)
+        deploy = await deployment.deploy_pre_prod(repo, env, feature_branch, session_id=session_id)
+        session_id = deploy.session_id or session_id
         pre_prod_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         registry.record_agent_step(
             repo.name, run_id, "deploy_pre_prod", pre_prod_ok, deploy.cost_usd, deploy.turns, f"hotfix deploy: ok={pre_prod_ok}"
@@ -289,7 +337,8 @@ async def run_prod_debug_cycle(
 
         # Must verify the actual live deployment here, not re-run local tests — the whole point
         # of this gate is proving the hotfix works once deployed, before it's ever allowed near prod.
-        test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id)
+        test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id, session_id=session_id)
+        session_id = test.session_id or session_id
         test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
         mem.log(run_id, f"prod-debug: live pre-prod verification passed={test_passed}")
         registry.record_agent_step(
@@ -301,7 +350,7 @@ async def run_prod_debug_cycle(
             return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
         mem.log(run_id, "prod-debug: hotfix verified live in pre-prod; auto-promoting to prod (auto_remediate_prod=true)")
-        promote = await deployment.promote_prod(repo, env)
+        promote = await deployment.promote_prod(repo, env, session_id=session_id)
         promoted_ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
         mem.log(run_id, f"prod-debug: promotion ok={promoted_ok}")
         registry.record_agent_step(

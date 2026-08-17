@@ -1,0 +1,281 @@
+"""memory/issues.py — MemoryIssuesMixin.
+
+Covers known-bug and failure recording, blocking-bug detection, and the
+in-progress/commit/spec tracking that backs an issue's lifecycle through
+record_in_progress_branch → record_commit → record_spec → (mark_status_done).
+"""
+
+from __future__ import annotations
+
+import difflib
+import logging
+
+logger = logging.getLogger(__name__)
+
+from agentra.memory.core import (
+    _AGENTRA_LABEL,
+    _BLOCKING_AGENTRA_LABEL,
+    _BUG_LABEL,
+    _NEED_HUMAN_LABEL,
+    _STATUS_DONE_LABEL,
+    _STATUS_IN_PROGRESS_LABEL,
+    _STATUS_SHIPPED_LABEL,
+    _github_bug_to_dict,
+    _github_closed_bug_to_dict,
+    _label_names,
+    cannot_be_fixed_by_agentra,
+    is_transient_failure,
+)
+
+
+class MemoryIssuesMixin:
+    """Mixin for Memory: bug filing, lifecycle tracking (branch/spec/commit),
+    and failure triage. Assumes self._repo_url() is defined on the base class."""
+
+    _DUPLICATE_BUG_SIMILARITY_THRESHOLD = 0.6
+
+    def known_bugs(self) -> list[dict]:
+        """Open 'bug'-labeled issues still needing a fix — excludes ones
+        already stamped 'status:shipped' by clear_known_bug (fixed,
+        awaiting production promotion; see closed_bugs())."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("known_bugs: %s has no github.com remote -- no bug backlog is visible at all", self.repo)
+            return []
+        try:
+            from agentra.connectors import github_issues
+
+            issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
+            issues = [i for i in issues if _STATUS_SHIPPED_LABEL not in _label_names(i)]
+            return [_github_bug_to_dict(i) for i in issues]
+        except Exception:
+            logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
+            return []
+
+    def closed_bugs(self) -> list[dict]:
+        """Resolved bugs — open+status:shipped (fixed, awaiting promotion)
+        or closed (already promoted; status_done True)."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return []
+        try:
+            from agentra.connectors import github_issues
+
+            open_shipped = [
+                i for i in github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
+                if _STATUS_SHIPPED_LABEL in _label_names(i)
+            ]
+            closed = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
+            return [_github_closed_bug_to_dict(i) for i in open_shipped + closed]
+        except Exception:
+            logger.error("closed_bugs: GitHub Issues unavailable for %s", repo_url, exc_info=True)
+            return []
+
+    def blocking_bugs(self) -> list[dict]:
+        """Open bugs labeled 'blocking_agentra' — run_autonomous_cycle
+        checks this before starting a cycle; non-empty means agentra
+        should not attempt anything until a human resolves it."""
+        return [b for b in self.known_bugs() if b.get("blocking_agentra")]
+
+    def _find_similar_open(self, text: str, candidates: list[dict], field: str) -> str | None:
+        """difflib similarity (not exact match) since the text is LLM-generated
+        free text that varies call to call even when describing the same thing."""
+        for candidate in candidates:
+            existing = candidate.get(field) or ""
+            if difflib.SequenceMatcher(None, text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+                return candidate.get("external_id")
+        return None
+
+    def _find_similar_open_bug(self, diagnosis: str) -> str | None:
+        """Best-effort duplicate suppression: record_failure() fires on every
+        non-transient failure, and an unfixed real bug produces the same
+        failure on every retry — without this, each cycle filed its own fresh
+        issue for the identical problem. Confirmed live: 4 near-identical
+        '403 Write access to repository not granted' bugs (#7-#10) from four
+        consecutive cycles hitting the same broken code path."""
+        return self._find_similar_open(diagnosis, self.known_bugs(), "diagnosis")
+
+    def record_known_bug(
+        self,
+        run_id: str,
+        severity: str,
+        diagnosis: str,
+        proposed_fix: str,
+        source: str = "prod-monitoring",
+        external_id: str | None = None,
+        needs_human: bool = False,
+        blocking_agentra: bool = False,
+        title: str | None = None,
+    ) -> None:
+        """If a similar bug is already open, adds a comment instead of filing
+        a duplicate — and applies needs_human/blocking_agentra labels to
+        THAT issue (GitHub's add-labels endpoint is additive), since the
+        original occurrence might not have been recognized as unfixable."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("record_known_bug: %s has no github.com remote -- bug %r was NOT recorded anywhere", self.repo, diagnosis)
+            return
+        extra_labels = ([_NEED_HUMAN_LABEL] if needs_human else []) + ([_BLOCKING_AGENTRA_LABEL] if blocking_agentra else [])
+        try:
+            from agentra.connectors import github_issues
+
+            duplicate_of = self._find_similar_open_bug(diagnosis)
+            if duplicate_of and duplicate_of.isdigit():
+                github_issues.add_comment(repo_url, int(duplicate_of), f"Still occurring (run {run_id}, source: {source}).\n\n{diagnosis}")
+                if extra_labels:
+                    github_issues.add_labels(repo_url, int(duplicate_of), extra_labels)
+                logger.info("record_known_bug: run %s matched existing open bug #%s -- commented instead of filing a duplicate", run_id, duplicate_of)
+                return
+
+            body = f"Description: {diagnosis}\n\nSeverity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
+            if external_id:
+                body += f"\n\nExternal-ID: {external_id}"
+            github_issues.create_issue(repo_url, title or diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
+        except Exception:
+            logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
+
+    def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
+        """Marks status:shipped and leaves the issue OPEN (mark_shipped) —
+        it only actually closes once production promotion runs it through
+        mark_status_done (server.py's _record_production_release)."""
+        if not id_.isdigit():
+            logger.warning("clear_known_bug: %r is not a GitHub issue number, nothing to mark shipped", id_)
+            return
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.mark_shipped(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
+        except Exception:
+            logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
+
+    def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
+        """The one place a failed agent turn's full output should be reported to.
+        Transient failures are just logged; permanent failures become GitHub Issues."""
+        if is_transient_failure(text):
+            self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
+            return
+        unfixable = cannot_be_fixed_by_agentra(text)
+        self.record_known_bug(
+            run_id, severity, f"{step_name} failed during an autonomous cycle", text[:2000],
+            source="autonomous-failure", needs_human=unfixable, blocking_agentra=unfixable,
+        )
+
+    def record_in_progress_branch(
+        self, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None
+    ) -> None:
+        """Also adds status:in-progress label — real work has demonstrably started.
+        Best-effort: failure just means a future cycle won't be offered a resume."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_in_progress_branch(repo_url, issue_number, branch, run_id, session_id)
+            github_issues.add_labels(repo_url, issue_number, [_STATUS_IN_PROGRESS_LABEL])
+        except Exception:
+            logger.warning("record_in_progress_branch: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def mark_status_done(self, issue_number: int) -> None:
+        """Stamps status:done and closes the issue — called once something
+        actually reaches production (server.py's _record_production_release).
+        Closing an already-closed issue is a harmless no-op."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.add_labels(repo_url, issue_number, [_STATUS_DONE_LABEL])
+            github_issues.close_issue(repo_url, issue_number, comment="Released to production.")
+        except Exception:
+            logger.warning("mark_status_done: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def record_commit(self, issue_number: int, commit_sha: str) -> None:
+        """Links commit_sha on this issue — a tracking issue's work can span
+        more than one commit; this is the only place the full history is visible."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_commit(repo_url, issue_number, commit_sha)
+        except Exception:
+            logger.warning("record_commit: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def resume_branch_for(self, external_id: str) -> str | None:
+        """The branch an interrupted implement_feature call pushed work to, if any.
+        Deliberately NOT folded into known_bugs()/feature_queue() themselves —
+        those are called on every dashboard poll; this is one extra live GitHub
+        call per entry, paid only by callers that actually act on resume_branch."""
+        if not external_id.isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_in_progress_branch(repo_url, int(external_id))
+        except Exception:
+            return None
+
+    def resume_run_id_for(self, external_id: str) -> str | None:
+        """The run_id that pushed resume_branch_for's branch. Informational
+        (look up that run's log for context on what was already tried)."""
+        if not external_id.isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_in_progress_run_id(repo_url, int(external_id))
+        except Exception:
+            return None
+
+    def resume_session_id_for(self, external_id: str) -> str | None:
+        """The Claude session_id an interrupted issue's build was using, if
+        any — lets a resumed cycle continue that same conversation instead of
+        cold-starting implement_feature from scratch for this issue."""
+        if not external_id.isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_in_progress_session_id(repo_url, int(external_id))
+        except Exception:
+            return None
+
+    def record_spec(self, issue_number: int, spec: dict) -> None:
+        """Persists the spec as a comment — best-effort: failure means a
+        resumed cycle regenerates the spec instead of reusing it."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_spec(repo_url, issue_number, spec)
+        except Exception:
+            logger.warning("record_spec: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def get_spec(self, issue_number: int) -> dict | None:
+        """Most recently recorded spec for this issue, or None."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_spec(repo_url, issue_number)
+        except Exception:
+            return None

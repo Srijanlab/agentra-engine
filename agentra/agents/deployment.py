@@ -39,6 +39,11 @@ Environment for this deploy:
 - Firebase configured: {firebase} (pre-prod alias: {firebase_pre_prod_alias})
 
 Steps:
+0. If deploying requires a decision outside your remit as a deterministic deploy agent -- \
+   e.g. an ambiguous target environment/alias with no clear default, or a Vercel/Firebase \
+   configuration that looks broken in a way pointing at a real infra/credential/environment \
+   decision rather than a transient, retryable tool error -- do not guess and do not proceed. \
+   Report status HUMAN_INPUT_REQUIRED instead.
 1. If Vercel is configured, run a preview deploy (`vercel deploy`, never \
    `--prod`) and capture the resulting preview URL.
 2. If Firebase is configured, switch to the pre-prod alias \
@@ -50,10 +55,13 @@ Steps:
 
 End your response with a fenced ```json block shaped like:
 {{
-  "status": "deployed" | "skipped" | "failed",
+  "status": "deployed" | "skipped" | "failed" | "HUMAN_INPUT_REQUIRED",
   "preview_url": "...",
   "firebase_pre_prod_deployed": true | false,
-  "notes": "..."
+  "notes": "...",
+  "reason": "... (only when status is HUMAN_INPUT_REQUIRED)",
+  "question": "... (only when status is HUMAN_INPUT_REQUIRED)",
+  "options": ["..."]
 }}
 """
 
@@ -72,6 +80,11 @@ yourself -- that would be redundant with, and could conflict with, the pipeline 
 already kicked off.
 
 Steps:
+0. If deploying requires a decision outside your remit as a deterministic deploy agent -- \
+   e.g. an ambiguous target environment/alias with no clear default, or a Vercel/Firebase \
+   configuration that looks broken in a way pointing at a real infra/credential/environment \
+   decision rather than a transient, retryable tool error -- do not guess and do not proceed. \
+   Report status HUMAN_INPUT_REQUIRED instead.
 1. If the `gh` CLI is available, check the status of the CI run this push triggered \
    (e.g. `gh run list --branch {pre_prod_branch} --limit 1`, then `gh run watch <id>` if \
    still in progress) and report what it says.
@@ -83,10 +96,13 @@ Steps:
 
 End your response with a fenced ```json block shaped like:
 {{
-  "status": "deployed" | "failed",
+  "status": "deployed" | "failed" | "HUMAN_INPUT_REQUIRED",
   "preview_url": "..." | null,
   "firebase_pre_prod_deployed": true | false,
-  "notes": "..."
+  "notes": "...",
+  "reason": "... (only when status is HUMAN_INPUT_REQUIRED)",
+  "question": "... (only when status is HUMAN_INPUT_REQUIRED)",
+  "options": ["..."]
 }}
 """
 
@@ -313,7 +329,9 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
     return None
 
 
-async def deploy_pre_prod(repo: Path, env: EnvironmentConfig, feature_branch: str) -> AgentResult:
+async def deploy_pre_prod(
+    repo: Path, env: EnvironmentConfig, feature_branch: str, session_id: str | None = None
+) -> AgentResult:
     _sync_branch_to_remote(repo, env.pre_prod_branch)
     error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
     if error:
@@ -341,10 +359,11 @@ async def deploy_pre_prod(repo: Path, env: EnvironmentConfig, feature_branch: st
         max_turns=20,
         allow_prod=False,
         agent_label="Deployment Agent",
+        resume=session_id,
     )
 
 
-async def promote_prod(repo: Path, env: EnvironmentConfig) -> AgentResult:
+async def promote_prod(repo: Path, env: EnvironmentConfig, session_id: str | None = None) -> AgentResult:
     from agentra.agents.git_ops import GitOpError, fetch_ref
 
     _sync_branch_to_remote(repo, env.prod_branch)
@@ -381,4 +400,5 @@ async def promote_prod(repo: Path, env: EnvironmentConfig) -> AgentResult:
         max_turns=20,
         allow_prod=True,
         agent_label="Deployment Agent",
+        resume=session_id,
     )

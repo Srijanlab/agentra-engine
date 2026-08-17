@@ -55,7 +55,9 @@ def test_shipped_features_reads_from_github(tmp_path, monkeypatch):
             "feature": "Dark mode",
             "commit_sha": "abc1234",
             "run_id": "run42",
+            "session_id": None,
             "ts": "2026-08-10T12:00:00Z",
+            "updated_at": None,
             "external_id": "12",
             "html_url": None,
             "status_done": False,
@@ -85,7 +87,9 @@ def test_shipped_features_includes_open_issues_still_awaiting_promotion(tmp_path
             "feature": "Dark mode",
             "commit_sha": "abc1234",
             "run_id": "run42",
+            "session_id": None,
             "ts": None,
+            "updated_at": None,
             "external_id": "12",
             "html_url": None,
             "status_done": False,
@@ -110,7 +114,9 @@ def test_shipped_features_tolerates_a_body_with_no_structured_fields(tmp_path, m
             "feature": "Old feature",
             "commit_sha": None,
             "run_id": None,
+            "session_id": None,
             "ts": "2026-01-01T00:00:00Z",
+            "updated_at": None,
             "external_id": "3",
             "html_url": None,
             "status_done": False,
@@ -123,6 +129,30 @@ def test_shipped_features_returns_empty_without_a_github_remote(tmp_path):
     mem = Memory(repo)
 
     assert mem.shipped_features() == []
+
+
+def test_shipped_features_reads_session_id_from_github(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(github_issues, "list_open_issues", lambda repo_url, labels=None: [])
+    monkeypatch.setattr(
+        github_issues,
+        "list_closed_issues",
+        lambda repo_url, labels=None, limit=30: [
+            {
+                "number": 12,
+                "title": "Dark mode",
+                "body": "Autonomously shipped by agentra.\n\n---\nShipped-Run-ID: run42\nShipped-Session-ID: sess-abc\n",
+                "closed_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+            }
+        ],
+    )
+
+    features = mem.shipped_features()
+
+    assert features[0]["session_id"] == "sess-abc"
+    assert features[0]["updated_at"] == "2026-08-10T12:00:00Z"
 
 
 def test_record_shipped_creates_and_marks_shipped_a_fresh_issue_for_a_self_initiated_feature(tmp_path, monkeypatch):
@@ -155,7 +185,26 @@ def test_record_shipped_creates_and_marks_shipped_a_fresh_issue_for_a_self_initi
     assert "abc1234" in marked["comment"]
     assert "Shipped-Run-ID: run42" in marked["body_suffix"]
     assert "Shipped-Commit: abc1234" in marked["body_suffix"]
+    assert "Shipped-Session-ID:" not in marked["body_suffix"]  # not passed for this call
     assert result == {"issue_number": 99, "board_issue_number": 99}
+
+
+def test_record_shipped_stamps_session_id_when_given(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(github_issues, "list_open_issues", lambda repo_url, labels=None: [])
+    monkeypatch.setattr(github_issues, "create_issue", lambda repo_url, title, body, labels=None: {"number": 99, "title": title, "body": body})
+    marked = {}
+    monkeypatch.setattr(
+        github_issues,
+        "mark_shipped",
+        lambda repo_url, issue_number, comment=None, body_suffix=None: marked.update(body_suffix=body_suffix),
+    )
+
+    mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42", session_id="sess-abc")
+
+    assert "Shipped-Session-ID: sess-abc" in marked["body_suffix"]
 
 
 def test_record_shipped_marks_shipped_the_originating_feature_queue_issue_instead_of_creating_a_new_one(tmp_path, monkeypatch):
@@ -361,3 +410,45 @@ def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch)
     mem.record_shipped("Dark mode")
 
     assert called == []
+
+
+# ── pending_promotion_features(): shipped but not yet in released_features() ──
+
+
+def _shipped_issue(number: int, title: str, session_id: str | None = None, updated_at: str | None = None) -> dict:
+    body = "---\nShipped-Run-ID: run1\n"
+    if session_id:
+        body += f"Shipped-Session-ID: {session_id}\n"
+    return {
+        "number": number, "title": title, "body": body,
+        "labels": ["feature", "agentra", "status:shipped"], "updated_at": updated_at,
+    }
+
+
+def test_pending_promotion_features_excludes_already_released(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "list_open_issues",
+        lambda repo_url, labels=None: [
+            _shipped_issue(1, "Ready to ship", session_id="sess-1"),
+            _shipped_issue(2, "Already released"),
+        ],
+    )
+    monkeypatch.setattr(github_issues, "list_closed_issues", lambda repo_url, labels=None, limit=30: [])
+    mem.record_released("Already released", release_run_id="prior-run")
+
+    pending = mem.pending_promotion_features()
+
+    assert [f["feature"] for f in pending] == ["Ready to ship"]
+    assert pending[0]["session_id"] == "sess-1"
+
+
+def test_pending_promotion_features_returns_empty_when_nothing_shipped(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(github_issues, "list_open_issues", lambda repo_url, labels=None: [])
+    monkeypatch.setattr(github_issues, "list_closed_issues", lambda repo_url, labels=None, limit=30: [])
+
+    assert mem.pending_promotion_features() == []

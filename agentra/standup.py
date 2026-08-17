@@ -43,31 +43,7 @@ Rules:
 - Ensure the response contains the fenced JSON block and nothing else.
 """
 
-
-def _format_input(
-    app_name: str,
-    yesterday_lines: list[str],
-    shipped_recently: list[dict],
-    known_bugs: list[dict],
-    feature_queue: list[dict],
-    objective: str | None,
-) -> str:
-    lines = [f"Project: {app_name}", "", "=== Yesterday (last 24h of logged activity) ==="]
-    lines.extend(yesterday_lines or ["(none)"])
-    lines += ["", "=== Yesterday (last 24h of shipped features) ==="]
-    for s in shipped_recently:
-        lines.append(f"- {s.get('feature')}" + (f" (commit {s['commit_sha']})" if s.get("commit_sha") else ""))
-    if not shipped_recently:
-        lines.append("(none)")
-    lines += ["", "=== Today's backlog ===", f"Objective: {objective or '(none set)'}"]
-    lines.append(f"Open known bugs ({len(known_bugs)}):")
-    lines.extend([f"- [{b.get('severity')}] {b.get('diagnosis')}" for b in known_bugs] or ["(none)"])
-    lines.append(f"Open feature requests ({len(feature_queue)}):")
-    lines.extend([f"- {f.get('description')}" for f in feature_queue] or ["(none)"])
-    return "\n".join(lines)
-
-
-AGENT_LABELS = {
+AGENT_LABELS: dict[str, str] = {
     "orchestrator": "Orchestrator",
     "codebase": "Codebase Agent",
     "discovery": "Discovery Agent",
@@ -77,6 +53,152 @@ AGENT_LABELS = {
     "feedback": "Analytics Feedback Agent",
     "prod_debug": "Production Debugging Agent",
 }
+
+_IDLE_UPDATES: dict[str, str] = {
+    agent_id: "Yesterday: No activity. Today: Idle." for agent_id in AGENT_LABELS
+}
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_activity_section(yesterday_lines: list[str]) -> list[str]:
+    lines = ["=== Yesterday (last 24h of logged activity) ==="]
+    lines.extend(yesterday_lines or ["(none)"])
+    return lines
+
+
+def _format_shipped_section(shipped_recently: list[dict]) -> list[str]:
+    lines = ["=== Yesterday (last 24h of shipped features) ==="]
+    for s in shipped_recently:
+        suffix = f" (commit {s['commit_sha']})" if s.get("commit_sha") else ""
+        lines.append(f"- {s.get('feature')}{suffix}")
+    if not shipped_recently:
+        lines.append("(none)")
+    return lines
+
+
+def _format_backlog_section(
+    objective: str | None,
+    known_bugs: list[dict],
+    feature_queue: list[dict],
+) -> list[str]:
+    lines = [
+        "=== Today's backlog ===",
+        f"Objective: {objective or '(none set)'}",
+        f"Open known bugs ({len(known_bugs)}):",
+    ]
+    lines.extend([f"- [{b.get('severity')}] {b.get('diagnosis')}" for b in known_bugs] or ["(none)"])
+    lines.append(f"Open feature requests ({len(feature_queue)}):")
+    lines.extend([f"- {f.get('description')}" for f in feature_queue] or ["(none)"])
+    return lines
+
+
+def _format_input(
+    app_name: str,
+    yesterday_lines: list[str],
+    shipped_recently: list[dict],
+    known_bugs: list[dict],
+    feature_queue: list[dict],
+    objective: str | None,
+) -> str:
+    lines: list[str] = [f"Project: {app_name}", ""]
+    lines += _format_activity_section(yesterday_lines)
+    lines += [""]
+    lines += _format_shipped_section(shipped_recently)
+    lines += [""]
+    lines += _format_backlog_section(objective, known_bugs, feature_queue)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Memory extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _collect_shipped_since(mem: Memory, since: dt.datetime) -> list[dict]:
+    result: list[dict] = []
+    for s in mem.shipped_features():
+        ts = s.get("ts")
+        if not ts:
+            continue
+        try:
+            shipped_ts = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if shipped_ts >= since:
+                result.append(s)
+        except Exception:
+            pass
+    return result
+
+
+def _extract_memory_context(
+    mem: Memory, window_hours: int
+) -> tuple[list[str], list[dict], list[dict], list[dict], str | None]:
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=window_hours)
+    yesterday_lines = mem.recent_log_lines(since)
+    shipped_recently = _collect_shipped_since(mem, since)
+    known_bugs = mem.known_bugs()
+    feature_queue = mem.feature_queue()
+    objective = mem.get_objective()
+    return yesterday_lines, shipped_recently, known_bugs, feature_queue, objective
+
+
+def _is_empty_context(
+    yesterday_lines: list[str],
+    shipped_recently: list[dict],
+    known_bugs: list[dict],
+    feature_queue: list[dict],
+    objective: str | None,
+) -> bool:
+    return not any([yesterday_lines, shipped_recently, known_bugs, feature_queue, objective])
+
+
+# ---------------------------------------------------------------------------
+# LLM response parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_updates_from_result(result) -> dict[str, str]:
+    from agentra.agents.base import extract_json_block
+
+    json_data = extract_json_block(result.text) if result.ok and result.text else None
+    if json_data and "updates" in json_data:
+        return json_data["updates"]
+
+    # Model didn't return the expected shape -- surface whatever it said
+    # under the Orchestrator rather than silently dropping it.
+    return {
+        "orchestrator": result.text
+        if result.ok and result.text
+        else f"(standup generation failed: {result.text or 'no output'})"
+    }
+
+
+# ---------------------------------------------------------------------------
+# Report formatting & persistence
+# ---------------------------------------------------------------------------
+
+
+def _format_report(app_name: str, updates_json: dict[str, str]) -> str:
+    lines: list[str] = [f"# Daily Standup - {app_name}", ""]
+    for agent_id, text in updates_json.items():
+        lines.append(f"## {AGENT_LABELS.get(agent_id, agent_id.capitalize())}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _persist_standup(app_name: str, updates_json: dict[str, str], report: str) -> None:
+    date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    chat_store.record_standup(app_name, date_str, report)
+    chat_store.record_standup_updates_json(app_name, date_str, updates_json)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 async def generate_standup_updates(
@@ -88,32 +210,15 @@ async def generate_standup_updates(
     a persisted markdown report) so server.py's live standup channel can
     post each agent's line as its own message without a second LLM call or
     a copy of this prompt-building logic."""
-    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=window_hours)
-    yesterday_lines = mem.recent_log_lines(since)
+    yesterday_lines, shipped_recently, known_bugs, feature_queue, objective = (
+        _extract_memory_context(mem, window_hours)
+    )
 
-    shipped_recently = []
-    for s in mem.shipped_features():
-        ts = s.get("ts")
-        if not ts:
-            continue
-        try:
-            shipped_ts = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if shipped_ts >= since:
-                shipped_recently.append(s)
-        except Exception:
-            pass
-
-    known_bugs = mem.known_bugs()
-    feature_queue = mem.feature_queue()
-    objective = mem.get_objective()
-
-    from agentra.agents.base import extract_json_block
-
-    if not yesterday_lines and not shipped_recently and not known_bugs and not feature_queue and not objective:
+    if _is_empty_context(yesterday_lines, shipped_recently, known_bugs, feature_queue, objective):
         # Nothing at all to report -- don't spend an LLM call manufacturing
         # prose around an empty project. Same rule the model itself is
         # given below: no activity/backlog means say so plainly.
-        return {agent_id: "Yesterday: No activity. Today: Idle." for agent_id in AGENT_LABELS}
+        return _IDLE_UPDATES
 
     prompt = _format_input(app_name, yesterday_lines, shipped_recently, known_bugs, feature_queue, objective)
     result = await run_agent(
@@ -124,16 +229,12 @@ async def generate_standup_updates(
         max_turns=1,
     )
 
-    json_data = extract_json_block(result.text) if result.ok and result.text else None
-    if json_data and "updates" in json_data:
-        return json_data["updates"]
-
-    # Model didn't return the expected shape -- surface whatever it said
-    # under the Orchestrator rather than silently dropping it.
-    return {"orchestrator": result.text if result.ok and result.text else f"(standup generation failed: {result.text or 'no output'})"}
+    return _parse_updates_from_result(result)
 
 
-async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24) -> str:
+async def run_standup(
+    repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24
+) -> str:
     """Generate today's standup for one app and persist it server-side
     (chat_store.py, AGENTRA_HOME -- not the target repo's own .agentra/,
     which is git-committed to that repo's history and not where a chat
@@ -143,17 +244,8 @@ async def run_standup(repo: Path, app_name: str, mem: Memory | None = None, wind
         mem = Memory(repo)
 
     updates_json = await generate_standup_updates(repo, app_name, mem, window_hours)
-
-    lines = [f"# Daily Standup - {app_name}", ""]
-    for agent_id, text in updates_json.items():
-        lines.append(f"## {AGENT_LABELS.get(agent_id, agent_id.capitalize())}")
-        lines.append(text)
-        lines.append("")
-    report = "\n".join(lines).strip()
-
-    date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
-    chat_store.record_standup(app_name, date_str, report)
-    chat_store.record_standup_updates_json(app_name, date_str, updates_json)
+    report = _format_report(app_name, updates_json)
+    _persist_standup(app_name, updates_json, report)
 
     return report
 

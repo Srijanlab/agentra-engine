@@ -551,3 +551,65 @@ def test_get_in_progress_run_id_returns_none_without_a_marker_at_all(monkeypatch
     monkeypatch.setattr(github_issues.httpx, "get", fake_get)
 
     assert github_issues.get_in_progress_run_id("https://github.com/acme/app.git", 13) is None
+
+
+def test_record_in_progress_branch_includes_session_id_when_given(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(json=json)
+        return _fake_response({})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.record_in_progress_branch(
+        "https://github.com/acme/app.git", 13, "dev/abc123", "run42", "sess-abc"
+    )
+
+    assert captured["json"] == {"body": "In-Progress-Branch: dev/abc123\nRun-ID: run42\nSession-ID: sess-abc"}
+
+
+def test_record_in_progress_branch_omits_session_id_when_not_given(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(json=json)
+        return _fake_response({})
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    github_issues.record_in_progress_branch("https://github.com/acme/app.git", 13, "dev/abc123", "run42")
+
+    assert captured["json"] == {"body": "In-Progress-Branch: dev/abc123\nRun-ID: run42"}
+
+
+def test_get_in_progress_session_id_returns_the_session_id_from_the_most_recent_marker(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return _fake_response(
+            [
+                {"body": "In-Progress-Branch: dev/first\nRun-ID: run1\nSession-ID: sess-1"},
+                {"body": "In-Progress-Branch: dev/second\nRun-ID: run2\nSession-ID: sess-2"},
+            ]
+        )
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    assert github_issues.get_in_progress_session_id("https://github.com/acme/app.git", 13) == "sess-2"
+
+
+def test_get_in_progress_session_id_returns_none_when_the_marker_has_no_session_id(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return _fake_response([{"body": "In-Progress-Branch: dev/first\nRun-ID: run1"}])
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    assert github_issues.get_in_progress_session_id("https://github.com/acme/app.git", 13) is None
+
+
+def test_get_in_progress_session_id_returns_none_without_a_marker_at_all(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return _fake_response([{"body": "unrelated comment"}])
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+
+    assert github_issues.get_in_progress_session_id("https://github.com/acme/app.git", 13) is None

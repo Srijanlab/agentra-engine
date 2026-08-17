@@ -512,7 +512,9 @@ def test_record_in_progress_branch_delegates_to_github_issues(tmp_path, monkeypa
     monkeypatch.setattr(
         github_issues,
         "record_in_progress_branch",
-        lambda repo_url, issue_number, branch, run_id=None: captured.update(issue_number=issue_number, branch=branch, run_id=run_id),
+        lambda repo_url, issue_number, branch, run_id=None, session_id=None: captured.update(
+            issue_number=issue_number, branch=branch, run_id=run_id, session_id=session_id
+        ),
     )
     labeled = {}
     monkeypatch.setattr(
@@ -521,8 +523,28 @@ def test_record_in_progress_branch_delegates_to_github_issues(tmp_path, monkeypa
 
     mem.record_in_progress_branch(13, "dev/abc123-fix-sort-order", "run42")
 
-    assert captured == {"issue_number": 13, "branch": "dev/abc123-fix-sort-order", "run_id": "run42"}
+    assert captured == {"issue_number": 13, "branch": "dev/abc123-fix-sort-order", "run_id": "run42", "session_id": None}
     assert labeled == {"issue_number": 13, "labels": ["status:in-progress"]}
+
+
+def test_record_in_progress_branch_delegates_session_id_to_github_issues(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    captured = {}
+    monkeypatch.setattr(
+        github_issues,
+        "record_in_progress_branch",
+        lambda repo_url, issue_number, branch, run_id=None, session_id=None: captured.update(
+            issue_number=issue_number, branch=branch, run_id=run_id, session_id=session_id
+        ),
+    )
+    monkeypatch.setattr(github_issues, "add_labels", lambda repo_url, issue_number, labels: None)
+
+    mem.record_in_progress_branch(13, "dev/abc123-fix-sort-order", "run42", "sess-abc")
+
+    assert captured == {
+        "issue_number": 13, "branch": "dev/abc123-fix-sort-order", "run_id": "run42", "session_id": "sess-abc",
+    }
 
 
 def test_record_in_progress_branch_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
@@ -717,3 +739,43 @@ def test_resume_run_id_for_returns_none_for_a_non_numeric_id(tmp_path, monkeypat
     )
 
     assert mem.resume_run_id_for("not-a-number") is None
+
+
+def test_resume_session_id_for_delegates_to_github_issues(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues,
+        "get_in_progress_session_id",
+        lambda repo_url, issue_number: "sess-abc" if issue_number == 13 else None,
+    )
+
+    assert mem.resume_session_id_for("13") == "sess-abc"
+    assert mem.resume_session_id_for("99") is None
+
+
+def test_resume_session_id_for_returns_none_for_a_non_numeric_id(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_in_progress_session_id", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call GitHub"))
+    )
+
+    assert mem.resume_session_id_for("not-a-number") is None
+
+
+def test_resume_session_id_for_returns_none_without_a_github_remote(tmp_path):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+
+    assert mem.resume_session_id_for("13") is None
+
+
+def test_resume_session_id_for_returns_none_when_github_call_fails(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_in_progress_session_id", lambda *a, **k: (_ for _ in ()).throw(github_issues.GitHubIssuesError("boom"))
+    )
+
+    assert mem.resume_session_id_for("13") is None

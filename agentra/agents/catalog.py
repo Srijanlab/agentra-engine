@@ -29,6 +29,7 @@ class ToolPermission(TypedDict):
 class AgentMeta(TypedDict):
     skills: list[str]
     tools: list[ToolPermission]
+    capability: str
 
 
 _TOOL_PERMISSION = {
@@ -64,11 +65,13 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Deploys to pre-prod and independently verifies the live deployment",
             "Assesses whether a shipped feature is actually measurable",
             "Can spawn a one-off custom sub-agent for tasks outside the standard pipeline",
+            "Calls the Architecture Review Agent first for architecturally significant features (schema/API/cross-cutting changes)",
         ],
         "tools": _delegated(
             "understand_codebase",
             "check_backlog",
             "discover_opportunities",
+            "assess_design_impact",
             "implement_feature",
             "run_local_tests",
             "deploy_pre_prod",
@@ -76,6 +79,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "assess_feedback",
             "spawn_custom_agent",
         ),
+        "capability": "orchestration",
     },
     "codebase": {
         "skills": [
@@ -85,6 +89,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Strictly read-only -- never proposes or makes edits",
         ],
         "tools": _tools("Read", "Glob", "Grep"),
+        "capability": "analysis",
     },
     "discovery": {
         "skills": [
@@ -95,6 +100,17 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Uses WebSearch to check comparable products before citing a competitor gap",
         ],
         "tools": _tools("Read", "Glob", "Grep", "WebSearch"),
+        "capability": "product_discovery",
+    },
+    "architecture_review": {
+        "skills": [
+            "Assesses architectural blast radius of a proposed feature before it's built",
+            "Flags schema changes, new API surfaces, and cross-cutting refactors as higher risk",
+            "Names concrete concerns rather than a generic risk score",
+            "Strictly read-only -- never proposes or makes edits, purely advisory to the Orchestrator",
+        ],
+        "tools": _tools("Read", "Glob", "Grep"),
+        "capability": "architecture_review",
     },
     "implementation": {
         "skills": [
@@ -104,6 +120,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Commits its change once tests pass -- never pushes, never opens a PR",
         ],
         "tools": _tools("Read", "Write", "Edit", "Glob", "Grep", "Bash"),
+        "capability": "coding",
     },
     "testing": {
         "skills": [
@@ -113,6 +130,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Never modifies source files -- reports bugs rather than patching them",
         ],
         "tools": _tools("Read", "Bash", "Glob", "Grep"),
+        "capability": "testing",
     },
     "deployment": {
         "skills": [
@@ -122,6 +140,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Interprets vercel/firebase CLI output and captures preview URLs",
         ],
         "tools": _tools("Read", "Bash", "Glob", "Grep"),
+        "capability": "deployment",
     },
     "feedback": {
         "skills": [
@@ -130,6 +149,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Flags missing instrumentation as a real gap rather than skipping it",
         ],
         "tools": _tools("Read", "Glob", "Grep"),
+        "capability": "analytics",
     },
     "prod_debug": {
         "skills": [
@@ -139,6 +159,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Strictly read-only against production -- never deploys or modifies prod config",
         ],
         "tools": _tools("Read", "Bash", "Glob", "Grep"),
+        "capability": "debugging",
     },
     "custom": {
         "skills": [
@@ -147,6 +168,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Never has production access, regardless of which tools it's granted",
         ],
         "tools": _tools("Read", "Glob", "Grep"),
+        "capability": "general",
     },
 }
 

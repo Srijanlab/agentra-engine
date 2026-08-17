@@ -118,7 +118,7 @@ def test_implement_feature_records_in_progress_branch_when_resolving_a_known_bug
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     marker_calls = []
-    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None: marker_calls.append((issue_number, branch, run_id)))
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None, session_id=None: marker_calls.append((issue_number, branch, run_id)))
 
     result = asyncio.run(
         _tool(session, "implement_feature").handler(
@@ -140,7 +140,7 @@ def test_implement_feature_records_in_progress_branch_on_the_parent_when_continu
     monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 21, "board_issue_number": 20})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     marker_calls = []
-    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None: marker_calls.append((issue_number, branch, run_id)))
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None, session_id=None: marker_calls.append((issue_number, branch, run_id)))
 
     asyncio.run(
         _tool(session, "implement_feature").handler(
@@ -163,7 +163,7 @@ def test_implement_feature_records_in_progress_branch_even_when_implementation_f
     monkeypatch.setattr(brain.implementation, "run", fake_run)
     monkeypatch.setattr(session.mem, "record_failure", lambda *a, **k: None)
     marker_calls = []
-    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None: marker_calls.append((issue_number, branch, run_id)))
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None, session_id=None: marker_calls.append((issue_number, branch, run_id)))
 
     result = asyncio.run(
         _tool(session, "implement_feature").handler(
@@ -245,6 +245,103 @@ def test_implement_feature_links_the_commit_even_when_implementation_fails(tmp_p
     assert commit_calls == [(13, real_sha)]
 
 
+# -- implement_feature routes HUMAN_INPUT_REQUIRED through record_known_bug ----------
+
+
+def test_implement_feature_routes_human_input_required_through_record_known_bug(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+
+    async def fake_run(*a, **k):
+        return _fake_impl_result(
+            json_data={
+                "feature": "add_sso",
+                "status": "HUMAN_INPUT_REQUIRED",
+                "reason": "Two SSO providers are equally plausible with no clear default.",
+                "question": "Which SSO provider should we integrate?",
+                "options": ["Okta", "Auth0"],
+            }
+        )
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    known_bug_calls = []
+    monkeypatch.setattr(
+        session.mem,
+        "record_known_bug",
+        lambda run_id, severity, diagnosis, proposed_fix, **k: known_bug_calls.append((severity, diagnosis, k)),
+    )
+
+    result = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "add SSO", "resolves_origin": "", "resolves_id": "", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert result.get("is_error") is True
+    assert len(known_bug_calls) == 1
+    severity, diagnosis, kwargs = known_bug_calls[0]
+    assert kwargs["needs_human"] is True
+    assert kwargs.get("blocking_agentra", False) is False
+    assert "Two SSO providers are equally plausible" in diagnosis
+    assert "Which SSO provider should we integrate?" in diagnosis
+    assert "Okta" in diagnosis and "Auth0" in diagnosis
+
+
+def test_implement_feature_human_input_required_still_records_in_progress_branch_and_commit(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    subprocess.run(["git", "init", "-b", "main", str(session.repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "config", "user.email", "test@example.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "config", "user.name", "Test"], check=True, capture_output=True)
+    (session.repo / "file.txt").write_text("content\n")
+    subprocess.run(["git", "-C", str(session.repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(session.repo), "commit", "-m", "partial work"], check=True, capture_output=True)
+    real_sha = subprocess.run(
+        ["git", "-C", str(session.repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    async def fake_run(*a, **k):
+        return _fake_impl_result(json_data={"feature": "x", "status": "HUMAN_INPUT_REQUIRED", "reason": "needs a call"})
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_known_bug", lambda *a, **k: None)
+    marker_calls = []
+    monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None, session_id=None: marker_calls.append((issue_number, branch, run_id)))
+    commit_calls = []
+    monkeypatch.setattr(session.mem, "record_commit", lambda issue_number, commit_sha: commit_calls.append((issue_number, commit_sha)))
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "fix it", "resolves_origin": "known_bug", "resolves_id": "13", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert marker_calls == [(13, session.feature_branch, session.run_id)]
+    assert commit_calls == [(13, real_sha)]
+
+
+def test_implement_feature_human_input_required_does_not_touch_the_failure_counter(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+
+    async def fake_run(*a, **k):
+        return _fake_impl_result(json_data={"feature": "x", "status": "HUMAN_INPUT_REQUIRED", "reason": "needs a call"})
+
+    monkeypatch.setattr(brain.implementation, "run", fake_run)
+    monkeypatch.setattr(session.mem, "record_known_bug", lambda *a, **k: None)
+    monkeypatch.setattr(
+        session.mem, "record_failure", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called"))
+    )
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "my own idea", "resolves_origin": "", "resolves_id": "", "sub_feature_of": "", "more_parts_expected": False}
+        )
+    )
+
+    assert session.tool_failure_counts.get("implement_feature", 0) == 0
+
+
 def test_implement_feature_does_not_record_a_marker_for_a_self_initiated_idea(tmp_path, monkeypatch):
     # No resolves_id/sub_feature_of -- no backlog entry exists to attach a marker to.
     _patch_registry(monkeypatch)
@@ -274,7 +371,7 @@ def test_implement_feature_resume_branch_becomes_the_session_feature_branch(tmp_
     session = _session(tmp_path)
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 
@@ -302,7 +399,7 @@ def test_implement_feature_resume_branch_ignored_on_a_later_call_this_run(tmp_pa
     session = _session(tmp_path, feature_branch="dev/already-set")
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec=""):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 
