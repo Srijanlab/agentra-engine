@@ -194,6 +194,33 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("mark_status_done: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
+    def record_failure_on_issue(self, issue_number: int, run_id: str, step_name: str, text: str) -> None:
+        """Like record_failure, but for a failure that happened while working
+        an already-known tracking issue (resolves_id/sub_feature_of was set on
+        the implement_feature call) -- posts the failure as a comment on THAT
+        issue instead of filing a brand-new, disconnected "X failed during an
+        autonomous cycle" bug report.
+
+        Without this, a failure mid-resume (e.g. hitting the cost cap while
+        continuing issue #2's work) produced a second, unrelated issue with no
+        reference back to #2 at all -- a human looking at #2 would have no way
+        to know it had failed, and a human looking at the new generic bug
+        report would have no idea it was actually about #2's in-progress work.
+        Reported as: agent creating a new issue for the same problem while
+        working in another issue."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("record_failure_on_issue: %s has no github.com remote -- failure was NOT recorded anywhere", self.repo)
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.add_comment(
+                repo_url, issue_number, f"{step_name} failed (run {run_id}) while working this issue:\n\n{text[:2000]}"
+            )
+        except Exception:
+            logger.warning("record_failure_on_issue: failed to comment on issue #%s on %s", issue_number, repo_url, exc_info=True)
+
     def record_commit(self, issue_number: int, commit_sha: str) -> None:
         """Links commit_sha on this issue — a tracking issue's work can span
         more than one commit; this is the only place the full history is visible."""

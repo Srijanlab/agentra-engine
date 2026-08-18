@@ -338,6 +338,17 @@ def _tools_for(session: OrchestratorSession) -> list:
                 needs_human=True,
                 title=f"Human input required: {feature_name}",
             )
+            # Also note it on the tracking issue itself (if this call was
+            # resuming/working one) -- the needs_human issue above is a
+            # separate, dedicated item (dashboard/labels treat needs_human
+            # specially), but a human looking at THIS issue should still see
+            # that it's stalled and why, not just silently stop accumulating
+            # progress comments with no explanation.
+            if tracking_issue is not None:
+                session.mem.record_failure_on_issue(
+                    tracking_issue, session.run_id, "implementation",
+                    f"Stalled, needs human input: {diagnosis}",
+                )
             session.note(f"implement_feature: human input required -- {reason[:200]}", ok=None)
             return {
                 "content": [{"type": "text", "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human); moving on to other work this cycle."}],
@@ -345,7 +356,10 @@ def _tools_for(session: OrchestratorSession) -> list:
             }
 
         if not impl.ok:
-            session.mem.record_failure(session.run_id, "implementation", impl.text)
+            if tracking_issue is not None:
+                session.mem.record_failure_on_issue(tracking_issue, session.run_id, "implementation", impl.text)
+            else:
+                session.mem.record_failure(session.run_id, "implementation", impl.text)
             session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
         session.record_success("implement_feature")
