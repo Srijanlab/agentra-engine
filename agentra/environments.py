@@ -280,6 +280,20 @@ class SelfHostedVMConfig:
 _SELF_HOSTED_VM_CONFIG_PATH = Path(".agentra") / "memory" / "architecture" / "deployment.md"
 _SELF_HOSTED_VM_CONFIG_BLOCK_RE = re.compile(r"```ya?ml\s*\n(.*?)```", re.DOTALL)
 
+# self_hosted_vm is only ever safe for a repo that's actually co-located with
+# the orchestrator process on the same machine: /var/run/docker.sock grants
+# access to THIS host's Docker daemon only, never a different app's VM. If
+# some other app's repo ever ended up with a deployment.md (a copy-paste
+# mistake, a misconfigured autonomous cycle), running its container/network
+# names through THIS host's docker.sock wouldn't fail loudly -- it would
+# silently operate on agentra's own VM's resources under that other app's
+# name, since that's the only daemon reachable at all. An allowlist, not
+# just "does this file exist", is the actual safety boundary here -- until a
+# real remote-Docker-context/SSH execution path exists for other apps.
+_SELF_HOSTED_VM_ALLOWED_REPO_URLS = {
+    "https://github.com/Srijanlab/srijanlab-agentra.git",
+}
+
 
 def load_self_hosted_vm_config(repo: Path) -> SelfHostedVMConfig | None:
     """Reads <repo>/.agentra/memory/architecture/deployment.md's fenced YAML
@@ -288,11 +302,19 @@ def load_self_hosted_vm_config(repo: Path) -> SelfHostedVMConfig | None:
     JSON; here, a git-committed YAML block, since these values belong to the
     repo's own history, not a mutable issue thread).
 
-    None if the file doesn't exist, or its config block is missing/malformed
-    -- callers (deploy_pre_prod_self_hosted, promote_prod_self_hosted) must
-    treat that as 'self_hosted_vm strategy selected but not configured for
-    this repo' and report a clear error, never fall back to guessing another
-    app's VM details."""
+    None if the file doesn't exist, its config block is missing/malformed, or
+    repo isn't on _SELF_HOSTED_VM_ALLOWED_REPO_URLS -- callers
+    (deploy_pre_prod_self_hosted, promote_prod_self_hosted) must treat that as
+    'self_hosted_vm strategy selected but not usable for this repo' and
+    report a clear error, never fall back to guessing another app's VM
+    details."""
+    if _repo_url(repo) not in _SELF_HOSTED_VM_ALLOWED_REPO_URLS:
+        logger.warning(
+            "load_self_hosted_vm_config: %s is not on the self_hosted_vm allowlist -- "
+            "this strategy only works for a repo co-located with the orchestrator's own "
+            "Docker daemon, see _SELF_HOSTED_VM_ALLOWED_REPO_URLS's comment", repo,
+        )
+        return None
     path = repo / _SELF_HOSTED_VM_CONFIG_PATH
     if not path.exists():
         return None
