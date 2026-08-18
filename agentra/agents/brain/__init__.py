@@ -22,6 +22,7 @@ from agentra.agents import architecture_review, codebase, deployment, discovery,
 from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.brain.tools import _file_incidental_findings, _format_spec, _tools_for, MAX_SELF_HEAL_ATTEMPTS
 from agentra.agents.brain.prompts import SYSTEM_PROMPT
+from agentra.agents.safety import make_hooks
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
 
@@ -201,7 +202,28 @@ async def run_autonomous_cycle(
         cwd=str(repo),
         system_prompt=SYSTEM_PROMPT.format(objective=objective),
         mcp_servers={"agentra_brain": server},
+        # tools=[] disables every built-in tool (Bash, Read, Write, WebSearch,
+        # ToolSearch, Task, ...) -- confirmed live (run 26bf7dee, 2026-08-18)
+        # that allowed_tools alone does NOT restrict availability, only
+        # auto-approval: per claude_agent_sdk's own docs, "to restrict which
+        # tools are available at all, use `tools`", and permission_mode=
+        # "bypassPermissions" auto-approves every tool, not just the ones
+        # listed in allowed_tools. Without this, the orchestrator's system
+        # prompt claim ("you do not have Read/Write/Edit/Bash yourself...
+        # production is deliberately not reachable... under any
+        # circumstance") was pure prose with no enforcement -- that live run
+        # minted its own GitHub App installation token via raw Bash/python3
+        # and ran unrestricted git/gh/curl commands, entirely outside the
+        # ten sanctioned MCP tools and their audit trail. This does not
+        # affect the MCP server's own tools (mcp_servers/allowed_tools is a
+        # separate mechanism from the built-in --tools flag this maps to).
+        tools=[],
         allowed_tools=allowed_tools,
+        # Defense-in-depth to match every other agent (agents/base.py's
+        # run_agent already does this) -- belt-and-suspenders in case a
+        # future change reintroduces a built-in tool here; also gives
+        # denials a durable audit-trail line via safety.py's _record_denial.
+        hooks=make_hooks(allow_prod=False),
         permission_mode="bypassPermissions",
         max_turns=max_turns,
     )

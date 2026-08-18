@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, ToolResultBlock, UserMessage, query
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, ToolResultBlock, ToolUseBlock, UserMessage, query
 
 from agentra.agents.base import single_prompt_stream
 from agentra.agents.safety import make_hooks
@@ -48,6 +48,30 @@ async def _run_and_get_tool_result(prompt: str, allow_prod: bool) -> ToolResultB
                     if isinstance(block, ToolResultBlock):
                         return block
         return None
+
+
+async def _run_and_collect_tool_use_names(prompt: str, *, tools: list[str]) -> set[str]:
+    """Like _run_and_get_tool_result, but collects every ToolUseBlock's tool
+    name across the whole turn -- what's needed to prove a tool was never
+    even OFFERED (tools=[]), as opposed to offered-but-denied (the hook
+    cases above)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        options = ClaudeAgentOptions(
+            cwd=tmp,
+            system_prompt="You are a test agent. Follow the user's instructions exactly.",
+            tools=tools,
+            allowed_tools=["Bash"],
+            permission_mode="bypassPermissions",
+            hooks=make_hooks(allow_prod=False),
+            max_turns=5,
+        )
+        names: set[str] = set()
+        async for message in query(prompt=single_prompt_stream(prompt), options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        names.add(block.name)
+        return names
 
 
 async def main() -> None:
@@ -91,6 +115,20 @@ async def main() -> None:
         failures.append(f"Case 3 FAILED: expected the harmless echo to run under allow_prod=True, got is_error={result.is_error!r} content={result.content!r}")
     else:
         print("Case 3 PASS: a harmless command under allow_prod=True actually executed (hook doesn't over-block)")
+
+    # Case 4: tools=[] (agents/brain/__init__.py's run_autonomous_cycle setting)
+    # must mean Bash is never even offered as a callable tool -- not merely
+    # denied by the hook. This is the actual fix for the run 26bf7dee gap:
+    # allowed_tools=["Bash"] alone (Cases 1-3's setup, minus tools=[]) was
+    # proven live to still make Bash fully callable under bypassPermissions.
+    names = await _run_and_collect_tool_use_names(
+        'Run this exact single bash command in one Bash tool call and report what it printed: echo "SHOULD_NEVER_RUN"',
+        tools=[],
+    )
+    if "Bash" in names:
+        failures.append(f"Case 4 FAILED: Bash was called despite tools=[] -- tool_use names seen: {names!r}")
+    else:
+        print(f"Case 4 PASS: tools=[] means Bash was never offered as a tool at all (tool_use names seen: {names!r})")
 
     if failures:
         print("\nFAILURES:")
