@@ -30,9 +30,10 @@ from pathlib import Path
 
 import pytest
 
+from agentra import environments
 from agentra.agents import deployment, git_ops
 from agentra.agents.base import AgentResult
-from agentra.environments import EnvironmentConfig
+from agentra.environments import EnvironmentConfig, SelfHostedVMConfig
 
 PROD_SENTINEL = "prod-do-not-touch"  # a branch name deploy_pre_prod must never reference
 
@@ -370,7 +371,22 @@ def test_deploy_pre_prod_merge_conflict_aborts_without_deploying_or_touching_pro
 # no run_agent call at all -- deterministic docker CLI plumbing only ---------------
 
 
-def _fake_docker_run(calls: list, *, build_ok=True, run_ok=True, health_ok=True):
+def _self_hosted_config(**overrides) -> SelfHostedVMConfig:
+    # Deliberately NOT named "agentra" anywhere -- proves deploy_pre_prod_self_hosted/
+    # promote_prod_self_hosted derive every identifier from this config, not
+    # from any hardcoded agentra-specific constant.
+    defaults = dict(
+        vm_name="widget-vm", vm_zone="us-east1-b", gcp_project="widget-prod",
+        image_repo="registry.example.com/acme/widget-app",
+        anchor_container="widget-proxy", app_network="widget-app-net",
+        preprod_network="widget-preprod-net", data_mount="/mnt/disks/widget-data",
+        firestore_project="widget-prod",
+    )
+    defaults.update(overrides)
+    return SelfHostedVMConfig(**defaults)
+
+
+def _fake_docker_run(calls: list, *, build_ok=True, run_ok=True, health_ok=True, inspect_env=None):
     def _run(args, **kwargs):
         calls.append(list(args))
         import subprocess as _subprocess
@@ -381,6 +397,12 @@ def _fake_docker_run(calls: list, *, build_ok=True, run_ok=True, health_ok=True)
             return _subprocess.CompletedProcess(args, 0 if run_ok else 1, stdout="", stderr="" if run_ok else "run failed")
         if args[:2] == ["docker", "exec"]:
             return _subprocess.CompletedProcess(args, 0 if health_ok else 1, stdout="", stderr="")
+        if args[:2] == ["docker", "inspect"]:
+            import json as _json
+
+            return _subprocess.CompletedProcess(args, 0, stdout=_json.dumps(inspect_env or []), stderr="")
+        if args[:1] == ["stat"]:
+            return _subprocess.CompletedProcess(args, 0, stdout="999\n", stderr="")
         # network create/connect, rm -f, rmi -- always "succeed" (best-effort/idempotent in the real code)
         return _subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
@@ -395,10 +417,12 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
     feature_branch = "dev/1234-feature"
     repo = _setup_pre_prod_repo(tmp_path, feature_branch)
     env = _env()
+    config = _self_hosted_config()
 
     pull_calls, push_calls, docker_calls = [], [], []
     monkeypatch.setattr(git_ops, "pull_latest", _guarded_pull_latest(pull_calls, env.pre_prod_branch))
     monkeypatch.setattr(git_ops, "push_branch", _guarded_push_branch(push_calls, env.pre_prod_branch))
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
     monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
 
@@ -406,22 +430,39 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
 
     assert result.ok is True
     assert result.json_data["status"] == "deployed"
-    assert result.json_data["preview_url"] == "http://agentra-preprod-run123:8080"
+    assert result.json_data["preview_url"] == "http://widget-app-preprod-run123:8080"
     assert pull_calls == [env.pre_prod_branch]
     assert push_calls == [env.pre_prod_branch]
     assert PROD_SENTINEL not in pull_calls and PROD_SENTINEL not in push_calls
 
     build_calls = [c for c in docker_calls if c[:2] == ["docker", "build"]]
-    assert build_calls == [["docker", "build", "-t", "agentra-preprod:run123", str(repo)]]
+    assert build_calls == [["docker", "build", "-t", "widget-app-preprod:run123", str(repo)]]
     run_calls = [c for c in docker_calls if c[:2] == ["docker", "run"]]
     assert len(run_calls) == 1
     run_cmd = run_calls[0]
-    assert "agentra-preprod-run123" in run_cmd
-    assert "agentra-preprod-net" in run_cmd
+    assert "widget-app-preprod-run123" in run_cmd
+    assert "widget-preprod-net" in run_cmd
     assert "--memory=1g" in run_cmd and "--cpus=1" in run_cmd
-    assert "AGENTRA_FIRESTORE_PROJECT=agentra-prod" in run_cmd
+    assert "AGENTRA_FIRESTORE_PROJECT=widget-prod" in run_cmd
+    assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude:ro" in run_cmd
     network_connect_calls = [c for c in docker_calls if c[:3] == ["docker", "network", "connect"]]
-    assert network_connect_calls == [["docker", "network", "connect", "agentra-preprod-net", "agentra"]]
+    assert network_connect_calls == [["docker", "network", "connect", "widget-preprod-net", "widget-proxy"]]
+
+
+def test_deploy_pre_prod_self_hosted_reports_a_clear_error_when_repo_has_no_config(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: None)
+    monkeypatch.setattr(
+        git_ops, "pull_latest", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not touch git without config"))
+    )
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert "deployment.md" in result.text
 
 
 def test_deploy_pre_prod_self_hosted_returns_error_when_build_fails(tmp_path, monkeypatch):
@@ -432,6 +473,7 @@ def test_deploy_pre_prod_self_hosted_returns_error_when_build_fails(tmp_path, mo
     docker_calls = []
     monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
     monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, build_ok=False))
     monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
 
@@ -451,6 +493,7 @@ def test_deploy_pre_prod_self_hosted_returns_failed_status_when_health_check_nev
     docker_calls = []
     monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
     monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, health_ok=False))
     monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
 
@@ -458,17 +501,122 @@ def test_deploy_pre_prod_self_hosted_returns_failed_status_when_health_check_nev
 
     assert result.ok is False
     assert result.json_data["status"] == "failed"
-    assert result.json_data["preview_url"] == "http://agentra-preprod-run123:8080"
+    assert result.json_data["preview_url"] == "http://widget-app-preprod-run123:8080"
 
 
-def test_teardown_self_hosted_preprod_removes_container_and_image(monkeypatch):
+def test_teardown_self_hosted_preprod_removes_container_and_image(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
     docker_calls = []
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
 
-    deployment.teardown_self_hosted_preprod("run123")
+    deployment.teardown_self_hosted_preprod(repo, "run123")
 
-    assert ["docker", "rm", "-f", "agentra-preprod-run123"] in docker_calls
-    assert ["docker", "rmi", "agentra-preprod:run123"] in docker_calls
+    assert ["docker", "rm", "-f", "widget-app-preprod-run123"] in docker_calls
+    assert ["docker", "rmi", "widget-app-preprod:run123"] in docker_calls
+
+
+def test_teardown_self_hosted_preprod_noops_without_config(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: None)
+    monkeypatch.setattr(
+        deployment.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call docker without config"))
+    )
+
+    deployment.teardown_self_hosted_preprod(repo, "run123")  # must not raise
+
+
+# -- promote_prod_self_hosted: nginx blue/green flip, no run_agent call ------------
+
+
+def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_the_old_container(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    env = _env(prod_branch="prod")
+    config = _self_hosted_config()
+
+    pull_calls, fetch_calls, push_calls, docker_calls = [], [], [], []
+    monkeypatch.setattr(git_ops, "pull_latest", _guarded_pull_latest(pull_calls, env.prod_branch))
+    monkeypatch.setattr(git_ops, "fetch_ref", _guarded_fetch_ref(fetch_calls, env.pre_prod_branch, "beta"))
+    monkeypatch.setattr(git_ops, "push_branch", _guarded_push_branch(push_calls, env.prod_branch))
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+
+    def _run(args, **kwargs):
+        docker_calls.append(list(args))
+        if args[:3] == ["docker", "exec", "widget-proxy"] and "cat" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
+        if args[:2] == ["docker", "build"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+        if args[:1] == ["stat"]:
+            return subprocess.CompletedProcess(args, 0, stdout="999\n", stderr="")
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "exec"] and "curl" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "exec"] and "nginx" in " ".join(args):
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _run)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.promote_prod_self_hosted(repo, env, "run456"))
+
+    assert result.ok is True
+    assert "blue -> green" in result.json_data["notes"]
+    assert pull_calls == [env.prod_branch]
+    assert push_calls == [env.prod_branch]
+
+    run_calls = [c for c in docker_calls if c[:2] == ["docker", "run"]]
+    assert len(run_calls) == 1
+    assert "widget-app-green" in run_calls[0]
+    assert "widget-app-net" in run_calls[0]
+    assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude" in run_calls[0]
+    assert "/mnt/disks/widget-data/agentra-home:/home/agentuser/.agentra" in run_calls[0]
+    assert "/mnt/disks/widget-data/repos:/workspace" in run_calls[0]
+    assert "/var/run/docker.sock:/var/run/docker.sock" in run_calls[0]
+
+    reload_calls = [c for c in docker_calls if "nginx -s reload" in " ".join(c)]
+    assert len(reload_calls) == 1
+
+    remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
+    assert ["docker", "rm", "-f", "widget-app-blue"] in remove_calls
+
+
+def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_becomes_healthy(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    env = _env(prod_branch="prod")
+    config = _self_hosted_config()
+
+    monkeypatch.setattr(git_ops, "pull_latest", lambda *a, **k: None)
+    monkeypatch.setattr(git_ops, "fetch_ref", lambda *a, **k: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda *a, **k: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+
+    nginx_calls = []
+
+    def _run(args, **kwargs):
+        if args[:3] == ["docker", "exec", "widget-proxy"] and "cat" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
+        if "nginx" in " ".join(args):
+            nginx_calls.append(list(args))
+        if args[:2] == ["docker", "exec"] and "curl" in args:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")  # never healthy
+        if args[:1] == ["stat"]:
+            return subprocess.CompletedProcess(args, 0, stdout="999\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="[]" if args[:2] == ["docker", "inspect"] else "", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _run)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.promote_prod_self_hosted(repo, env, "run456"))
+
+    assert result.ok is False
+    assert "blue" in result.text  # still live, promotion aborted
+    assert nginx_calls == []  # never flipped
 
 
 # -- promote_prod: the only path allowed to touch prod, only via run_agent(allow_prod=True) --

@@ -1,9 +1,11 @@
-"""deploy_pre_prod/verify_pre_prod (agents/brain/tools.py) branching on
-EnvironmentConfig.self_hosted_vm -- agentra's own repo takes the
-deployment.deploy_pre_prod_self_hosted path instead of the generic Vercel/
-Firebase one, and verify_pre_prod tears the sibling container down once its
-report is produced. See agents/deployment.py's own docstring for why this
-path is deterministic (no run_agent/LLM call at all).
+"""deploy_pre_prod/verify_pre_prod (agents/brain/tools.py) dispatching via
+deployment.PRE_PROD_STRATEGIES[env.deploy_strategy] -- an app with
+deploy_strategy="self_hosted_vm" takes the deployment.deploy_pre_prod_self_hosted
+path instead of the generic Vercel/Firebase one, and verify_pre_prod tears the
+sibling container down once its report is produced. See agents/deployment.py's
+own docstring for why this path is deterministic (no run_agent/LLM call at all),
+and PRE_PROD_STRATEGIES' docstring for why dispatch goes through a registry
+rather than a hardcoded branch.
 
 No real Docker calls: deployment.deploy_pre_prod_self_hosted/
 teardown_self_hosted_preprod and testing.run_pre_prod are monkeypatched.
@@ -25,7 +27,7 @@ def _session(tmp_path: Path, **overrides) -> brain.OrchestratorSession:
     defaults = dict(
         repo=repo,
         objective="test objective",
-        env=EnvironmentConfig(self_hosted_vm=True),
+        env=EnvironmentConfig(deploy_strategy="self_hosted_vm"),
         mem=Memory(repo),
         run_id="testrun1",
         cb_summary="a codebase summary",
@@ -68,9 +70,9 @@ def test_deploy_pre_prod_calls_the_self_hosted_path_when_env_flag_is_set(tmp_pat
     assert session.deployed_to_pre_prod is True
 
 
-def test_deploy_pre_prod_uses_the_generic_path_when_flag_is_unset(tmp_path, monkeypatch):
+def test_deploy_pre_prod_uses_the_generic_path_when_strategy_is_vercel_firebase(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
-    session = _session(tmp_path, env=EnvironmentConfig(self_hosted_vm=False))
+    session = _session(tmp_path, env=EnvironmentConfig())
 
     self_hosted_calls = []
     monkeypatch.setattr(
@@ -98,11 +100,11 @@ def test_verify_pre_prod_tears_down_the_self_hosted_sibling_after_a_passing_repo
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
     teardown_calls = []
-    monkeypatch.setattr(brain.deployment, "teardown_self_hosted_preprod", lambda run_id: teardown_calls.append(run_id))
+    monkeypatch.setattr(brain.deployment, "teardown_self_hosted_preprod", lambda repo, run_id: teardown_calls.append((repo, run_id)))
 
     asyncio.run(_tool(session, "verify_pre_prod").handler({}))
 
-    assert teardown_calls == [session.run_id]
+    assert teardown_calls == [(session.repo, session.run_id)]
 
 
 def test_verify_pre_prod_tears_down_the_self_hosted_sibling_even_after_a_failing_report(tmp_path, monkeypatch):
@@ -115,17 +117,17 @@ def test_verify_pre_prod_tears_down_the_self_hosted_sibling_even_after_a_failing
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
     monkeypatch.setattr(session.mem, "record_failure", lambda *a, **k: None)
     teardown_calls = []
-    monkeypatch.setattr(brain.deployment, "teardown_self_hosted_preprod", lambda run_id: teardown_calls.append(run_id))
+    monkeypatch.setattr(brain.deployment, "teardown_self_hosted_preprod", lambda repo, run_id: teardown_calls.append((repo, run_id)))
 
     asyncio.run(_tool(session, "verify_pre_prod").handler({}))
 
-    assert teardown_calls == [session.run_id]
+    assert teardown_calls == [(session.repo, session.run_id)]
 
 
-def test_verify_pre_prod_does_not_teardown_when_self_hosted_vm_is_off(tmp_path, monkeypatch):
+def test_verify_pre_prod_does_not_teardown_when_strategy_is_vercel_firebase(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(
-        tmp_path, env=EnvironmentConfig(self_hosted_vm=False), pre_prod_url="https://preview.example.com",
+        tmp_path, env=EnvironmentConfig(), pre_prod_url="https://preview.example.com",
     )
 
     async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
@@ -134,7 +136,7 @@ def test_verify_pre_prod_does_not_teardown_when_self_hosted_vm_is_off(tmp_path, 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
     monkeypatch.setattr(
         brain.deployment, "teardown_self_hosted_preprod",
-        lambda run_id: (_ for _ in ()).throw(AssertionError("must not tear down when self_hosted_vm is off")),
+        lambda repo, run_id: (_ for _ in ()).throw(AssertionError("must not tear down when strategy is vercel_firebase")),
     )
 
     asyncio.run(_tool(session, "verify_pre_prod").handler({}))

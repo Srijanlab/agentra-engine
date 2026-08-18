@@ -147,7 +147,8 @@ async def run_cycle(
         pre_prod_verified = None
         if not skip_deploy and test_passed:
             mem.log(run_id, "deployment agent: deploying to pre-prod")
-            deploy = await deployment.deploy_pre_prod(repo, env, feature_branch, session_id=session_id)
+            pre_prod_strategy = deployment.PRE_PROD_STRATEGIES[env.deploy_strategy]
+            deploy = await pre_prod_strategy(repo, env, feature_branch, run_id, session_id)
             session_id = deploy.session_id or session_id
             mem.log(run_id, f"deployment agent: ok={deploy.ok} turns={deploy.turns} cost=${deploy.cost_usd:.4f}")
             deploy_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
@@ -249,7 +250,8 @@ async def run_promote(repo: Path, run_id: str | None = None) -> dict:
                         f"carried by this promote run, not independently resumed",
                     )
         mem.log(run_id, "promote: human-approved promotion to production starting")
-        promote = await deployment.promote_prod(repo, env, session_id=session_id)
+        strategy = deployment.PROD_STRATEGIES[env.deploy_strategy]
+        promote = await strategy(repo, env, run_id, session_id)
         ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
         mem.log(run_id, f"promote: ok={ok}")
         if not ok:
@@ -315,7 +317,8 @@ async def run_prod_debug_cycle(
             return ProdDebugReport(run_id, True, severity, False, False, diag.text)
 
         mem.log(run_id, "prod-debug: deploying hotfix to pre-prod for verification")
-        deploy = await deployment.deploy_pre_prod(repo, env, feature_branch, session_id=session_id)
+        pre_prod_strategy = deployment.PRE_PROD_STRATEGIES[env.deploy_strategy]
+        deploy = await pre_prod_strategy(repo, env, feature_branch, run_id, session_id)
         session_id = deploy.session_id or session_id
         pre_prod_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
         registry.record_agent_step(
@@ -350,7 +353,8 @@ async def run_prod_debug_cycle(
             return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
         mem.log(run_id, "prod-debug: hotfix verified live in pre-prod; auto-promoting to prod (auto_remediate_prod=true)")
-        promote = await deployment.promote_prod(repo, env, session_id=session_id)
+        prod_strategy = deployment.PROD_STRATEGIES[env.deploy_strategy]
+        promote = await prod_strategy(repo, env, run_id, session_id)
         promoted_ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
         mem.log(run_id, f"prod-debug: promotion ok={promoted_ok}")
         registry.record_agent_step(

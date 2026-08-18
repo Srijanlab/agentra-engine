@@ -27,6 +27,7 @@ URLs, running smoke tests.
 """
 
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 
@@ -369,52 +370,79 @@ async def deploy_pre_prod(
     )
 
 
-_PREPROD_NETWORK = "agentra-preprod-net"
-_PREPROD_HEALTH_CHECK_ATTEMPTS = 10
-_PREPROD_HEALTH_CHECK_DELAY_SECONDS = 3
+_HEALTH_CHECK_ATTEMPTS = 10
+_HEALTH_CHECK_DELAY_SECONDS = 3
+_NOT_CONFIGURED_TEXT = (
+    "self_hosted_vm strategy selected but this repo has no "
+    ".agentra/memory/architecture/deployment.md (or it's missing required fields) -- "
+    "see environments.SelfHostedVMConfig for the required shape."
+)
 
 
-def _preprod_container_name(run_id: str) -> str:
-    return f"agentra-preprod-{run_id}"
+def _local_image_name(config: "environments.SelfHostedVMConfig") -> str:
+    """Short, local-only name derived from the registry image path (e.g.
+    'agentra' from '.../agentra-prod/agentra/agentra') -- used to name
+    sibling/candidate containers and images distinctly from the registry tag
+    itself, which always stays config.image_repo:staging."""
+    return config.image_repo.rstrip("/").rsplit("/", 1)[-1]
 
 
-def _preprod_image_tag(run_id: str) -> str:
-    return f"agentra-preprod:{run_id}"
+def _preprod_container_name(config: "environments.SelfHostedVMConfig", run_id: str) -> str:
+    return f"{_local_image_name(config)}-preprod-{run_id}"
+
+
+def _preprod_image_tag(config: "environments.SelfHostedVMConfig", run_id: str) -> str:
+    return f"{_local_image_name(config)}-preprod:{run_id}"
 
 
 async def deploy_pre_prod_self_hosted(
     repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str
 ) -> AgentResult:
-    """Pre-prod deploy for agentra's OWN repo (EnvironmentConfig.self_hosted_vm
-    only) -- the generic deploy_pre_prod above only knows Vercel/Firebase, which
-    this repo has neither of. Builds and runs a second, isolated orchestrator
-    container alongside the running prod one, on the same VM, reachable only
-    over an internal Docker network -- never the public internet.
+    """Pre-prod deploy for the "self_hosted_vm" deploy_strategy -- a generic
+    capability for any repo that runs on its own Docker-based VM rather than
+    Vercel/Firebase, not agentra-specific code. Every identifier (network
+    names, the anchor container to connect to, the image repo path) comes
+    from environments.load_self_hosted_vm_config(repo), that repo's own
+    committed .agentra/memory/architecture/deployment.md -- never hardcoded
+    here. Builds and runs a second, isolated instance of the app alongside
+    the running prod one, on the same VM, reachable only over an internal
+    Docker network -- never the public internet.
 
     Deliberately no run_agent/LLM call anywhere in this function: spinning up
-    a sibling container requires /var/run/docker.sock access (mounted into the
-    prod container only for this purpose), and that capability must stay
-    fixed, deterministic plumbing an agent turn can never freely improvise
-    over -- same reasoning as _merge_and_push/persist_audit_trail's git
-    operations, just a higher-stakes one (host-level Docker control, not just
-    this repo's own git history).
+    a sibling container requires /var/run/docker.sock access (mounted into
+    the calling container only for this purpose), and that capability must
+    stay fixed, deterministic plumbing an agent turn can never freely
+    improvise over -- same reasoning as _merge_and_push/persist_audit_trail's
+    git operations, just a higher-stakes one (host-level Docker control, not
+    just this repo's own git history).
 
     Returns the same AgentResult/json_data shape (status/preview_url/notes)
     as the generic deploy_pre_prod, so every downstream consumer (tools.py's
     deploy_pre_prod wrapper, verify_pre_prod, HUMAN_INPUT_REQUIRED handling)
-    works completely unmodified regardless of which path produced it. Call
-    teardown_self_hosted_preprod(run_id) once the report this enables has
-    been produced -- this function does not tear down after itself, since the
-    caller still needs the container alive to verify it.
+    works completely unmodified regardless of which strategy produced it.
+    Call teardown_self_hosted_preprod(repo, run_id) once the report this
+    enables has been produced -- this function does not tear down after
+    itself, since the caller still needs the container alive to verify it.
     """
+    from agentra import environments
+
+    config = environments.load_self_hosted_vm_config(repo)
+    if config is None:
+        return AgentResult(ok=False, text=_NOT_CONFIGURED_TEXT, json_data=None, cost_usd=0.0, turns=0)
+
     _sync_branch_to_remote(repo, env.pre_prod_branch)
     error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
     if error:
         return AgentResult(ok=False, text=error, json_data=None, cost_usd=0.0, turns=0)
 
-    container_name = _preprod_container_name(run_id)
-    image_tag = _preprod_image_tag(run_id)
-    claude_home = str(Path.home() / ".claude")
+    container_name = _preprod_container_name(config, run_id)
+    image_tag = _preprod_image_tag(config, run_id)
+    # A real HOST path, not this container's own -- see
+    # SelfHostedVMConfig.data_mount's docstring for why: docker commands
+    # issued here run against the host's daemon over the bind-mounted
+    # socket, so -v source paths are resolved by the host, never by this
+    # container's own filesystem.
+    claude_home = f"{config.data_mount}/claude"
 
     build = subprocess.run(
         ["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True,
@@ -425,19 +453,25 @@ async def deploy_pre_prod_self_hosted(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
-    # Idempotent: both no-op harmlessly (network already exists / prod
+    # Idempotent: both no-op harmlessly (network already exists / anchor
     # container already attached) on every call after the first.
-    subprocess.run(["docker", "network", "create", _PREPROD_NETWORK], capture_output=True, text=True)
-    subprocess.run(["docker", "network", "connect", _PREPROD_NETWORK, "agentra"], capture_output=True, text=True)
+    subprocess.run(["docker", "network", "create", config.preprod_network], capture_output=True, text=True)
+    subprocess.run(
+        ["docker", "network", "connect", config.preprod_network, config.anchor_container],
+        capture_output=True, text=True,
+    )
 
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
+    env_args = []
+    if config.firestore_project:
+        env_args = ["-e", f"AGENTRA_FIRESTORE_PROJECT={config.firestore_project}"]
     run = subprocess.run(
         [
             "docker", "run", "-d", "--name", container_name,
-            "--network", _PREPROD_NETWORK,
+            "--network", config.preprod_network,
             "--memory=1g", "--cpus=1",
             "-v", f"{claude_home}:/home/agentuser/.claude:ro",
-            "-e", "AGENTRA_FIRESTORE_PROJECT=agentra-prod",
+            *env_args,
             image_tag, "serve", "--port", "8080",
         ],
         capture_output=True, text=True,
@@ -449,22 +483,13 @@ async def deploy_pre_prod_self_hosted(
         )
 
     preview_url = f"http://{container_name}:8080"
-    healthy = False
-    for _ in range(_PREPROD_HEALTH_CHECK_ATTEMPTS):
-        check = subprocess.run(
-            ["docker", "exec", container_name, "curl", "-sf", "http://localhost:8080/health"],
-            capture_output=True, text=True,
-        )
-        if check.returncode == 0:
-            healthy = True
-            break
-        await asyncio.sleep(_PREPROD_HEALTH_CHECK_DELAY_SECONDS)
+    healthy = await _wait_for_healthy(container_name)
 
     if not healthy:
         return AgentResult(
             ok=False,
             text=f"{container_name} did not become healthy on {preview_url}/health within "
-            f"{_PREPROD_HEALTH_CHECK_ATTEMPTS * _PREPROD_HEALTH_CHECK_DELAY_SECONDS}s.",
+            f"{_HEALTH_CHECK_ATTEMPTS * _HEALTH_CHECK_DELAY_SECONDS}s.",
             json_data={"status": "failed", "preview_url": preview_url},
             cost_usd=0.0, turns=0,
         )
@@ -477,15 +502,196 @@ async def deploy_pre_prod_self_hosted(
     )
 
 
-def teardown_self_hosted_preprod(run_id: str) -> None:
+async def _wait_for_healthy(container_name: str) -> bool:
+    for _ in range(_HEALTH_CHECK_ATTEMPTS):
+        check = subprocess.run(
+            ["docker", "exec", container_name, "curl", "-sf", "http://localhost:8080/health"],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0:
+            return True
+        await asyncio.sleep(_HEALTH_CHECK_DELAY_SECONDS)
+    return False
+
+
+def teardown_self_hosted_preprod(repo: Path, run_id: str) -> None:
     """Best-effort cleanup of a deploy_pre_prod_self_hosted sibling -- single-shot,
     ephemeral lifecycle, so nothing accumulates across features tested over time.
     Swallows failures: a leftover container/image is a minor disk/resource cost,
-    not worth failing the run over."""
-    container_name = _preprod_container_name(run_id)
-    image_tag = _preprod_image_tag(run_id)
+    not worth failing the run over. No-ops quietly if this repo has no
+    self-hosted-VM config at all (nothing to tear down)."""
+    from agentra import environments
+
+    config = environments.load_self_hosted_vm_config(repo)
+    if config is None:
+        return
+    container_name = _preprod_container_name(config, run_id)
+    image_tag = _preprod_image_tag(config, run_id)
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
     subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
+
+
+def _candidate_image_tag(config: "environments.SelfHostedVMConfig", run_id: str) -> str:
+    return f"{_local_image_name(config)}:{run_id}"
+
+
+def _other_color(color: str) -> str:
+    return "green" if color == "blue" else "blue"
+
+
+def _nginx_conf(backend_container: str) -> str:
+    """Full config.anchor_container nginx conf, proxying to backend_container
+    (a docker DNS name on config.app_network) on port 8080. Regenerated and
+    piped in whole on every promotion (see promote_prod_self_hosted) rather
+    than templated/patched in place -- simplest thing that's still trivially
+    correct, and this is the exact same content compute.tf's startup-script
+    writes for the VM's very first boot (before any promotion has run)."""
+    return f"""server {{
+    listen 8080;
+    location / {{
+        proxy_pass http://{backend_container}:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }}
+}}
+"""
+
+
+async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: str) -> AgentResult:
+    """Production promotion for the "self_hosted_vm" deploy_strategy --
+    nginx-fronted blue/green instead of the in-place container replacement
+    the manual VM redeploy process (docs/deployment.md) still uses. Builds
+    the new candidate image, runs it as the inactive color alongside the
+    currently-live one, health-checks it, flips config.anchor_container's
+    (nginx) active upstream to it, then tears down the now-inactive old
+    color -- zero-downtime, no window where neither color is serving.
+
+    Never called from the autonomous tool loop -- only from orchestrator.py's
+    run_promote, itself only reachable via the explicit `agentra promote`
+    CLI command or the dashboard's Promote button. Same human-approval gate
+    every other app's production promotion already goes through; this
+    function adds no gating of its own because it doesn't need to.
+
+    Deliberately no run_agent/LLM call, same reasoning as
+    deploy_pre_prod_self_hosted -- fixed, deterministic docker/nginx
+    plumbing only."""
+    from agentra import environments
+
+    config = environments.load_self_hosted_vm_config(repo)
+    if config is None:
+        return AgentResult(ok=False, text=_NOT_CONFIGURED_TEXT, json_data=None, cost_usd=0.0, turns=0)
+
+    _sync_branch_to_remote(repo, env.prod_branch)
+    try:
+        from agentra.agents.git_ops import GitOpError, fetch_ref
+
+        fetch_ref(repo, env.pre_prod_branch)
+    except GitOpError as exc:
+        return AgentResult(ok=False, text=str(exc), json_data=None, cost_usd=0.0, turns=0)
+    error = _merge_and_push(repo, f"origin/{env.pre_prod_branch}", env.prod_branch)
+    if error:
+        return AgentResult(ok=False, text=error, json_data=None, cost_usd=0.0, turns=0)
+
+    active = subprocess.run(
+        ["docker", "exec", config.anchor_container, "cat", "/etc/nginx/active_color"],
+        capture_output=True, text=True,
+    )
+    current_color = active.stdout.strip() if active.returncode == 0 and active.stdout.strip() in ("blue", "green") else "blue"
+    new_color = _other_color(current_color)
+
+    base_name = _local_image_name(config)
+    image_tag = _candidate_image_tag(config, run_id)
+    new_container = f"{base_name}-{new_color}"
+
+    build = subprocess.run(["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True)
+    if build.returncode != 0:
+        return AgentResult(
+            ok=False, text=f"docker build {image_tag} failed: {build.stderr.strip()}",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+
+    # Inherit the currently-live container's actual environment (secrets
+    # included) rather than re-fetching from Secret Manager here -- this
+    # function runs as plain Python inside a container, not the bash
+    # startup-script's gcs()-via-throwaway-container trick, and the running
+    # container already has everything compute.tf baked in at last boot.
+    old_container = f"{base_name}-{current_color}"
+    inspect = subprocess.run(
+        ["docker", "inspect", old_container, "--format", "{{json .Config.Env}}"],
+        capture_output=True, text=True,
+    )
+    env_args = []
+    if inspect.returncode == 0:
+        try:
+            for entry in json.loads(inspect.stdout):
+                key, _, value = entry.partition("=")
+                env_args += ["-e", f"{key}={value}"]
+        except json.JSONDecodeError:
+            pass  # best-effort -- the new container still boots, just without inherited env
+
+    sock_gid = subprocess.run(
+        ["stat", "-c", "%g", "/var/run/docker.sock"], capture_output=True, text=True,
+    ).stdout.strip()
+
+    subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+    run = subprocess.run(
+        [
+            "docker", "run", "-d", "--name", new_container, "--restart=always",
+            "--network", config.app_network,
+            "-v", f"{config.data_mount}/claude:/home/agentuser/.claude",
+            "-v", f"{config.data_mount}/agentra-home:/home/agentuser/.agentra",
+            "-v", f"{config.data_mount}/repos:/workspace",
+            "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            *(["--group-add", sock_gid] if sock_gid else []),
+            *env_args,
+            image_tag, "serve", "--port", "8080",
+        ],
+        capture_output=True, text=True,
+    )
+    if run.returncode != 0:
+        return AgentResult(
+            ok=False, text=f"docker run {new_container} failed: {run.stderr.strip()}",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+
+    if not await _wait_for_healthy(new_container):
+        subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+        return AgentResult(
+            ok=False,
+            text=f"{new_container} did not become healthy -- promotion aborted, "
+            f"{current_color} ({base_name}-{current_color}) is still live.",
+            json_data={"status": "failed"},
+            cost_usd=0.0, turns=0,
+        )
+
+    reload = subprocess.run(
+        [
+            "docker", "exec", "-i", config.anchor_container, "sh", "-c",
+            f"cat > /etc/nginx/conf.d/default.conf && echo {new_color} > /etc/nginx/active_color && nginx -s reload",
+        ],
+        input=_nginx_conf(new_container), capture_output=True, text=True,
+    )
+    if reload.returncode != 0:
+        subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+        return AgentResult(
+            ok=False,
+            text=f"nginx reload to {new_color} failed: {reload.stderr.strip()} -- promotion aborted, "
+            f"{current_color} is still live.",
+            json_data={"status": "failed"},
+            cost_usd=0.0, turns=0,
+        )
+
+    subprocess.run(["docker", "rm", "-f", old_container], capture_output=True, text=True)
+
+    return AgentResult(
+        ok=True,
+        text=f"Promoted {new_container!r} to production (was {current_color}, now {new_color}).",
+        json_data={"status": "deployed", "notes": f"blue/green flip: {current_color} -> {new_color}"},
+        cost_usd=0.0, turns=0,
+    )
 
 
 async def promote_prod(repo: Path, env: EnvironmentConfig, session_id: str | None = None) -> AgentResult:
@@ -527,3 +733,50 @@ async def promote_prod(repo: Path, env: EnvironmentConfig, session_id: str | Non
         agent_label="Deployment Agent",
         resume=session_id,
     )
+
+
+# ── Strategy registries: EnvironmentConfig.deploy_strategy -> implementation ──
+#
+# The single source of truth for "what deployment mechanisms exist" -- adding
+# a third strategy later means adding one function + one registry entry here,
+# not touching the dispatch call sites (agents/brain/tools.py's deploy_pre_prod
+# tool, orchestrator.py's run_promote). Adapter closures exist only to give
+# every strategy a uniform call signature despite deploy_pre_prod/promote_prod
+# and their self_hosted_vm counterparts taking different native parameters
+# (session_id vs run_id) -- the underlying functions above are unchanged.
+
+
+async def _deploy_pre_prod_vercel_firebase(
+    repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str, session_id: str | None
+) -> AgentResult:
+    return await deploy_pre_prod(repo, env, feature_branch, session_id=session_id)
+
+
+async def _deploy_pre_prod_self_hosted_adapter(
+    repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str, session_id: str | None
+) -> AgentResult:
+    return await deploy_pre_prod_self_hosted(repo, env, feature_branch, run_id)
+
+
+PRE_PROD_STRATEGIES = {
+    "vercel_firebase": _deploy_pre_prod_vercel_firebase,
+    "self_hosted_vm": _deploy_pre_prod_self_hosted_adapter,
+}
+
+
+async def _promote_prod_vercel_firebase(
+    repo: Path, env: EnvironmentConfig, run_id: str, session_id: str | None
+) -> AgentResult:
+    return await promote_prod(repo, env, session_id=session_id)
+
+
+async def _promote_prod_self_hosted_adapter(
+    repo: Path, env: EnvironmentConfig, run_id: str, session_id: str | None
+) -> AgentResult:
+    return await promote_prod_self_hosted(repo, env, run_id)
+
+
+PROD_STRATEGIES = {
+    "vercel_firebase": _promote_prod_vercel_firebase,
+    "self_hosted_vm": _promote_prod_self_hosted_adapter,
+}

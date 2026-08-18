@@ -52,23 +52,23 @@ def test_load_reads_config_from_github_variables(tmp_path, monkeypatch):
     assert config.prod_branch == "main"
 
 
-def test_load_reads_self_hosted_vm_flag(tmp_path, monkeypatch):
+def test_load_reads_deploy_strategy(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
-    monkeypatch.setattr(github_variables, "list_variables", lambda repo_url: {"AGENTRA_SELF_HOSTED_VM": "true"})
+    monkeypatch.setattr(github_variables, "list_variables", lambda repo_url: {"AGENTRA_DEPLOY_STRATEGY": "self_hosted_vm"})
 
     config = environments.load(repo)
 
-    assert config.self_hosted_vm is True
+    assert config.deploy_strategy == "self_hosted_vm"
 
 
-def test_save_pushes_self_hosted_vm_flag(tmp_path, monkeypatch):
+def test_save_pushes_deploy_strategy(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     pushed = {}
     monkeypatch.setattr(github_variables, "set_variable", lambda repo_url, name, value: pushed.update({name: value}))
 
-    environments.save(repo, environments.EnvironmentConfig(self_hosted_vm=True))
+    environments.save(repo, environments.EnvironmentConfig(deploy_strategy="self_hosted_vm"))
 
-    assert pushed["AGENTRA_SELF_HOSTED_VM"] == "true"
+    assert pushed["AGENTRA_DEPLOY_STRATEGY"] == "self_hosted_vm"
 
 
 def test_load_returns_none_when_github_call_fails(tmp_path, monkeypatch):

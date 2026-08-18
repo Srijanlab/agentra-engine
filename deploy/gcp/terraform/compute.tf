@@ -90,7 +90,7 @@ locals {
     # "already mounted" -- confirmed live -- aborting the whole script
     # before any of the docker steps below ever run.
     mountpoint -q "$MOUNT" || mount "$DEVICE" "$MOUNT"
-    mkdir -p "$MOUNT/claude" "$MOUNT/agentra-home" "$MOUNT/repos"
+    mkdir -p "$MOUNT/claude" "$MOUNT/agentra-home" "$MOUNT/repos" "$MOUNT/nginx"
     # agentuser inside the container is uid 1000 (Dockerfile's useradd
     # default) -- chown from the host side since these dirs are freshly
     # created root:root by mkdir above.
@@ -122,7 +122,26 @@ locals {
     # access to the bind-mounted socket via this supplementary group instead.
     DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"
 
-    docker rm -f agentra 2>/dev/null || true
+    # Persistent bridge network for the blue/green app containers + nginx --
+    # distinct from the ephemeral, per-pre-prod-test network
+    # deploy_pre_prod_self_hosted creates on demand (agentra-preprod-net,
+    # torn down with each test sibling). Idempotent.
+    docker network create agentra-app-net 2>/dev/null || true
+
+    # Which color is currently live survives on the persistent disk, not
+    # just in a container's own state -- first boot ever (no marker file
+    # yet) defaults to blue. A real promotion (agents/deployment.py's
+    # promote_prod_self_hosted) updates this file directly via `docker exec`
+    # against the running agentra-proxy container; this script only ever
+    # reads it, never resets it, so a redeploy here doesn't undo whichever
+    # color the last promotion left active.
+    ACTIVE_COLOR_FILE="$MOUNT/nginx/active_color"
+    if [ ! -f "$ACTIVE_COLOR_FILE" ]; then
+      echo blue > "$ACTIVE_COLOR_FILE"
+    fi
+    ACTIVE_COLOR="$(cat "$ACTIVE_COLOR_FILE")"
+    ACTIVE_CONTAINER="agentra-$ACTIVE_COLOR"
+
     docker pull "$IMAGE"
     # Every redeploy pulls a fresh :staging image without ever removing the
     # previous one -- confirmed live: 18 accumulated images (~15GB, 91%
@@ -131,7 +150,10 @@ locals {
     # `docker pull`. -a also clears images with no running container (the
     # just-superseded previous :staging layers), not just dangling ones.
     docker image prune -af 2>/dev/null || true
-    docker run -d --name agentra --restart=always \
+
+    docker rm -f "$ACTIVE_CONTAINER" 2>/dev/null || true
+    docker run -d --name "$ACTIVE_CONTAINER" --restart=always \
+      --network agentra-app-net \
       -v "$MOUNT/claude:/home/agentuser/.claude" \
       -v "$MOUNT/agentra-home:/home/agentuser/.agentra" \
       -v "$MOUNT/repos:/workspace" \
@@ -151,13 +173,54 @@ locals {
       "$IMAGE" serve --port 8080
     # Deliberately NOT setting CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY --
     # auth comes from the claude-home volume's login session (one-time
-    # `docker exec -it agentra claude auth login --claudeai` over IAP SSH).
-    # No -p/--publish: cloudflared reaches this over the shared network
-    # namespace below, never the host's own network interface.
+    # `docker exec -it "$ACTIVE_CONTAINER" claude auth login --claudeai`
+    # over IAP SSH). No -p/--publish: nginx (agentra-proxy, below) reaches
+    # this over agentra-app-net by container DNS name, never the host's own
+    # network interface.
+
+    # nginx's proxy config: written fresh only if missing (first boot ever).
+    # A real promotion regenerates this in place via `docker exec -i
+    # agentra-proxy` (see promote_prod_self_hosted) -- this script must NOT
+    # clobber that on a routine redeploy, or every redeploy would silently
+    # revert production back to whichever color was active when the VM was
+    # first provisioned.
+    NGINX_CONF="$MOUNT/nginx/default.conf"
+    if [ ! -f "$NGINX_CONF" ]; then
+      cat > "$NGINX_CONF" <<NGINXCONF
+    server {
+        listen 8080;
+        location / {
+            proxy_pass http://$ACTIVE_CONTAINER:8080;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+        }
+    }
+    NGINXCONF
+    fi
+
+    # agentra-proxy is the STABLE network-namespace anchor cloudflared/
+    # agentra-trigger-loop/agentra-pubsub-pull all join below, via --network
+    # container:agentra-proxy -- this is the actual fix for the fragility
+    # that used to bite every "agentra" container swap: those three used to
+    # pin to the APP container's ID directly, so forgetting to recreate them
+    # alongside a routine redeploy silently broke the scheduler (dead
+    # namespace, every tick failing closed). Now only nginx's OWN conf file
+    # changes on a routine promotion (via `nginx -s reload`, not a container
+    # recreate), so the anchor's ID never moves and those three never need
+    # touching again after this one-time topology adoption.
+    docker rm -f agentra-proxy 2>/dev/null || true
+    docker run -d --name agentra-proxy --restart=always \
+      --network agentra-app-net \
+      -v "$NGINX_CONF:/etc/nginx/conf.d/default.conf" \
+      -v "$ACTIVE_COLOR_FILE:/etc/nginx/active_color" \
+      nginx:alpine
 
     docker rm -f cloudflared 2>/dev/null || true
     docker run -d --name cloudflared --restart=always \
-      --network container:agentra \
+      --network container:agentra-proxy \
       -e TUNNEL_TOKEN="$(gcs agentra-cloudflare-tunnel-token)" \
       -e TUNNEL_TRANSPORT_PROTOCOL=http2 \
       cloudflare/cloudflared:latest tunnel --no-autoupdate run
@@ -173,20 +236,9 @@ locals {
     # {"app":"agentra"} here, which silently meant only agentra's own
     # objective ever got scheduled -- every other managed app was never
     # ticked at all).
-    #
-    # IMPORTANT for manual redeploys: this container (and
-    # agentra-pubsub-pull below) join agentra's network namespace via
-    # --network container:agentra, which pins to that specific container
-    # ID at creation time -- if agentra is later removed and recreated
-    # (as every manual `docker rm -f agentra && docker run ...` redeploy
-    # does) without also recreating this one, it's left attached to a
-    # dead namespace and every tick silently fails closed (connection
-    # refused, swallowed by curl -s). Always recreate agentra,
-    # cloudflared, agentra-trigger-loop, and agentra-pubsub-pull together
-    # on every redeploy, not just agentra + cloudflared.
     docker rm -f agentra-trigger-loop 2>/dev/null || true
     docker run -d --name agentra-trigger-loop --restart=always \
-      --network container:agentra \
+      --network container:agentra-proxy \
       curlimages/curl:latest \
       sh -c 'while true; do curl -s -X POST -H "Content-Type: application/json" -d "{}" http://localhost:8080/trigger/scheduled; sleep 900; done'
 
@@ -196,7 +248,7 @@ locals {
     # has no equivalent once requests arrive only via the Cloudflare Tunnel.
     docker rm -f agentra-pubsub-pull 2>/dev/null || true
     docker run -d --name agentra-pubsub-pull --restart=always \
-      --network container:agentra \
+      --network container:agentra-proxy \
       google/cloud-sdk:slim \
       bash -c 'while true; do gcloud pubsub subscriptions pull agentra-work-queue-pull --limit=5 --auto-ack --format="value(message.data)" | while read -r line; do [ -n "$line" ] && echo "$line" | base64 -d | curl -s -X POST -H "Content-Type: application/json" -d @- http://localhost:8080/trigger/queue; done; sleep 10; done'
   EOT
@@ -264,5 +316,9 @@ output "agentra_vm_ssh_command" {
 }
 
 output "agentra_vm_login_command" {
-  value = "gcloud compute ssh agentra-orchestrator --zone=${var.zone} --tunnel-through-iap -- docker exec -it agentra claude auth login --claudeai"
+  # The app container is now agentra-blue or agentra-green depending on
+  # which color is currently active (see local.startup_script's
+  # ACTIVE_COLOR_FILE) -- find it with:
+  #   gcloud compute ssh agentra-orchestrator --zone=${var.zone} --tunnel-through-iap -- docker ps --format '{{.Names}}' | grep '^agentra-'
+  value = "gcloud compute ssh agentra-orchestrator --zone=${var.zone} --tunnel-through-iap -- docker exec -it agentra-blue claude auth login --claudeai"
 }

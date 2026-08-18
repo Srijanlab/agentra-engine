@@ -10,9 +10,12 @@ preview, a real deployed environment for integration testing) -> prod
 
 import json
 import logging
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +45,15 @@ class EnvironmentConfig:
     # verified hotfix straight to prod once it passes pre-prod testing, with
     # no human approval step. False is the safe default for every app.
     auto_remediate_prod: bool = False
-    # Opt-in only, and only ever true for agentra's own repo. When true,
-    # deploy_pre_prod (agents/deployment.py) builds and runs a sibling
-    # orchestrator container on the same VM instead of driving Vercel/
-    # Firebase CLIs -- see deploy_pre_prod_self_hosted. False (the default)
-    # keeps every other app on the normal Vercel/Firebase path.
-    self_hosted_vm: bool = False
+    # Which deployment mechanism agents/deployment.py's PRE_PROD_STRATEGIES/
+    # PROD_STRATEGIES registries dispatch to. "vercel_firebase" (default)
+    # drives the Vercel/Firebase CLIs via an LLM agent turn. "self_hosted_vm"
+    # is deterministic Docker-CLI plumbing against a VM the app already runs
+    # on -- requires that repo's own .agentra/memory/architecture/
+    # deployment.md (see environments.load_self_hosted_vm_config); a repo
+    # that selects this strategy without that file gets a clear error, not a
+    # guess at some other app's VM details.
+    deploy_strategy: str = "vercel_firebase"
     # Per-app schedule: how often a scheduled cycle should actually run this
     # app, in hours. The dashboard's dashboard-configurable "one Cloud
     # Scheduler tick decides per-app whether it's due" design (rather than a
@@ -90,9 +96,9 @@ _GITHUB_VARIABLE_NAMES = {
     "auto_remediate_prod": "AGENTRA_AUTO_REMEDIATE_PROD",
     "schedule_hours": "AGENTRA_SCHEDULE_HOURS",
     "alarm_enabled": "AGENTRA_ALARM_ENABLED",
-    "self_hosted_vm": "AGENTRA_SELF_HOSTED_VM",
+    "deploy_strategy": "AGENTRA_DEPLOY_STRATEGY",
 }
-_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled", "self_hosted_vm"}
+_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled"}
 _FLOAT_FIELDS = {"schedule_hours"}
 
 
@@ -242,3 +248,78 @@ def _git_branches(repo: Path) -> list[str]:
         return [line.strip().removeprefix("origin/") for line in result.stdout.splitlines()]
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
+
+
+@dataclass
+class SelfHostedVMConfig:
+    """The 'self_hosted_vm' deploy_strategy's own connection/topology details
+    for THIS repo's VM -- deliberately not GitHub Variables like
+    EnvironmentConfig's fields: these are infrastructure identifiers tied to
+    a specific, already-provisioned VM, versioned with the code that assumes
+    them, not admin-togglable runtime config. See load_self_hosted_vm_config."""
+
+    vm_name: str
+    vm_zone: str
+    gcp_project: str
+    image_repo: str
+    anchor_container: str
+    app_network: str
+    preprod_network: str
+    # Host-side (VM) path to the persistent data disk -- e.g.
+    # "/mnt/disks/agentra-data", holding claude/, agentra-home/, repos/
+    # subdirectories. Docker commands issued from inside a container run
+    # against the HOST's own daemon (via the bind-mounted docker.sock), so
+    # -v source paths must be real HOST paths, never a path resolved from
+    # inside the calling container's own filesystem -- see
+    # deploy_pre_prod_self_hosted/promote_prod_self_hosted in
+    # agents/deployment.py for where this actually gets used.
+    data_mount: str
+    firestore_project: str | None = None
+
+
+_SELF_HOSTED_VM_CONFIG_PATH = Path(".agentra") / "memory" / "architecture" / "deployment.md"
+_SELF_HOSTED_VM_CONFIG_BLOCK_RE = re.compile(r"```ya?ml\s*\n(.*?)```", re.DOTALL)
+
+
+def load_self_hosted_vm_config(repo: Path) -> SelfHostedVMConfig | None:
+    """Reads <repo>/.agentra/memory/architecture/deployment.md's fenced YAML
+    config block -- same fenced-block-in-a-committed-file convention as
+    github_issue_lifecycle.py's record_spec/get_spec (there, GitHub-comment
+    JSON; here, a git-committed YAML block, since these values belong to the
+    repo's own history, not a mutable issue thread).
+
+    None if the file doesn't exist, or its config block is missing/malformed
+    -- callers (deploy_pre_prod_self_hosted, promote_prod_self_hosted) must
+    treat that as 'self_hosted_vm strategy selected but not configured for
+    this repo' and report a clear error, never fall back to guessing another
+    app's VM details."""
+    path = repo / _SELF_HOSTED_VM_CONFIG_PATH
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        logger.warning("load_self_hosted_vm_config: could not read %s", path, exc_info=True)
+        return None
+    match = _SELF_HOSTED_VM_CONFIG_BLOCK_RE.search(text)
+    if not match:
+        logger.warning("load_self_hosted_vm_config: %s has no fenced yaml config block", path)
+        return None
+    try:
+        data = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
+        logger.warning("load_self_hosted_vm_config: %s's config block is not valid YAML", path, exc_info=True)
+        return None
+    required = {
+        "vm_name", "vm_zone", "gcp_project", "image_repo",
+        "anchor_container", "app_network", "preprod_network", "data_mount",
+    }
+    missing = required - data.keys()
+    if missing:
+        logger.warning("load_self_hosted_vm_config: %s is missing required field(s): %s", path, sorted(missing))
+        return None
+    try:
+        return SelfHostedVMConfig(**{k: v for k, v in data.items() if k in required | {"firestore_project"}})
+    except TypeError:
+        logger.warning("load_self_hosted_vm_config: %s's config block has an unexpected shape", path, exc_info=True)
+        return None

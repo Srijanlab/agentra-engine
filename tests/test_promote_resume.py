@@ -87,3 +87,28 @@ def test_run_promote_does_not_resume_when_nothing_pending(tmp_path, monkeypatch)
     asyncio.run(orchestrator.run_promote(repo))
 
     assert promote_calls == [None]
+
+
+def test_run_promote_dispatches_to_promote_prod_self_hosted_for_that_strategy(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(orchestrator.environments, "load", lambda repo: EnvironmentConfig(deploy_strategy="self_hosted_vm"))
+    monkeypatch.setattr(Memory, "pending_promotion_features", lambda self: [])
+    generic_calls = []
+    self_hosted_calls = []
+    monkeypatch.setattr(
+        orchestrator.deployment, "promote_prod", lambda *a, **k: generic_calls.append((a, k)),
+    )
+
+    async def fake_promote_prod_self_hosted(repo, env, run_id):
+        self_hosted_calls.append((repo, env, run_id))
+        return AgentResult(ok=True, text="promoted", json_data={"status": "deployed"}, cost_usd=0.0, turns=0)
+
+    monkeypatch.setattr(orchestrator.deployment, "promote_prod_self_hosted", fake_promote_prod_self_hosted)
+
+    result = asyncio.run(orchestrator.run_promote(repo, run_id="run1"))
+
+    assert result["ok"] is True
+    assert generic_calls == []
+    assert len(self_hosted_calls) == 1
+    assert self_hosted_calls[0][2] == "run1"
