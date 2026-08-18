@@ -93,15 +93,24 @@ async def standup_live_channel(websocket: WebSocket, app_name: str) -> None:
 
     existing = chat_store.get_standup_channel_messages(app_name, date_str)
     if existing:
+        # Reconnect same day: replay the exact recorded transcript
+        # (opening burst plus any interactive exchange since) -- unchanged.
         for msg in existing:
             await websocket.send_json({"type": "message", **msg})
     else:
-        from agentra.standup import generate_standup_updates
+        from agentra.standup import get_or_generate_standup_updates
 
-        updates = await generate_standup_updates(repo, app_name, mem)
+        # Shared with the REST endpoints: reuse today's already-generated
+        # report-store updates verbatim (no second LLM call) if either of
+        # them beat this connection to it; otherwise generate once here
+        # and persist to the report store too, so *they* can reuse it.
+        updates, was_fresh = await get_or_generate_standup_updates(repo, app_name, mem, date_str)
         for agent_id, text in updates.items():
             msg = chat_store.record_standup_channel_message(app_name, date_str, agent_id, text)
-            await websocket.send_json({"type": "message", "fresh": True, **msg})
+            payload = {"type": "message", **msg}
+            if was_fresh:
+                payload["fresh"] = True
+            await websocket.send_json(payload)
 
     await websocket.send_json({"type": "burst_complete"})
 

@@ -190,8 +190,7 @@ def _format_report(app_name: str, updates_json: dict[str, str]) -> str:
     return "\n".join(lines).strip()
 
 
-def _persist_standup(app_name: str, updates_json: dict[str, str], report: str) -> None:
-    date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+def _persist_standup(app_name: str, date_str: str, updates_json: dict[str, str], report: str) -> None:
     chat_store.record_standup(app_name, date_str, report)
     chat_store.record_standup_updates_json(app_name, date_str, updates_json)
 
@@ -232,22 +231,54 @@ async def generate_standup_updates(
     return _parse_updates_from_result(result)
 
 
-async def run_standup(
-    repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24
-) -> str:
-    """Generate today's standup for one app and persist it server-side
-    (chat_store.py, AGENTRA_HOME -- not the target repo's own .agentra/,
-    which is git-committed to that repo's history and not where a chat
-    transcript-adjacent artifact belongs). Returns the generated report
-    text."""
-    if mem is None:
-        mem = Memory(repo)
+async def get_or_generate_standup_updates(
+    repo: Path,
+    app_name: str,
+    mem: Memory,
+    date_str: str | None = None,
+    window_hours: int = 24,
+) -> tuple[dict[str, str], bool]:
+    """The single 'does a standup for this app already exist today (UTC
+    calendar date)' check shared by all three entry points -- the live WS
+    channel, POST /apps/{app}/standup, and POST /standup/daily -- so they
+    treat it as one question instead of each deciding independently.
+
+    Reuses the durable report-store entry for `date_str` verbatim (no LLM
+    call) if one was already generated -- by any entry point -- earlier
+    that day; otherwise generates one via generate_standup_updates (the
+    one LLM call, unchanged) and persists it there so every other entry
+    point sees it too. Returns (updates, was_freshly_generated) so callers
+    (the WS route in particular) can tell a genuinely fresh generation
+    apart from a reused one.
+    """
+    if date_str is None:
+        date_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+    existing = chat_store.get_standup_updates_json(app_name, date_str)
+    if existing is not None:
+        return existing, False
 
     updates_json = await generate_standup_updates(repo, app_name, mem, window_hours)
     report = _format_report(app_name, updates_json)
-    _persist_standup(app_name, updates_json, report)
+    _persist_standup(app_name, date_str, updates_json, report)
+    return updates_json, True
 
-    return report
+
+async def run_standup(
+    repo: Path, app_name: str, mem: Memory | None = None, window_hours: int = 24
+) -> str:
+    """Generate (or, if one already exists for today, reuse) today's
+    standup for one app and persist it server-side (chat_store.py,
+    AGENTRA_HOME -- not the target repo's own .agentra/, which is
+    git-committed to that repo's history and not where a chat
+    transcript-adjacent artifact belongs). Returns the report text --
+    identical, byte-for-byte, to what any other entry point already
+    generated for this app today, if applicable."""
+    if mem is None:
+        mem = Memory(repo)
+
+    updates_json, _ = await get_or_generate_standup_updates(repo, app_name, mem, window_hours=window_hours)
+    return _format_report(app_name, updates_json)
 
 
 async def run_daily_standup(apps: dict[str, dict]) -> dict[str, str]:
