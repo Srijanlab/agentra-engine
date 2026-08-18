@@ -118,6 +118,14 @@ def test_alarm_trigger_respects_per_app_alarm_enabled(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path)
     environments.save(repo, environments.EnvironmentConfig(alarm_enabled=False))
+    # /trigger/alarm's Basic-auth gate (_verify_alarm_webhook_auth) only
+    # activates when ALARM_WEBHOOK_PASSWORD is set in the environment --
+    # this test isn't exercising that gate, so pin it unset rather than
+    # inheriting whatever happens to be in the ambient shell (confirmed
+    # live: a sandbox with that env var set made this test 401 instead of
+    # 200, see test_failure_triage.py's regression test for the resulting
+    # false-positive-unfixable-failure classification this caused).
+    monkeypatch.delenv("ALARM_WEBHOOK_PASSWORD", raising=False)
 
     response = TestClient(server.app).post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"})
 
