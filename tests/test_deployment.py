@@ -721,3 +721,94 @@ def test_promote_prod_merge_conflict_aborts_cleanly_and_never_deploys(tmp_path, 
     assert not _merge_in_progress(repo)
     assert _working_tree_is_clean(repo)
     assert _current_branch(repo) == "prod"
+
+
+def _fake_cleanup_docker(calls: list, *, container_ages_hours: dict | None = None, images: list | None = None):
+    """container_ages_hours: {name: age_in_hours}; those names are what
+    `docker ps -a --filter name=^prefix` returns. images: list of
+    "repo:tag" strings `docker images` returns."""
+    import datetime as _dt
+
+    container_ages_hours = container_ages_hours or {}
+    images = images or []
+
+    def _run(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(args, 0, stdout="\n".join(container_ages_hours) + ("\n" if container_ages_hours else ""), stderr="")
+        if args[:2] == ["docker", "inspect"]:
+            name = args[2]
+            age = container_ages_hours.get(name)
+            if age is None:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="no such object")
+            created = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=age)
+            return subprocess.CompletedProcess(args, 0, stdout=created.strftime("%Y-%m-%dT%H:%M:%S.000000000Z"), stderr="")
+        if args[:2] == ["docker", "images"]:
+            return subprocess.CompletedProcess(args, 0, stdout="\n".join(images) + ("\n" if images else ""), stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    return _run
+
+
+def test_cleanup_stale_preprod_removes_containers_and_images_older_than_the_threshold(monkeypatch):
+    config = _self_hosted_config()
+    docker_calls = []
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        _fake_cleanup_docker(
+            docker_calls,
+            container_ages_hours={"widget-app-preprod-old": 5.0, "widget-app-preprod-fresh": 0.1},
+            images=["widget-app-preprod:old", "widget-app-preprod:fresh", "widget-app-preprod:orphaned-image"],
+        ),
+    )
+
+    removed = deployment.cleanup_stale_preprod(config)
+
+    assert "widget-app-preprod-old" in removed
+    assert "widget-app-preprod-fresh" not in removed
+    rm_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
+    assert ["docker", "rm", "-f", "widget-app-preprod-old"] in rm_calls
+    assert ["docker", "rm", "-f", "widget-app-preprod-fresh"] not in rm_calls
+    # The old container's image is removed (no live container backs it anymore);
+    # the fresh one's image is kept; an image with no matching container at all
+    # (never listed in `docker ps`) is also swept, since nothing is using it.
+    assert "widget-app-preprod:old" in removed
+    assert "widget-app-preprod:fresh" not in removed
+    assert "widget-app-preprod:orphaned-image" in removed
+
+
+def test_cleanup_stale_preprod_leaves_everything_alone_when_nothing_is_stale(monkeypatch):
+    config = _self_hosted_config()
+    docker_calls = []
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        _fake_cleanup_docker(docker_calls, container_ages_hours={"widget-app-preprod-fresh": 0.1}, images=["widget-app-preprod:fresh"]),
+    )
+
+    removed = deployment.cleanup_stale_preprod(config)
+
+    assert removed == []
+    assert not any(c[:2] == ["docker", "rm"] for c in docker_calls)
+    assert not any(c[:2] == ["docker", "rmi"] for c in docker_calls)
+
+
+def test_deploy_pre_prod_self_hosted_sweeps_stale_siblings_before_deploying(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    cleanup_calls = []
+    monkeypatch.setattr(deployment, "cleanup_stale_preprod", lambda cfg: cleanup_calls.append(cfg) or [])
+    docker_calls = []
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is True
+    assert cleanup_calls == [config]

@@ -51,6 +51,9 @@ class OrchestratorSession:
     deployed_to_pre_prod: bool = False
     deploy_attempted: bool = False
     pre_prod_verified: bool = False
+    # Set by deploy_pre_prod (change_risk.classify_change) each time it's called --
+    # TRIVIAL or STANDARD. None until the first deploy_pre_prod call this run.
+    change_risk: str | None = None
     current_feature: str | None = None
     current_spec: str | None = None
     feature_branch: str | None = None

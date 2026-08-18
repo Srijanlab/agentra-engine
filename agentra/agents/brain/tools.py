@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from claude_agent_sdk import tool
 
+from agentra import change_risk
 from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, implementation, requirements, testing
 from agentra.agents import catalog as agents_catalog
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
@@ -126,11 +127,21 @@ def _tools_for(session: OrchestratorSession) -> list:
         in_progress = session.mem.in_progress_features()
         bugs = _attach_resume_branches(session.mem, _actionable_bugs(session.mem.known_bugs()))
         queue = _attach_resume_branches(session.mem, session.mem.feature_queue())
+        remaining_after_one = len(in_progress) + len(bugs) + len(queue) - 1
+        batching_hint = (
+            f"\n\n{remaining_after_one} more item(s) will still be waiting after you address one of "
+            "these -- if what you're about to build is not a trivial fix, consider implementing "
+            "several of them before your first deploy_pre_prod call this run (it deploys/verifies "
+            "everything implemented so far together, see its own description), rather than paying "
+            "for a full pre-prod deploy + live verification once per item."
+            if remaining_after_one > 0 else ""
+        )
         text = (
             f"In-progress multi-part features (resume these first): {json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
             f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
             f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
             f"Already shipped: {shipped or '(none)'}"
+            f"{batching_hint}"
         )
         session.note("check_backlog", ok=True)
         return {"content": [{"type": "text", "text": text}]}
@@ -283,6 +294,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         feature_name = data.get("feature") or brief.split(":")[0].strip()
         session.tests_passed = False
         session.pre_prod_verified = False
+        session.change_risk = None
         session.note(
             f"implement_feature: ok={impl.ok} feature={feature_name!r}",
             ok=impl.ok,
@@ -438,7 +450,14 @@ def _tools_for(session: OrchestratorSession) -> list:
 
     @tool(
         "deploy_pre_prod",
-        "Deploy feature to the pre-prod environment. Requires passing local tests first.",
+        "Deploy everything implemented so far this run (implement_feature may have been called "
+        "more than once) to the pre-prod environment. Requires passing local tests first. "
+        "Automatically classifies the accumulated change: a trivial one (test fix, docs, config, "
+        "rename, or a couple-line bug fix) is merged straight to pre-prod without a full deploy or "
+        "live verification -- passing local tests is already enough proof at that size. A "
+        "non-trivial change gets the real deploy, and should go through verify_pre_prod next. "
+        "Prefer batching: if check_backlog showed more non-trivial items waiting, implement several "
+        "before your first call here rather than deploying once per item.",
         {},
     )
     async def deploy_pre_prod(_args):
@@ -459,6 +478,41 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Refused: nothing to deploy -- call implement_feature first."}],
                 "is_error": True,
             }
+
+        from agentra.agents.git_ops import fetch_ref
+
+        try:
+            fetch_ref(session.repo, session.env.pre_prod_branch)
+        except Exception:
+            pass  # best-effort -- classify_change falls back to STANDARD if the diff can't be read
+        session.change_risk = change_risk.classify_change(
+            session.repo, f"origin/{session.env.pre_prod_branch}", session.feature_branch
+        )
+        session.note(f"deploy_pre_prod: change_risk={session.change_risk}", ok=True)
+
+        if session.change_risk == change_risk.TRIVIAL:
+            deploy = await deployment.merge_to_pre_prod_only(session.repo, session.env, session.feature_branch)
+            session.deploy_attempted = True
+            session.cost_usd += deploy.cost_usd
+            ok = deploy.ok
+            session.pre_prod_url = None
+            session.deployed_to_pre_prod = ok
+            # A passing local test suite is the whole point of the TRIVIAL
+            # classification -- there is no live instance to verify, so treat
+            # this as already verified rather than leaving pre_prod_verified
+            # false and making the LLM think verify_pre_prod still applies.
+            session.pre_prod_verified = ok
+            session.note(f"deploy_pre_prod: trivial change, merged only: ok={ok}", ok=ok, cost_usd=deploy.cost_usd)
+            if not ok:
+                session.mem.record_failure(session.run_id, "deployment", deploy.text)
+                session.record_failure("deploy_pre_prod")
+            else:
+                session.record_success("deploy_pre_prod")
+            return {
+                "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this change."}],
+                "is_error": not ok,
+            }
+
         strategy = deployment.PRE_PROD_STRATEGIES[session.env.deploy_strategy]
         deploy = await strategy(
             session.repo, session.env, session.feature_branch, session.run_id, session.session_id
@@ -518,6 +572,11 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def verify_pre_prod(_args):
         if stop := session.check_hard_stop():
             return stop
+        if session.change_risk == change_risk.TRIVIAL:
+            session.note("verify_pre_prod: skipped, deploy_pre_prod classified this change as trivial", ok=True)
+            return {
+                "content": [{"type": "text", "text": "Nothing to verify -- deploy_pre_prod classified this as a trivial change and already merged it without a live deploy."}],
+            }
         if not session.pre_prod_url:
             return {
                 "content": [{"type": "text", "text": "Call deploy_pre_prod first — no live URL to verify yet."}],

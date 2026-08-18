@@ -29,6 +29,7 @@ URLs, running smoke tests.
 import asyncio
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentra.agents.base import AgentResult, run_agent
@@ -336,6 +337,32 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
     return None
 
 
+async def merge_to_pre_prod_only(repo: Path, env: EnvironmentConfig, feature_branch: str) -> AgentResult:
+    """Lands feature_branch on pre_prod_branch without spinning up any deploy
+    or live verification -- the path agents/brain/tools.py's deploy_pre_prod
+    tool takes when change_risk.classify_change() says TRIVIAL (a test fix,
+    docs edit, rename, or a couple-line bug fix). A full pre-prod deploy +
+    Testing Agent turn costs real docker resources and an LLM turn actually
+    driving a browser; for a change this small, a passing local test suite is
+    already as much confidence as that heavier path would add. Strategy-
+    agnostic (git-only) since every deploy_strategy merges to the same
+    pre_prod_branch regardless of how it then deploys."""
+    _sync_branch_to_remote(repo, env.pre_prod_branch)
+    error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
+    if error:
+        return AgentResult(ok=False, text=error, json_data=None, cost_usd=0.0, turns=0)
+    return AgentResult(
+        ok=True,
+        text=(
+            "Trivial change (test/docs/config-only or a very small diff) merged to "
+            f"{env.pre_prod_branch!r} without a full pre-prod deploy or live verification -- "
+            "the passing local test suite is sufficient proof for a change this size."
+        ),
+        json_data={"status": "skipped_light", "preview_url": None},
+        cost_usd=0.0, turns=0,
+    )
+
+
 async def deploy_pre_prod(
     repo: Path, env: EnvironmentConfig, feature_branch: str, session_id: str | None = None
 ) -> AgentResult:
@@ -395,6 +422,70 @@ def _preprod_image_tag(config: "environments.SelfHostedVMConfig", run_id: str) -
     return f"{_local_image_name(config)}-preprod:{run_id}"
 
 
+_STALE_PREPROD_MAX_AGE_HOURS = 2.0
+
+
+def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hours: float = _STALE_PREPROD_MAX_AGE_HOURS) -> list[str]:
+    """Sweeps any deploy_pre_prod_self_hosted sibling container/image left
+    behind by a run that crashed, hit its cost cap, or was killed before
+    verify_pre_prod's own single-shot teardown_self_hosted_preprod ran --
+    that teardown only fires on the happy path (see its own docstring), so
+    nothing else ever reclaims a leaked sibling otherwise. A real pre-prod
+    deploy + verify + teardown cycle takes minutes; anything still alive
+    past max_age_hours is orphaned, not mid-flight.
+
+    Runs at the start of every deploy_pre_prod_self_hosted call (a handful
+    of cheap docker list/inspect calls) rather than needing a separate cron
+    entry or scheduling infra of its own -- self-healing on next use.
+    Best-effort throughout: a removal failure just leaves that one resource
+    for the next sweep to retry, never fails the caller's actual deploy.
+    Returns the names of everything it removed, purely for logging."""
+    prefix = f"{_local_image_name(config)}-preprod-"
+    removed: list[str] = []
+
+    ps = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"name=^{prefix}", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    live_names = {n for n in ps.stdout.splitlines() if n.strip()}
+    for name in list(live_names):
+        created = subprocess.run(
+            ["docker", "inspect", name, "--format", "{{.Created}}"], capture_output=True, text=True,
+        )
+        if created.returncode != 0:
+            continue
+        try:
+            # Docker's .Created is RFC3339 with nanosecond precision (e.g.
+            # "...123456789Z") -- datetime.fromisoformat only accepts up to
+            # microseconds, so truncate before the trailing Z.
+            raw = created.stdout.strip().rstrip("Z")
+            if "." in raw:
+                whole, frac = raw.split(".", 1)
+                raw = f"{whole}.{frac[:6]}"
+            created_at = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
+        if age_hours < max_age_hours:
+            continue
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True)
+        removed.append(name)
+        live_names.discard(name)
+
+    images = subprocess.run(
+        ["docker", "images", f"{_local_image_name(config)}-preprod", "--format", "{{.Repository}}:{{.Tag}}"],
+        capture_output=True, text=True,
+    )
+    for image in (i for i in images.stdout.splitlines() if i.strip()):
+        run_id = image.rsplit(":", 1)[-1]
+        if f"{prefix}{run_id}" in live_names:
+            continue  # still backing a live (non-stale) container
+        subprocess.run(["docker", "rmi", image], capture_output=True, text=True)
+        removed.append(image)
+
+    return removed
+
+
 async def deploy_pre_prod_self_hosted(
     repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str
 ) -> AgentResult:
@@ -429,6 +520,8 @@ async def deploy_pre_prod_self_hosted(
     config = environments.load_self_hosted_vm_config(repo)
     if config is None:
         return AgentResult(ok=False, text=_NOT_CONFIGURED_TEXT, json_data=None, cost_usd=0.0, turns=0)
+
+    cleanup_stale_preprod(config)
 
     _sync_branch_to_remote(repo, env.pre_prod_branch)
     error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
