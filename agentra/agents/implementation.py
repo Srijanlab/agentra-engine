@@ -103,6 +103,15 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
             # feature_branch's tree wants there, and checkout refuses rather
             # than clobber it.
             subprocess.run(["git", "-C", str(repo), "clean", "-fd", ".agentra/"], check=True, capture_output=True, text=True)
+            # Same reasoning, for already-TRACKED .agentra/ paths with local
+            # modifications instead of new untracked ones -- see the fresh-fork
+            # path's own comment below for how this actually happens
+            # (understand_codebase regenerating codebase.md/design.md without
+            # committing). clean -fd never touches these (it only removes
+            # untracked files); checkout refuses to switch onto a branch whose
+            # tree differs for a locally-modified tracked path. Best-effort,
+            # no check=True: harmless no-op if .agentra/ isn't tracked yet at all.
+            subprocess.run(["git", "-C", str(repo), "checkout", "--", ".agentra/"], capture_output=True, text=True)
             subprocess.run(
                 ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{feature_branch}"],
                 check=True, capture_output=True, text=True,
@@ -141,6 +150,17 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
         ["git", "-C", str(repo), "clean", "-fd", ".agentra/"],
         check=True, capture_output=True, text=True,
     )
+    # Confirmed live (run 26bf7dee, 2026-08-18): clean -fd above only removes
+    # UNTRACKED files -- once a prior cycle's persist_audit_trail has committed
+    # architecture/codebase.md and architecture/design.md onto pre_prod_branch,
+    # this run's own understand_codebase step (which runs before this, and
+    # regenerates both without committing) leaves local MODIFICATIONS to those
+    # now-tracked paths instead, which clean -fd doesn't touch and checkout
+    # refuses to silently overwrite -- "Your local changes to the following
+    # files would be overwritten by checkout". Same regenerable-bookkeeping
+    # reasoning as clean -fd above applies to discarding modifications too.
+    # Best-effort, no check=True: harmless no-op if .agentra/ isn't tracked yet.
+    subprocess.run(["git", "-C", str(repo), "checkout", "--", ".agentra/"], capture_output=True, text=True)
     subprocess.run(
         ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{pre_prod_branch}"],
         check=True, capture_output=True, text=True,
