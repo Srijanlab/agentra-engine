@@ -30,6 +30,7 @@ deployed -- exactly the class of bug this pass exists to catch.
 """
 
 import datetime as dt
+import json
 import logging
 from pathlib import Path
 
@@ -107,6 +108,15 @@ app is actually deployed and serving traffic:
    mark a criterion verified because the deploy succeeded or because it \
    sounds plausible; only because you actually exercised it and saw the \
    result.
+2a. Record one entry per criterion in test_cases below -- the reachability \
+   check from (1) as its own entry plus one entry for each acceptance \
+   criterion you were given, never a single collapsed verdict covering \
+   several criteria. Each entry needs the exact criterion text, a "pass" \
+   or "fail" result, and a short evidence note describing what you \
+   actually did and saw (e.g. "curled /api/x, got 200 with expected body" \
+   or "clicked the button, no visible change -- fail"), not a restatement \
+   of the criterion. A human reviewing this run before promoting to prod \
+   reads this list directly, so it must reflect exactly what you checked.
 3. If the project has e2e/browser tests configured (e.g. Playwright) that \
    support pointing at an external base URL, run them against {preview_url} \
    instead of a local dev server. Do not set up new e2e infrastructure \
@@ -131,6 +141,9 @@ End your response with a fenced ```json block shaped like:
   "status": "pass" | "fail",
   "reachable": true | false,
   "feature_verified": true | false,
+  "test_cases": [
+    {{"criterion": "...", "result": "pass" | "fail", "evidence": "..."}}
+  ],
   "incidental_findings": [
     {{"diagnosis": "...", "severity": "low" | "medium" | "high", "proposed_fix": "..."}}
   ],
@@ -174,6 +187,44 @@ Run the full local test/QA pass now, following your system prompt."""
 
 def screenshot_path(repo: Path, run_id: str) -> Path:
     return repo / ".agentra" / "test_artifacts" / run_id / "screenshot.png"
+
+
+def report_path(repo: Path, run_id: str) -> Path:
+    """The structured (JSON) test-report artifact for a run's live pre-prod
+    verification -- same test_artifacts/{run_id}/ directory as
+    screenshot_path and the human-readable report.md _write_report already
+    produces below, so a human reviewing a run's promotion has the
+    itemized per-criterion breakdown, the prose summary, and the
+    screenshot all in one place. Same durability tier as both: VM-local
+    only (test_artifacts/ is gitignored), lost on the next redeploy --
+    server.py's /runs/{run_key}/test-report route 404s the same way the
+    screenshot route does when this file never got written (e.g. this run
+    never ran live pre-prod verification at all)."""
+    return repo / ".agentra" / "test_artifacts" / run_id / "report.json"
+
+
+def _persist_structured_report(repo: Path, run_id: str, data: dict, *, screenshot_captured: bool) -> None:
+    """Persists run_pre_prod's structured JSON verdict (status, per-criterion
+    test_cases, incidental findings, notes) for server.py's
+    /runs/{run_key}/test-report endpoint -- the dashboard's Review Promotion
+    panel reads this, distinct from _write_report's prose report.md below.
+    Written whenever the agent returned any parsed JSON at all, even a
+    failed run -- a human reviewing a failed pre-prod verification still
+    wants the itemized breakdown of what failed, not just a bare "fail"."""
+    path = report_path(repo, run_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "status": data.get("status"),
+            "reachable": data.get("reachable"),
+            "feature_verified": data.get("feature_verified"),
+            "test_cases": data.get("test_cases") or [],
+            "incidental_findings": data.get("incidental_findings") or [],
+            "notes": data.get("notes"),
+            "screenshot_captured": screenshot_captured,
+        }, indent=2))
+    except OSError:
+        logger.warning("run_pre_prod: failed to write structured test report to %s", path, exc_info=True)
 
 
 def _write_report(repo: Path, run_id: str, spec: str, preview_url: str, result: AgentResult) -> None:
@@ -260,4 +311,6 @@ Independently verify the live deployment now, following your system prompt."""
         resume=session_id,
     )
     _write_report(repo, run_id, spec, preview_url, result)
+    if result.json_data:
+        _persist_structured_report(repo, run_id, result.json_data, screenshot_captured=ok)
     return result

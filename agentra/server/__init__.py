@@ -19,7 +19,7 @@ from agentra.memory import Memory
 from agentra.server.state import _active_runs, _app_locks
 from agentra.server.utils import _strip_log_timestamp
 from agentra.server.routes.chat import AGENT_VOICES
-from agentra.server.routes.triggers import _record_production_release, _branch_head_sha
+from agentra.server.routes.triggers import _record_production_release, _branch_head_sha, _run_promote_background
 
 logger = logging.getLogger("agentra.server")
 
@@ -51,6 +51,18 @@ def _run_screenshot_path(run_key: str) -> Path | None:
     from agentra.agents.testing import screenshot_path
 
     return screenshot_path(repo, run_key)
+
+
+def _run_report_path(run_key: str) -> Path | None:
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
+    if run is None:
+        return None
+    repo = registry.get_app_repo(run["app"])
+    if repo is None:
+        return None
+    from agentra.agents.testing import report_path
+
+    return report_path(repo, run_key)
 
 
 @app.get("/", response_model=None)
@@ -125,6 +137,31 @@ async def get_run_screenshot(run_key: str) -> FileResponse:
     if path is None or not path.exists():
         raise HTTPException(status_code=404, detail="no screenshot captured for this run")
     return FileResponse(path, media_type="image/png")
+
+
+@app.get("/runs/{run_key}/test-report")
+async def get_run_test_report(run_key: str) -> dict:
+    """Structured, itemized test-case results from the Testing Agent's live
+    pre-prod verification (agents/testing.py's run_pre_prod) -- the data
+    behind the dashboard's 'Review promotion' panel, so a human sees each
+    acceptance criterion's pass/fail (plus the reachability check) before
+    clicking Promote, not just a single aggregate verdict.
+
+    Same 404-if-absent pattern as /runs/{run_key}/screenshot: most runs
+    never ran live pre-prod verification at all (source='promote', or an
+    app with no live preview URL configured), so a 404 here is the common
+    case, not a real error -- the dashboard falls back to today's plain
+    promotion messaging rather than blocking promotion on it."""
+    run = _active_runs.get(run_key) or registry.get_run(run_key)
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run_key")
+    path = _run_report_path(run_key)
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="no test report available for this run")
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        raise HTTPException(status_code=404, detail="no test report available for this run")
 
 
 @app.get("/agents/metadata")

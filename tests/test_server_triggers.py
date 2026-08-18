@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import time
 from pathlib import Path
@@ -5,6 +6,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from agentra import environments, registry, server
+from agentra.agents import deployment, git_ops
+from agentra.agents.base import AgentResult
 from agentra.connectors import github_fake
 from agentra.memory import Memory
 
@@ -186,6 +189,86 @@ def test_promote_endpoint_records_human_approved_run(tmp_path, monkeypatch):
     recorded = registry.get_run(body["run_key"])
     assert recorded["source"] == "promote"
     assert recorded["status"] == "queued"
+
+
+def test_promote_button_click_merges_tested_commit_and_reports_success_end_to_end(tmp_path, monkeypatch):
+    """Issue #2/#5 ("On Promote: merge the tested commit to main, build, and
+    deploy to prod"): the other endpoint-level tests in this file only
+    check that POST /apps/{app}/promote *dispatches* a run (create_task is
+    swallowed via _close_background_coro in _isolate_registry) -- none of
+    them actually exercise what happens once that background task runs.
+    This drives the real chain the dashboard's Promote button depends on:
+    HTTP endpoint -> _run_promote_background -> orchestrator.run_promote ->
+    deployment.promote_prod -> a real `git merge`/push of the pre-prod
+    branch's tip (the commit the human just reviewed a test report for)
+    into the prod branch -- only the LLM run_agent call is faked, same
+    convention as test_deployment.py. Confirms the run this produces is
+    exactly what RunDetailDrawer.tsx's promote() reads back: result.promoted
+    is True, and prod branch content actually reflects the promoted commit.
+    """
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    _git(repo, "checkout", "-b", "prod")
+    _git(repo, "checkout", "-b", "beta")
+    (repo / "README.md").write_text("hello\nbeta feature change\n")
+    _git(repo, "commit", "-am", "beta: the feature that was just pre-prod-tested")
+    beta_tip = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "beta"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    _git(repo, "checkout", "prod")
+    environments.save(repo, environments.EnvironmentConfig(pre_prod_branch="beta", prod_branch="prod"))
+
+    def _fake_pull_latest(_repo, branch):
+        assert branch == "prod"
+        _git(_repo, "checkout", branch)
+
+    def _fake_fetch_ref(_repo, branch):
+        assert branch == "beta"
+        # No real "origin" remote in this test repo -- fake having fetched
+        # by pointing refs/remotes/origin/beta at the real local beta tip,
+        # exactly as real as an actual fetch would produce for _merge_and_push's
+        # subsequent `git merge origin/beta`.
+        _git(_repo, "update-ref", "refs/remotes/origin/beta", "refs/heads/beta")
+
+    def _fake_push_branch(_repo, branch):
+        assert branch == "prod"
+
+    async def _fake_run_agent(**kwargs):
+        assert kwargs.get("allow_prod") is True
+        return AgentResult(ok=True, text="deployed to prod", json_data={"status": "deployed"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(git_ops, "pull_latest", _fake_pull_latest)
+    monkeypatch.setattr(git_ops, "fetch_ref", _fake_fetch_ref)
+    monkeypatch.setattr(git_ops, "push_branch", _fake_push_branch)
+    monkeypatch.setattr(deployment, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(deployment, "persist_audit_trail", lambda _repo, _branch: None)
+
+    response = TestClient(server.app).post("/apps/myapp/promote")
+    assert response.status_code == 200
+    run_key = response.json()["run_key"]
+
+    # _isolate_registry patches asyncio.create_task to just close the
+    # coroutine without running it (so unrelated tests in this file don't
+    # need real git plumbing) -- here we run that exact same coroutine for
+    # real, which is the only difference between "dispatched" and "the
+    # human actually saw it finish."
+    asyncio.run(server._run_promote_background(run_key, "myapp", repo))
+
+    recorded = registry.get_run(run_key)
+    assert recorded["status"] == "completed"
+    assert recorded["result"]["promoted"] is True
+
+    # The prod branch's tip now IS the exact commit that was reviewed/tested
+    # on beta -- never a different or newer one -- and its content reflects
+    # the merge, proving this isn't just a status flag with no real effect.
+    # prod had no commits of its own beyond beta's history here, so this
+    # merge fast-forwards; prod_tip landing exactly on beta_tip is the
+    # strongest form of "the tested commit, not a different/newer one."
+    prod_tip = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "prod"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert prod_tip == beta_tip
+    assert (repo / "README.md").read_text() == "hello\nbeta feature change\n"
 
 
 def test_promote_background_records_released_features(tmp_path, monkeypatch):
