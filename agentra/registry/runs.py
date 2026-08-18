@@ -125,11 +125,11 @@ def reconcile_stale_runs() -> list[str]:
             continue
         run_key = run["run_key"]
         last_activity = steps_by_run.get(run_key, run.get("started_at", now))
-        if now - last_activity > core.STALE_RUN_SECONDS:
+        if now - last_activity > core.STALE_PROCESSING_SECONDS:
             record_run(
                 run_key,
                 status="failed",
-                error=f"orphaned: no activity for over {core.STALE_RUN_SECONDS // 60} minutes -- "
+                error=f"orphaned: no activity for over {core.STALE_PROCESSING_SECONDS // 60} minutes -- "
                 "the process running this cycle likely died (e.g. an OOM kill or revision rollout)",
             )
             marked.append(run_key)

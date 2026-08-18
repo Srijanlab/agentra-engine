@@ -392,3 +392,29 @@ def test_agent_metadata_endpoint_covers_every_roster_entry():
         assert meta.get("capability"), f"{agent_id} has no capability set"
         for tool in meta["tools"]:
             assert tool["permission"] in valid_permissions
+
+
+def test_reconcile_stale_runs_marks_orphaned_run_failed(tmp_path, monkeypatch):
+    """Regression test: reconcile_stale_runs() referenced
+    core.STALE_RUN_SECONDS, which was never actually defined on
+    registry/core.py (only STALE_PROCESSING_SECONDS exists) -- an
+    AttributeError that crashed every call to it with a 500, including
+    from GET /runs (systems.py calls it on every request). Confirmed live
+    against the deployed VM. No prior test exercised the actual comparison
+    line (only ever ran against empty queued/running lists), so this
+    real production bug shipped and stayed live undetected."""
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path, "stale-app")
+
+    stale_started = time.time() - registry.STALE_PROCESSING_SECONDS - 60
+    registry.record_run("stuck-run", app="stale-app", status="running", started_at=stale_started, source="scheduled")
+    registry.record_run("fresh-run", app="stale-app", status="running", started_at=time.time(), source="scheduled")
+
+    marked = registry.reconcile_stale_runs()
+
+    assert marked == ["stuck-run"]
+    stuck = registry.get_run("stuck-run")
+    assert stuck["status"] == "failed"
+    assert "orphaned" in stuck["error"]
+    # The still-active run must be left alone.
+    assert registry.get_run("fresh-run")["status"] == "running"
