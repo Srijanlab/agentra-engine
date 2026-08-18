@@ -29,10 +29,14 @@ it's re-reading code that might look right and still not work once
 deployed -- exactly the class of bug this pass exists to catch.
 """
 
+import datetime as dt
+import logging
 from pathlib import Path
 
 from agentra.agents.base import AgentResult, run_agent
 from agentra.memory import Memory
+
+logger = logging.getLogger(__name__)
 
 LOCAL_SYSTEM_PROMPT = """You are the Testing Agent in an autonomous product \
 engineering system, running in LOCAL mode. A feature was just implemented. \
@@ -172,6 +176,54 @@ def screenshot_path(repo: Path, run_id: str) -> Path:
     return repo / ".agentra" / "test_artifacts" / run_id / "screenshot.png"
 
 
+def _write_report(repo: Path, run_id: str, spec: str, preview_url: str, result: AgentResult) -> None:
+    """Durable test report packet for a human to review, synthesizing the
+    verification verdict rather than just dumping raw JSON -- same directory
+    as the screenshot captured above. Every pre-prod verification gets one,
+    not just agentra-fixing-agentra's self-hosted path (EnvironmentConfig.
+    self_hosted_vm) -- that path just happens to have no public preview URL
+    to otherwise point a reviewer at, but the artifact is generically useful.
+    Best-effort: a failure to write this must never fail the verification
+    call itself."""
+    data = result.json_data or {}
+    lines = [
+        f"# Pre-prod verification report — run {run_id}",
+        "",
+        f"Preview URL: {preview_url}",
+        f"Verified: {dt.datetime.now(dt.timezone.utc).isoformat()}",
+        "",
+        "## Spec / acceptance criteria",
+        spec,
+        "",
+        "## Verdict",
+        f"- status: {data.get('status', 'unknown')}",
+        f"- reachable: {data.get('reachable', 'unknown')}",
+        f"- feature_verified: {data.get('feature_verified', 'unknown')}",
+        f"- notes: {data.get('notes', '')}",
+    ]
+    findings = data.get("incidental_findings") or []
+    if findings:
+        lines.append("")
+        lines.append("## Incidental findings")
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            lines.append(
+                f"- [{finding.get('severity', 'unknown')}] {finding.get('diagnosis', '')} "
+                f"(proposed fix: {finding.get('proposed_fix', '')})"
+            )
+    screenshot_file = screenshot_path(repo, run_id)
+    report_path = screenshot_file.parent / "report.md"
+    if screenshot_file.exists():
+        lines.append("")
+        lines.append(f"## Screenshot\n\n![screenshot]({screenshot_file.name})")
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("\n".join(lines))
+    except OSError:
+        logger.warning("run_pre_prod: failed to write test report packet to %s", report_path, exc_info=True)
+
+
 async def run_pre_prod(
     repo: Path, spec: str, preview_url: str, run_id: str, session_id: str | None = None
 ) -> AgentResult:
@@ -197,7 +249,7 @@ The feature was just deployed to: {preview_url}
 
 Independently verify the live deployment now, following your system prompt."""
     system_prompt = PRE_PROD_SYSTEM_PROMPT.format(preview_url=preview_url)
-    return await run_agent(
+    result = await run_agent(
         prompt=prompt,
         system_prompt=system_prompt,
         cwd=repo,
@@ -207,3 +259,5 @@ Independently verify the live deployment now, following your system prompt."""
         agent_label="Testing Agent",
         resume=session_id,
     )
+    _write_report(repo, run_id, spec, preview_url, result)
+    return result

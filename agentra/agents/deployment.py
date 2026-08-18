@@ -4,6 +4,11 @@ deploy_pre_prod() is what every regular cycle calls: push to the pre-prod
 branch, deploy the isolated Firebase pre-prod project + a Vercel preview,
 smoke test. It never touches production.
 
+deploy_pre_prod_self_hosted() is the equivalent for agentra's own repo
+(EnvironmentConfig.self_hosted_vm), which has neither Vercel nor Firebase --
+it builds and runs a sibling orchestrator container on the same VM instead,
+reachable only over an internal Docker network. See its own docstring.
+
 promote_prod() is the one place in the whole system that's allowed to touch
 production, and only when called with allow_prod=True by a caller that has
 already checked EnvironmentConfig.auto_remediate_prod (see
@@ -21,6 +26,7 @@ its judgment: interpreting `vercel`/`firebase` CLI output, capturing preview
 URLs, running smoke tests.
 """
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -361,6 +367,125 @@ async def deploy_pre_prod(
         agent_label="Deployment Agent",
         resume=session_id,
     )
+
+
+_PREPROD_NETWORK = "agentra-preprod-net"
+_PREPROD_HEALTH_CHECK_ATTEMPTS = 10
+_PREPROD_HEALTH_CHECK_DELAY_SECONDS = 3
+
+
+def _preprod_container_name(run_id: str) -> str:
+    return f"agentra-preprod-{run_id}"
+
+
+def _preprod_image_tag(run_id: str) -> str:
+    return f"agentra-preprod:{run_id}"
+
+
+async def deploy_pre_prod_self_hosted(
+    repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str
+) -> AgentResult:
+    """Pre-prod deploy for agentra's OWN repo (EnvironmentConfig.self_hosted_vm
+    only) -- the generic deploy_pre_prod above only knows Vercel/Firebase, which
+    this repo has neither of. Builds and runs a second, isolated orchestrator
+    container alongside the running prod one, on the same VM, reachable only
+    over an internal Docker network -- never the public internet.
+
+    Deliberately no run_agent/LLM call anywhere in this function: spinning up
+    a sibling container requires /var/run/docker.sock access (mounted into the
+    prod container only for this purpose), and that capability must stay
+    fixed, deterministic plumbing an agent turn can never freely improvise
+    over -- same reasoning as _merge_and_push/persist_audit_trail's git
+    operations, just a higher-stakes one (host-level Docker control, not just
+    this repo's own git history).
+
+    Returns the same AgentResult/json_data shape (status/preview_url/notes)
+    as the generic deploy_pre_prod, so every downstream consumer (tools.py's
+    deploy_pre_prod wrapper, verify_pre_prod, HUMAN_INPUT_REQUIRED handling)
+    works completely unmodified regardless of which path produced it. Call
+    teardown_self_hosted_preprod(run_id) once the report this enables has
+    been produced -- this function does not tear down after itself, since the
+    caller still needs the container alive to verify it.
+    """
+    _sync_branch_to_remote(repo, env.pre_prod_branch)
+    error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
+    if error:
+        return AgentResult(ok=False, text=error, json_data=None, cost_usd=0.0, turns=0)
+
+    container_name = _preprod_container_name(run_id)
+    image_tag = _preprod_image_tag(run_id)
+    claude_home = str(Path.home() / ".claude")
+
+    build = subprocess.run(
+        ["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True,
+    )
+    if build.returncode != 0:
+        return AgentResult(
+            ok=False, text=f"docker build {image_tag} failed: {build.stderr.strip()}",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+
+    # Idempotent: both no-op harmlessly (network already exists / prod
+    # container already attached) on every call after the first.
+    subprocess.run(["docker", "network", "create", _PREPROD_NETWORK], capture_output=True, text=True)
+    subprocess.run(["docker", "network", "connect", _PREPROD_NETWORK, "agentra"], capture_output=True, text=True)
+
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
+    run = subprocess.run(
+        [
+            "docker", "run", "-d", "--name", container_name,
+            "--network", _PREPROD_NETWORK,
+            "--memory=1g", "--cpus=1",
+            "-v", f"{claude_home}:/home/agentuser/.claude:ro",
+            "-e", "AGENTRA_FIRESTORE_PROJECT=agentra-prod",
+            image_tag, "serve", "--port", "8080",
+        ],
+        capture_output=True, text=True,
+    )
+    if run.returncode != 0:
+        return AgentResult(
+            ok=False, text=f"docker run {container_name} failed: {run.stderr.strip()}",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+
+    preview_url = f"http://{container_name}:8080"
+    healthy = False
+    for _ in range(_PREPROD_HEALTH_CHECK_ATTEMPTS):
+        check = subprocess.run(
+            ["docker", "exec", container_name, "curl", "-sf", "http://localhost:8080/health"],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0:
+            healthy = True
+            break
+        await asyncio.sleep(_PREPROD_HEALTH_CHECK_DELAY_SECONDS)
+
+    if not healthy:
+        return AgentResult(
+            ok=False,
+            text=f"{container_name} did not become healthy on {preview_url}/health within "
+            f"{_PREPROD_HEALTH_CHECK_ATTEMPTS * _PREPROD_HEALTH_CHECK_DELAY_SECONDS}s.",
+            json_data={"status": "failed", "preview_url": preview_url},
+            cost_usd=0.0, turns=0,
+        )
+
+    return AgentResult(
+        ok=True,
+        text=f"Self-hosted pre-prod instance {container_name!r} is up at {preview_url}.",
+        json_data={"status": "deployed", "preview_url": preview_url, "notes": f"internal-only, image {image_tag!r}"},
+        cost_usd=0.0, turns=0,
+    )
+
+
+def teardown_self_hosted_preprod(run_id: str) -> None:
+    """Best-effort cleanup of a deploy_pre_prod_self_hosted sibling -- single-shot,
+    ephemeral lifecycle, so nothing accumulates across features tested over time.
+    Swallows failures: a leftover container/image is a minor disk/resource cost,
+    not worth failing the run over."""
+    container_name = _preprod_container_name(run_id)
+    image_tag = _preprod_image_tag(run_id)
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
+    subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
 
 
 async def promote_prod(repo: Path, env: EnvironmentConfig, session_id: str | None = None) -> AgentResult:

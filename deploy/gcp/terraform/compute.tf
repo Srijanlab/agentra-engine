@@ -116,6 +116,12 @@ locals {
 
     IMAGE="${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_registry_repo}/agentra:${var.image_tag}"
 
+    # Group ID of the HOST's docker.sock (not guessed/hardcoded at image-build
+    # time -- COS's own dockerd may not match a GID baked into the agentra
+    # image). --group-add below grants agentuser (uid 1000, no root, no sudo)
+    # access to the bind-mounted socket via this supplementary group instead.
+    DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"
+
     docker rm -f agentra 2>/dev/null || true
     docker pull "$IMAGE"
     # Every redeploy pulls a fresh :staging image without ever removing the
@@ -129,6 +135,8 @@ locals {
       -v "$MOUNT/claude:/home/agentuser/.claude" \
       -v "$MOUNT/agentra-home:/home/agentuser/.agentra" \
       -v "$MOUNT/repos:/workspace" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      --group-add "$DOCKER_SOCK_GID" \
       -e AGENTRA_FIRESTORE_PROJECT="${var.project_id}" \
       -e AGENTRA_REPOS_ROOT=/home/agentuser/repos \
       -e GIT_AUTHOR_NAME="${var.git_author_name}" \

@@ -459,9 +459,14 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Refused: nothing to deploy -- call implement_feature first."}],
                 "is_error": True,
             }
-        deploy = await deployment.deploy_pre_prod(
-            session.repo, session.env, session.feature_branch, session_id=session.session_id
-        )
+        if session.env.self_hosted_vm:
+            deploy = await deployment.deploy_pre_prod_self_hosted(
+                session.repo, session.env, session.feature_branch, session.run_id
+            )
+        else:
+            deploy = await deployment.deploy_pre_prod(
+                session.repo, session.env, session.feature_branch, session_id=session.session_id
+            )
         session.deploy_attempted = True
         session.cost_usd += deploy.cost_usd
         session.session_id = deploy.session_id or session.session_id
@@ -539,6 +544,11 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("verify_pre_prod")
         else:
             session.record_success("verify_pre_prod")
+        if session.env.self_hosted_vm:
+            # Single-shot, ephemeral sibling -- tear it down once its report is
+            # produced (pass or fail) so it doesn't accumulate across features
+            # tested over time.
+            deployment.teardown_self_hosted_preprod(session.run_id)
         return {
             "content": [{"type": "text", "text": f"Live verification {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],
             "is_error": not passed,

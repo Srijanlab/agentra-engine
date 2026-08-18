@@ -42,6 +42,12 @@ class EnvironmentConfig:
     # verified hotfix straight to prod once it passes pre-prod testing, with
     # no human approval step. False is the safe default for every app.
     auto_remediate_prod: bool = False
+    # Opt-in only, and only ever true for agentra's own repo. When true,
+    # deploy_pre_prod (agents/deployment.py) builds and runs a sibling
+    # orchestrator container on the same VM instead of driving Vercel/
+    # Firebase CLIs -- see deploy_pre_prod_self_hosted. False (the default)
+    # keeps every other app on the normal Vercel/Firebase path.
+    self_hosted_vm: bool = False
     # Per-app schedule: how often a scheduled cycle should actually run this
     # app, in hours. The dashboard's dashboard-configurable "one Cloud
     # Scheduler tick decides per-app whether it's due" design (rather than a
@@ -84,8 +90,9 @@ _GITHUB_VARIABLE_NAMES = {
     "auto_remediate_prod": "AGENTRA_AUTO_REMEDIATE_PROD",
     "schedule_hours": "AGENTRA_SCHEDULE_HOURS",
     "alarm_enabled": "AGENTRA_ALARM_ENABLED",
+    "self_hosted_vm": "AGENTRA_SELF_HOSTED_VM",
 }
-_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled"}
+_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled", "self_hosted_vm"}
 _FLOAT_FIELDS = {"schedule_hours"}
 
 

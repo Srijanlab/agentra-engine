@@ -366,6 +366,111 @@ def test_deploy_pre_prod_merge_conflict_aborts_without_deploying_or_touching_pro
     assert _working_tree_is_clean(repo)
 
 
+# -- deploy_pre_prod_self_hosted / teardown_self_hosted_preprod: agentra's own repo,
+# no run_agent call at all -- deterministic docker CLI plumbing only ---------------
+
+
+def _fake_docker_run(calls: list, *, build_ok=True, run_ok=True, health_ok=True):
+    def _run(args, **kwargs):
+        calls.append(list(args))
+        import subprocess as _subprocess
+
+        if args[:2] == ["docker", "build"]:
+            return _subprocess.CompletedProcess(args, 0 if build_ok else 1, stdout="", stderr="" if build_ok else "build failed")
+        if args[:2] == ["docker", "run"]:
+            return _subprocess.CompletedProcess(args, 0 if run_ok else 1, stdout="", stderr="" if run_ok else "run failed")
+        if args[:2] == ["docker", "exec"]:
+            return _subprocess.CompletedProcess(args, 0 if health_ok else 1, stdout="", stderr="")
+        # network create/connect, rm -f, rmi -- always "succeed" (best-effort/idempotent in the real code)
+        return _subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    return _run
+
+
+async def _fake_sleep(*a, **k):
+    return None
+
+
+def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_preview_url(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    pull_calls, push_calls, docker_calls = [], [], []
+    monkeypatch.setattr(git_ops, "pull_latest", _guarded_pull_latest(pull_calls, env.pre_prod_branch))
+    monkeypatch.setattr(git_ops, "push_branch", _guarded_push_branch(push_calls, env.pre_prod_branch))
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is True
+    assert result.json_data["status"] == "deployed"
+    assert result.json_data["preview_url"] == "http://agentra-preprod-run123:8080"
+    assert pull_calls == [env.pre_prod_branch]
+    assert push_calls == [env.pre_prod_branch]
+    assert PROD_SENTINEL not in pull_calls and PROD_SENTINEL not in push_calls
+
+    build_calls = [c for c in docker_calls if c[:2] == ["docker", "build"]]
+    assert build_calls == [["docker", "build", "-t", "agentra-preprod:run123", str(repo)]]
+    run_calls = [c for c in docker_calls if c[:2] == ["docker", "run"]]
+    assert len(run_calls) == 1
+    run_cmd = run_calls[0]
+    assert "agentra-preprod-run123" in run_cmd
+    assert "agentra-preprod-net" in run_cmd
+    assert "--memory=1g" in run_cmd and "--cpus=1" in run_cmd
+    assert "AGENTRA_FIRESTORE_PROJECT=agentra-prod" in run_cmd
+    network_connect_calls = [c for c in docker_calls if c[:3] == ["docker", "network", "connect"]]
+    assert network_connect_calls == [["docker", "network", "connect", "agentra-preprod-net", "agentra"]]
+
+
+def test_deploy_pre_prod_self_hosted_returns_error_when_build_fails(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, build_ok=False))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert "build" in result.text.lower()
+    # Never got as far as `docker run` after a failed build.
+    assert not any(c[:2] == ["docker", "run"] for c in docker_calls)
+
+
+def test_deploy_pre_prod_self_hosted_returns_failed_status_when_health_check_never_succeeds(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, health_ok=False))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert result.json_data["status"] == "failed"
+    assert result.json_data["preview_url"] == "http://agentra-preprod-run123:8080"
+
+
+def test_teardown_self_hosted_preprod_removes_container_and_image(monkeypatch):
+    docker_calls = []
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+
+    deployment.teardown_self_hosted_preprod("run123")
+
+    assert ["docker", "rm", "-f", "agentra-preprod-run123"] in docker_calls
+    assert ["docker", "rmi", "agentra-preprod:run123"] in docker_calls
+
+
 # -- promote_prod: the only path allowed to touch prod, only via run_agent(allow_prod=True) --
 
 

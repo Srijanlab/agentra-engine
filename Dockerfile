@@ -25,11 +25,18 @@ RUN pip install --no-cache-dir --prefix=/install .
 # ─── Stage 2: runtime image ───────────────────────────────────────────────────
 FROM python:3.12-slim
 
-# Install Node.js 20 LTS (needed for @anthropic-ai/claude-code CLI) and git
+# Install Node.js 20 LTS (needed for @anthropic-ai/claude-code CLI), git, and
+# the docker CLI (client only -- docker.io's dockerd is never started here;
+# this container talks to the HOST's docker daemon over a bind-mounted
+# /var/run/docker.sock, see deploy/gcp/terraform/compute.tf. Used only by
+# agents/deployment.py's deploy_pre_prod_self_hosted, agentra's own
+# EnvironmentConfig.self_hosted_vm path, to spin up a sibling pre-prod
+# container alongside this one on the same VM).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
         ca-certificates \
+        docker.io \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean \
