@@ -183,6 +183,43 @@ def test_all_apps_loops_endpoint_matches_per_app_shape(tmp_path, monkeypatch):
     assert len(loops[0]["runs"]) == 1
 
 
+def test_list_loops_orders_runs_newest_first(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path, "app-one")
+
+    objective = "Ship useful dashboard improvements."
+    loop_id = registry.loop_id_for(objective)
+    base = time.time()
+    # Record out of order to make sure the fix doesn't rely on insertion order.
+    registry.record_run(
+        "run-mid", app="app-one", source="on-demand", status="completed",
+        started_at=base + 100, objective=objective, loop_id=loop_id,
+    )
+    registry.record_run(
+        "run-oldest", app="app-one", source="on-demand", status="completed",
+        started_at=base, objective=objective, loop_id=loop_id,
+    )
+    registry.record_run(
+        "run-newest", app="app-one", source="on-demand", status="completed",
+        started_at=base + 200, objective=objective, loop_id=loop_id,
+    )
+
+    client = TestClient(server.app)
+    response = client.get("/loops")
+    assert response.status_code == 200
+    loops = response.json()["loops"]
+    assert len(loops) == 1
+    loop = loops[0]
+
+    # Runs within the expanded loop must be newest first.
+    started_ats = [r["started_at"] for r in loop["runs"]]
+    assert started_ats == sorted(started_ats, reverse=True)
+    assert [r["run_key"] for r in loop["runs"]] == ["run-newest", "run-mid", "run-oldest"]
+
+    # loop["started_at"] must reflect the true oldest run, not runs[0].
+    assert loop["started_at"] == base
+
+
 def test_structured_standup_generation(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = tmp_path / "standup-repo"

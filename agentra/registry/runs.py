@@ -58,6 +58,11 @@ def loop_id_for(objective: str) -> str:
 
 
 def list_loops(app: str | None = None) -> list[dict]:
+    """Group runs by loop_id and return loop summaries, newest loop first.
+
+    Each loop's `runs` list is ordered newest first (by started_at, descending),
+    matching the ordering used by list_runs() and the loop-to-loop sort below.
+    """
     runs = [r for r in list_runs(limit=1000) if (app is None or r.get("app") == app) and r.get("loop_id")]
     steps = list_agent_steps(app=app, limit=2000)
     steps_by_run_key: dict[str, list[dict]] = {}
@@ -74,8 +79,8 @@ def list_loops(app: str | None = None) -> list[dict]:
 
     result = []
     for loop in loops.values():
-        loop["runs"].sort(key=lambda r: r["started_at"])
-        loop["started_at"] = loop["runs"][0]["started_at"]
+        loop["runs"].sort(key=lambda r: r["started_at"], reverse=True)
+        loop["started_at"] = min(r["started_at"] for r in loop["runs"])
         loop["cost_usd"] = sum((r.get("result") or {}).get("cost_usd") or 0 for r in loop["runs"])
         loop["cycles_completed"] = sum(1 for r in loop["runs"] if r.get("status") == "completed")
         loop["cycles_total"] = len(loop["runs"])
