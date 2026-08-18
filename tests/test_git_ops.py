@@ -186,6 +186,39 @@ def test_pull_latest_creates_and_checks_out_branch_not_yet_local(tmp_path):
     assert (work / "beta.txt").exists()
 
 
+def test_pull_latest_discards_local_modifications_to_tracked_agentra_files(tmp_path):
+    """Regression test for a gap in the issue #24 fix (commit 3d02cc0): that
+    commit added `git checkout -- .agentra/` in implementation.py's
+    _checkout_feature_branch, but git_ops.py's pull_latest -- used by
+    agents/generic.py::spawn() for ad hoc tasks -- has its own independent
+    checkout/checkout -B call sites that hit the exact same "Your local
+    changes to the following files would be overwritten by checkout" error
+    when a tracked .agentra/ path has been locally modified (e.g. a prior
+    step in the same repo clone regenerated codebase.md without committing)
+    and pull_latest needs to switch onto a branch not currently checked out."""
+    origin = _seed_origin(tmp_path)
+    seed2 = _clone(origin, tmp_path / "_seed2")
+    _git(seed2, "checkout", "-b", "beta")
+    (seed2 / ".agentra" / "memory" / "architecture").mkdir(parents=True)
+    beta_sha = _commit_file(seed2, ".agentra/memory/architecture/codebase.md", "beta version\n", "beta commit")
+    _git(seed2, "push", "origin", "beta")
+
+    work = _clone(origin, tmp_path / "work")  # local clone only ever saw `main`, currently on main
+    (work / ".agentra" / "memory" / "architecture").mkdir(parents=True)
+    (work / ".agentra" / "memory" / "architecture" / "codebase.md").write_text("local uncommitted rescan\n")
+    _git(work, "add", ".agentra/")
+    _git(work, "commit", "-m", "main-branch tracked copy")
+    # Now dirty that already-tracked file with an uncommitted local modification.
+    (work / ".agentra" / "memory" / "architecture" / "codebase.md").write_text("EVEN MORE local uncommitted rescan\n")
+
+    # Must not raise (CalledProcessError, before the fix) despite the dirty tracked file.
+    git_ops.pull_latest(work, "beta")
+
+    assert _current_branch(work) == "beta"
+    assert _head_sha(work) == beta_sha
+    assert (work / ".agentra" / "memory" / "architecture" / "codebase.md").read_text() == "beta version\n"
+
+
 def test_pull_latest_raises_giterror_when_origin_unreachable(tmp_path):
     work = tmp_path / "work"
     work.mkdir()

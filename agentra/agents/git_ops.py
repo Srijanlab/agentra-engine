@@ -114,6 +114,16 @@ def pull_latest(repo: Path, branch: str) -> None:
     the working tree on stale or partially-updated state."""
     fetch_ref(repo, branch)
     try:
+        # Same reasoning/fix as implementation.py::_checkout_feature_branch
+        # (issue #24): a prior step in this repo clone (e.g. understand_codebase
+        # regenerating .agentra/memory/architecture/*.md without committing) can
+        # leave local MODIFICATIONS to already-tracked .agentra/ paths, which
+        # `git checkout <branch>` and the `checkout -B` fallback below both
+        # refuse to silently overwrite -- "Your local changes to the following
+        # files would be overwritten by checkout", confirmed reproducible here
+        # the same way as the implementation.py case. Best-effort, no
+        # check=True: harmless no-op if .agentra/ isn't tracked yet at all.
+        subprocess.run(["git", "-C", str(repo), "checkout", "--", ".agentra/"], capture_output=True, text=True)
         checkout = subprocess.run(
             ["git", "-C", str(repo), "checkout", branch], capture_output=True, text=True,
         )
