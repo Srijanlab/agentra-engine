@@ -1,41 +1,41 @@
+I have a clear and thorough picture now. Here's the summary.
+
 ## Summary
 
-This repository is **agentra** — an autonomous product-engineering agent system (not a typical product app). It's a meta-system: a fleet of specialized Claude-Agent-SDK-driven agents that operate *on* other repositories (or, when run against itself, on its own code) to autonomously discover, build, test, and deploy features per `vision.md`'s spec.
+**agentra** is itself the "autonomous product engineering agent system" described in its own `vision.md` — not a product being improved, but the improving system. It's built to point at a *target repo* (a separate app), understand it, decide what to build, implement it, test it, and deploy it to pre-prod, with production changes gated behind an explicit human/opt-in path.
 
-**Language/framework**: Python 3.11 backend (FastAPI + `claude-agent-sdk`) with a React 18 + TypeScript + Vite + Tailwind dashboard frontend (`agentra/web/`), packaged as a CLI (`agentra` entry point) and a Docker container for sandboxed execution.
-
-**Architecture**: A monolithic Python service (`agentra/server.py`, deployed as a single always-on Cloud Run service) that fans out to short-lived Claude Agent SDK subprocess "agents" on demand — not microservices, but an orchestrator + specialized-agent pattern. Two orchestration modes exist: a fixed pipeline (`orchestrator.py::run_cycle`, hardcoded understand→discover→implement→test→deploy sequence) and the default LLM-driven brain (`agents/brain.py::run_autonomous_cycle`) where an Orchestrator Agent picks its own sequence from 9 exposed MCP-style tools, with deterministic circuit breakers (max consecutive tool failures, max cycle cost, stagnation detection) enforced in plain Python around it.
-
-**Backend/data**: Firestore when `AGENTRA_FIRESTORE_PROJECT` is set, falling back to local JSON files under `AGENTRA_HOME` for local dev (agentra's own operational state — apps registry, inbox, runs). Per-target-repo audit trail/memory (`.agentra/memory/architecture/*.md` "steering files") is committed to the target repo's own git history; feature/bug lifecycle state lives entirely in GitHub Issues/Projects/Actions Variables, with no local JSON mirror by design.
-
-**Features** (this is infrastructure, not an end-user product, so "features" are its own capabilities): multi-agent pipeline (codebase understanding, product discovery, research/implementation, local + live pre-prod testing, pre-prod/prod deployment via Vercel/Firebase CLIs, analytics feedback loop, production debugging/auto-remediation), a React ops dashboard (apps, runs, live agent chat, standups, loops views), GitHub App integration for issues/projects/variables, Slack-style daily standups, HTTP trigger endpoints (schedule/alert/queue) for unattended operation, and a layered safety system (Docker sandbox + regex `PreToolUse` hook gate blocking destructive ops, secrets, and unapproved prod access).
-
-**Test/build tooling**:
-- Python: `pytest tests` (see `pyproject.toml` `[dev]` extra), plus `py_compile` sanity check
-- Web: `npm test` (Vitest + Testing Library), `npm run build` (`tsc -b && vite build`)
-- CI: `ci/github-actions-ci.yml` runs both jobs on push/PR to main/beta
+- **Language/runtime**: Python 3.11+ backend (FastAPI + `claude-agent-sdk`) driving Claude CLI subprocesses as its actual "agents"; a TypeScript/React (Vite, Tailwind v4, vitest) dashboard SPA served as static files by the FastAPI process.
+- **Architecture**: A single always-on FastAPI/Cloud Run service (`agentra/server.py`) that accepts triggers (schedule, alert webhook, Pub/Sub queue) and spawns short-lived Claude CLI subprocesses per agent step (`agents/base.py::run_agent`) — not a fleet of standing microservices. Two orchestration modes: a hardcoded pipeline (`orchestrator.py::run_cycle`) and the default LLM-driven orchestrator (`agents/brain.py::run_autonomous_cycle`) that picks from 9 tools/specialized agents itself, with Python-enforced circuit breakers (cost cap, consecutive-failure cap, stagnation detection) rather than relying on prompted self-restraint.
+- **Backend/data layer**: Deliberately thin. Almost all durable state (known bugs, feature queue, shipped features, objective, environments config) lives directly in **GitHub Issues/Actions Variables** on the target repo — no local JSON mirror, no database of record. Only `.agentra/memory/architecture/*.md` steering files are local, git-committed. Optional Firestore mirrors runs/agent-steps for dashboard durability across Cloud Run redeploys.
+- **Features** (of agentra-the-system, since it has no end-user product features itself): autonomous discover→implement→test→deploy cycles; production-debugging agent with opt-in auto-remediate; a React ops dashboard (live agent logs, run history, promote-to-prod button, chat with individual agents, voice); GitHub App-based short-lived repo tokens; Cloudflare/GCP Terraform deploy configs.
+- **Test/build tooling**: `pytest tests/` (Python, ~29 test files) + `python -m py_compile` for the backend; `npm test` (vitest) + `npm run build` (tsc + vite) for the dashboard. A ready-but-inactive GitHub Actions workflow lives at `ci/github-actions-ci.yml` (not `.github/workflows/`) because the GitHub App lacks Workflows permission.
 
 ```json
 {
-  "framework": "Python 3.11 (FastAPI, claude-agent-sdk) backend; React 18 + TypeScript + Vite + Tailwind frontend",
-  "backend": "Firestore (when AGENTRA_FIRESTORE_PROJECT set) with local-JSON-file fallback for agentra's own operational state; per-target-repo memory lives as committed files/GitHub Issues/Projects/Actions Variables in the repo being improved",
-  "architecture": "Single-process monolith (FastAPI service on Cloud Run) that orchestrates short-lived Claude Agent SDK subprocess agents on demand; supports a fixed hardcoded pipeline and a default LLM-driven orchestrator ('brain') that picks its own tool sequence under deterministic Python-enforced circuit breakers",
+  "framework": "FastAPI (Python) backend + Claude Agent SDK subprocess orchestration; React/Vite/TypeScript dashboard frontend",
+  "backend": "GitHub Issues/Actions Variables as system of record (no local DB); optional Firestore for run/dashboard durability; Cloud Run deployment target",
+  "architecture": "Single always-on orchestrator service that dispatches short-lived Claude CLI agent subprocesses per step, triggered by HTTP (schedule/alert/queue); LLM-driven orchestrator (agents/brain.py) is default, hardcoded pipeline (orchestrator.py::run_cycle) is a fallback mode",
   "features": [
-    "Codebase Understanding Agent (read-only repo scanning)",
-    "Product Discovery Agent (feature opportunity generation)",
-    "Implementation Agent (branch-per-feature implement/test/fix loop)",
-    "Testing Agent (local + live pre-prod verification)",
-    "Deployment Agent (pre-prod via Vercel/Firebase, human-gated prod promotion)",
-    "Production Debugging Agent (diagnose + optional auto-remediate hotfix path)",
-    "Analytics Feedback Agent",
-    "React ops dashboard (apps, runs, live agent chat/voice, standups, loops)",
-    "GitHub App integration (issues, projects, variables as system of record)",
-    "HTTP trigger endpoints for schedule/alert/queue-driven unattended runs",
-    "Daily standup reporting"
+    "autonomous discover -> implement -> test -> deploy-to-pre-prod cycle",
+    "LLM 'brain' orchestrator choosing among 9 specialized-agent tools with deterministic circuit breakers",
+    "production debugging agent with human-gated or opt-in auto-remediate promotion",
+    "React ops dashboard: live per-agent logs, run history, chat with agents, voice, promote-to-prod control",
+    "GitHub App short-lived installation tokens replacing a static PAT",
+    "safety hook (regex PreToolUse gate) layered under Docker container isolation",
+    "GCP/Cloudflare Terraform deploy configs"
   ],
-  "test_commands": ["pytest tests", "npm test (in agentra/web/, Vitest)"],
-  "build_commands": ["pip install -e .[dev]", "npm install && npm run build (in agentra/web/)", "docker build -t agentra:local .", "python -m py_compile (CI sanity pass)"],
-  "notes": "This repo IS the agent system described in vision.md, not a product being improved by it -- when agentra runs against itself it is dogfooding its own Codebase Understanding Agent prompt. tests/ is heavily scenario-named after real observed failure modes (e.g. test_brain_stagnation.py, test_claude_stream_logging.py, test_safety_integration.py), suggesting a codebase whose design was refined by live dogfooding runs rather than upfront spec alone.",
-  "design_notes": "- Deterministic Python, not LLM prose, for anything that must not silently fail: git checkout/commit/push in implementation.py and git_ops.py, safety enforcement in safety.py, and circuit breakers/stagnation detection in brain.py -- multiple docstrings cite specific observed dogfooding failures (e.g. an LLM told 'checkout branch X, commit at the end' via prose simply didn't) as the reason logic moved out of prompts into code.\n- Safety is explicitly layered and documented as non-sandbox defense-in-depth: Docker container isolation is the real boundary; the regex-based PreToolUse hook in agents/safety.py is a second line of defense the module docstring says was previously silently dead code (a can_use_tool callback never invoked under bypassPermissions) until rebuilt on the SDK's actual hook mechanism -- a concrete case of a bug being found and documented in-place rather than just fixed silently.\n- Hybrid/graceful-degradation persistence pattern repeated twice: registry.py falls back from Firestore to local JSON when AGENTRA_FIRESTORE_PROJECT is unset, and git auth (git_ops.py) tries a GitHub App installation token first, falling back to static GIT_ASKPASS/GITHUB_TOKEN credentials, never hard-failing when the fancier path is unavailable.\n- Clear separation of durable-state ownership: agentra's own bookkeeping (which apps, pending inbox requests) lives in agentra's infra (Firestore/local JSON under AGENTRA_HOME); a target project's own knowledge (shipped features, known bugs, objective) is deliberately pushed into that project's own git history and GitHub Issues/Variables so it travels with the project and survives agentra redeploys.\n- Production is treated as a hard boundary enforced in multiple independent places at once (regex safety patterns, orchestrator.py never exposing promote_prod as an autonomous brain tool, allow_prod defaulting False everywhere) rather than trusted to any single check."
+  "test_commands": [
+    "pytest tests",
+    "find agentra -name '*.py' -print0 | xargs -0 -n1 python -m py_compile",
+    "npm test (in agentra/web/, runs vitest)"
+  ],
+  "build_commands": [
+    "pip install -e .[dev]",
+    "npm install && npm run build (in agentra/web/, tsc -b && vite build)",
+    "docker build -t agentra:local .",
+    "docker compose build --no-cache"
+  ],
+  "notes": "This repo IS the autonomous engineering system described in its own vision.md, not an app being improved by one. It operates on an external target repo passed via --repo / REPO_PATH. The ci/ workflow exists but is not wired into .github/workflows/ yet, pending a GitHub App permission grant.",
+  "design_notes": "- Deliberate two-boundary safety model: Docker container isolation is primary; a regex PreToolUse hook (agents/safety.py) is defense-in-depth, rebuilt after discovering `can_use_tool` callbacks are silently never invoked under `permission_mode='bypassPermissions'`. - Production is reachable through exactly one code path (human `agentra promote` or an app's explicit `auto_remediate_prod: true` opt-in), enforced as real boolean checks in Python, never left to prompt instructions — the module docstrings repeatedly state 'control flow in Python, not prompts' as an explicit principle (circuit breakers, self-heal retry caps, stagnation detection in agents/brain.py). - State ownership is intentionally split: ephemeral/noisy data (run logs, test screenshots) stays local and gitignored; durable audit-trail data (shipped features, known bugs, feature queue, objective) lives entirely in GitHub Issues/Variables with no local fallback — an explicit availability tradeoff, not an oversight. - A 'feature' issue's open/closed state IS the shipped-vs-released state machine (closes only on production promotion), avoiding a duplicate JSON ledger. - Agents are cold, short-lived Claude CLI subprocesses per step (agents/base.py::run_agent), with resumable sessions only where conversational continuity is actually needed (dashboard chat), not in the autonomous cycle. - Retry-on-contradictory-CLI-result is opt-in per agent and explicitly disabled for implementation.py because a blind retry after a git commit already happened risks a duplicate/conflicting attempt."
 }
 ```
