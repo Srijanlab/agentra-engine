@@ -67,30 +67,33 @@ def _current_head_sha(repo: Path) -> str | None:
 
 
 async def run_cached(repo: Path, mem: Memory) -> AgentResult:
-    """Like run(), but skips the (real, multi-turn) LLM scan and reuses the
-    last generated summary when HEAD hasn't moved since it was generated.
+    """Like run(), but skips the (real, multi-turn) LLM scan whenever a
+    cached summary already exists at all -- only runs a real scan the
+    first time, when architecture/codebase.md doesn't exist yet.
 
-    Implementation Agent is the only agent that ever commits source
-    changes (agents/implementation.py) -- every other agent, including
-    this one, is read-only or deploy-only. So an unchanged HEAD since the
-    cached scan's commit SHA means the repo genuinely hasn't changed, and
-    re-running a full repo exploration would just reproduce the same
-    summary at the cost of another real agent turn. Every call site that
-    used to do `cb = await codebase.run(repo); mem.write(...)` should call
-    this instead -- the mem.write() on a fresh generation happens here too,
-    so callers don't need to duplicate that."""
-    head = _current_head_sha(repo)
-    cached_sha = mem.codebase_spec_commit()
-    if head is not None and head == cached_sha:
-        cached_text = mem.read("architecture", "codebase")
-        if cached_text:
-            return AgentResult(
-                ok=True,
-                text=cached_text,
-                json_data=extract_json_block(cached_text),
-                cost_usd=0.0,
-                turns=0,
-            )
+    Previously this compared HEAD against the SHA the cache was generated
+    at, and only reused the cache on an exact match. That never actually
+    fired in practice: every cycle's own persist_audit_trail commits
+    .agentra/ bookkeeping (shipped.json, decisions, work_updates, and
+    codebase.md/design.md themselves) onto the same branch this scans, so
+    HEAD moves on every single cycle regardless of whether the real source
+    tree changed -- confirmed live via VM run logs, understand_codebase
+    paying for a full real scan on every cycle. Reported as "orchestrator
+    firing codebase agent every time even though codebase.md available"
+    (GitHub issue #20), whose own proposed fix is exactly this: call the
+    real scan only if the file is missing. Every call site that used to do
+    `cb = await codebase.run(repo); mem.write(...)` should call this
+    instead -- the mem.write() on a fresh generation happens here too, so
+    callers don't need to duplicate that."""
+    cached_text = mem.read("architecture", "codebase")
+    if cached_text:
+        return AgentResult(
+            ok=True,
+            text=cached_text,
+            json_data=extract_json_block(cached_text),
+            cost_usd=0.0,
+            turns=0,
+        )
 
     result = await run(repo)
     if result.ok:

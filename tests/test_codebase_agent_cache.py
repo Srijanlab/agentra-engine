@@ -1,11 +1,20 @@
 """Regression tests for agents/codebase.py's run_cached() -- the Codebase
-Agent's repo scan is a real multi-turn LLM call, so this must only re-run
-it when HEAD has actually moved since the last cached scan, and must
-always reuse it otherwise (same commit == same repo == same scan).
+Agent's repo scan is a real multi-turn LLM call, so this must only ever run
+it once per repo (when no cached summary exists yet) and reuse the cache
+unconditionally after that, even across new commits.
+
+This used to instead compare HEAD against the SHA the cache was generated
+at, and regenerate on any mismatch -- which never actually saved anything
+in practice, since every cycle's own bookkeeping commits (persist_audit_trail)
+move HEAD regardless of whether the real source tree changed, so a real
+(paid) scan ran on every single cycle. Confirmed live via VM run logs
+(GitHub issue #20, "orchestrator firing codebase agent every time even
+though codebase.md available"). Fixed to match that issue's own proposed
+behavior: call the real scan only if the file is missing.
 
 Real local git repo on disk (a plain `git init` + commits), same pattern
-as test_registry_sync.py -- the point of this test is real `git rev-parse
-HEAD` behavior, not a mocked git.
+as test_registry_sync.py -- the point of this test is real git behavior,
+not a mocked one.
 """
 
 import asyncio
@@ -61,7 +70,7 @@ def test_run_cached_reuses_cache_when_head_unchanged(tmp_path, monkeypatch):
     second = asyncio.run(codebase.run_cached(repo, mem))
 
     # The real (expensive) scan must only have run once -- the second call
-    # found HEAD unchanged and served the cached summary instead.
+    # found a cached summary and served it instead.
     assert mock_run.await_count == 1
     assert second.text == first.text == "summary v1"
     assert second.cost_usd == 0.0
@@ -69,7 +78,7 @@ def test_run_cached_reuses_cache_when_head_unchanged(tmp_path, monkeypatch):
     assert second.ok is True
 
 
-def test_run_cached_regenerates_after_a_new_commit(tmp_path, monkeypatch):
+def test_run_cached_reuses_cache_even_after_a_new_commit(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     mock_run = AsyncMock(side_effect=[_fake_result("summary v1"), _fake_result("summary v2")])
@@ -77,16 +86,16 @@ def test_run_cached_regenerates_after_a_new_commit(tmp_path, monkeypatch):
 
     asyncio.run(codebase.run_cached(repo, mem))
 
-    # Simulate Implementation Agent committing a real change to the repo.
+    # Simulate Implementation Agent (or persist_audit_trail's own bookkeeping
+    # commit) moving HEAD -- must NOT trigger a real re-scan on its own.
     (repo / "feature.py").write_text("x = 1\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add feature")
 
     second = asyncio.run(codebase.run_cached(repo, mem))
 
-    assert mock_run.await_count == 2
-    assert second.text == "summary v2"
-    assert mem.codebase_spec_commit() == _git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert mock_run.await_count == 1
+    assert second.text == "summary v1"
 
 
 def test_run_cached_does_not_cache_a_failed_scan(tmp_path, monkeypatch):

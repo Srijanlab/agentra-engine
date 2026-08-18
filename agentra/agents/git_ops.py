@@ -62,6 +62,31 @@ class GitOpError(Exception):
     contradictory-result retry)."""
 
 
+def remote_head_sha(repo_url: str, branch: str, timeout: float = 15) -> str | None:
+    """git ls-remote for `branch`'s current commit sha on `repo_url`, or
+    None if it can't be determined (network/timeout/branch doesn't exist).
+    Uses the same GitHub-App-then-static-token auth as every other
+    operation in this module -- registry/core.py's get_app_repo used to
+    run a bare `git ls-remote` here itself, bypassing the App token like
+    implementation.py's old _checkout_feature_branch did (see that
+    module's docstring for the same failure class). Confirmed live: since
+    get_app_repo's staleness check runs on nearly every dashboard/API
+    request, that bare call was 403ing continuously against any repo the
+    App token covers but the ambient static PAT doesn't, flooding the logs
+    on every single poll rather than once."""
+    try:
+        auth = _extra_auth_args(repo_url)
+        result = subprocess.run(
+            ["git", *auth, "ls-remote", repo_url, f"refs/heads/{branch}"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.split()[0]
+
+
 def fetch_ref(repo: Path, branch: str) -> None:
     """Fetch `branch` into refs/remotes/origin/<branch> without touching
     the working tree/current checkout -- for a caller that just needs

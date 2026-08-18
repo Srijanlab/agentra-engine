@@ -82,7 +82,19 @@ End your response with a fenced ```json block shaped like:
 """
 
 
-def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: str, resume: bool = False) -> None:
+def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: str, resume: bool = False) -> bool:
+    """Returns True if `resume` was requested and actually succeeded (the
+    branch's prior commits are intact and checked out), False otherwise
+    (either resume wasn't requested, or it was and silently fell back to
+    forking fresh from pre_prod_branch's tip -- see the except clause
+    below). Callers that reuse a persisted Claude session_id when resuming
+    (brain/tools.py) need this: a fresh fork discards feature_branch's
+    prior commits, and continuing that stale conversation on top of a
+    reset branch produces a session that firmly believes edits exist which
+    are actually gone -- confirmed live on GitHub issue #2, where the
+    branch name and session_id both looked continuous across runs but the
+    branch had silently been reset at least once in between -- reported as
+    resume not starting from the same point as last time."""
     if resume:
         # Resuming an interrupted call's work (see brain.py's resume_branch arg,
         # memory.py's known_bugs()/feature_queue() resume_branch field) -- the
@@ -116,9 +128,14 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
                 ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{feature_branch}"],
                 check=True, capture_output=True, text=True,
             )
-            return
-        except (git_ops.GitOpError, subprocess.CalledProcessError):
-            pass
+            return True
+        except (git_ops.GitOpError, subprocess.CalledProcessError) as exc:
+            detail = exc.stderr if isinstance(getattr(exc, "stderr", None), str) else str(exc)
+            print(
+                f"[agentra] resume of {feature_branch!r} failed, falling back to a fresh fork "
+                f"from {pre_prod_branch!r} -- prior commits on this branch will NOT be present: {detail}",
+                flush=True,
+            )
     # git_ops.fetch_ref, not a hand-rolled subprocess call -- confirmed live (4
     # consecutive autonomous-cycle failures, GitHub issues #7-#10, after this repo
     # moved to an org, Srijanlab/srijanlab-agentra): a bare `git fetch` here relied
@@ -165,6 +182,7 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
         ["git", "-C", str(repo), "checkout", "-B", feature_branch, f"origin/{pre_prod_branch}"],
         check=True, capture_output=True, text=True,
     )
+    return False
 
 
 def _commit_if_dirty(repo: Path, feature: str) -> bool:
@@ -200,7 +218,7 @@ async def run(
     same conversation across this issue's implement/test/feedback steps --
     unrelated to each other, both named around "resuming" different things."""
     try:
-        _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch, resume=resume)
+        resumed = _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch, resume=resume)
     except git_ops.GitOpError as exc:
         return AgentResult(
             ok=False,
@@ -215,11 +233,30 @@ async def run(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
+    # resume was requested but _checkout_feature_branch silently fell back to a
+    # fresh fork (see its own docstring) -- the passed-in session_id's conversation
+    # believes edits exist on feature_branch that this reset just discarded.
+    # Continuing that conversation on top of a branch it doesn't match produces
+    # exactly the "resume doesn't start from the same point" symptom reported on
+    # GitHub issue #2: cold-start the CLI session instead, and tell the agent
+    # plainly that this is a fresh start, not a continuation, so it explores the
+    # actual (reset) branch state rather than trusting stale memory of it.
+    resume_mismatch = resume and not resumed
+    if resume_mismatch:
+        session_id = None
+
     spec_section = f"\nFinalized spec (Requirements Agent):\n{spec}\n" if spec else ""
+    resume_note = (
+        "\nNote: a resume of this feature's prior branch was attempted but did not succeed "
+        "(see server logs) -- this is a FRESH start on a branch re-forked from "
+        f"{env.pre_prod_branch!r}, NOT a continuation. Do not assume any prior edits are "
+        "present; explore the current state of the repo before making changes.\n"
+        if resume_mismatch else ""
+    )
     prompt = f"""Business objective: {objective}
 
 Feature to implement: {feature}
-{spec_section}
+{spec_section}{resume_note}
 Codebase summary:
 {codebase_summary}
 

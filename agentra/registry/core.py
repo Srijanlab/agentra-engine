@@ -96,19 +96,19 @@ def remove_app(name: str) -> bool:
 
 
 def _remote_head_sha(repo_url: str, branch: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", repo_url, f"refs/heads/{branch}"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        logger.warning("get_app_repo: ls-remote %s failed: %s", repo_url, exc)
-        return None
-    if result.returncode != 0 or not result.stdout.strip():
-        logger.warning("get_app_repo: ls-remote %s %s returned nothing (rc=%s): %s",
-                       repo_url, branch, result.returncode, result.stderr.strip())
-        return None
-    return result.stdout.split()[0]
+    # git_ops.remote_head_sha, not a bare `git ls-remote` -- this used to run
+    # unauthenticated here, bypassing the GitHub App installation-token path
+    # every other git operation in this codebase goes through (same failure
+    # class implementation.py's _checkout_feature_branch hit and fixed for
+    # its own calls). Since get_app_repo runs on nearly every dashboard/API
+    # request, the unauthenticated version 403'd continuously against any
+    # repo only the App token covers, flooding the logs on every poll.
+    from agentra.agents.git_ops import remote_head_sha
+
+    sha = remote_head_sha(repo_url, branch)
+    if sha is None:
+        logger.warning("get_app_repo: ls-remote %s %s failed or returned nothing", repo_url, branch)
+    return sha
 
 
 def _local_head_sha(repo: Path) -> str | None:
@@ -123,10 +123,29 @@ def _local_head_sha(repo: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+_SYNC_CHECK_INTERVAL_SECONDS = 30
+_last_sync_check: dict[str, float] = {}
+
+
 def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
     if not (repo / ".git").exists():
         logger.info("get_app_repo: %s is not a git checkout, skipping remote resync", repo)
         return
+    # get_app_repo runs on nearly every dashboard/API request -- without this,
+    # each one paid for a live `git ls-remote` network round trip just to find
+    # out (almost always) that nothing had changed since the last request a
+    # few seconds ago. A 30s per-repo throttle keeps staleness detection
+    # effectively real-time for anything that matters (a human working in the
+    # repo, another agent's push) while cutting the actual git traffic by
+    # roughly the polling-interval-to-throttle-interval ratio -- confirmed
+    # live this was a major contributor to how much of every cycle/request
+    # was spent on git plumbing rather than real work.
+    key = str(repo)
+    now = time.monotonic()
+    last_checked = _last_sync_check.get(key)
+    if last_checked is not None and (now - last_checked) < _SYNC_CHECK_INTERVAL_SECONDS:
+        return
+    _last_sync_check[key] = now
     try:
         remote_sha = _remote_head_sha(repo_url, branch)
         if remote_sha is None:

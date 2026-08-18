@@ -91,8 +91,12 @@ def _file_incidental_findings(mem: Memory, run_id: str, data: dict, source: str)
 def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "understand_codebase",
-        "Scan the repo and produce/refresh the codebase understanding summary. "
-        "Call this before discover_opportunities or implement_feature.",
+        "Scan the repo and produce the codebase understanding summary. Usually "
+        "NOT needed: if one was already generated in a prior cycle, it's already "
+        "loaded into context below and check_backlog/discover_opportunities/"
+        "implement_feature all work without calling this again. Call it only if "
+        "no summary is shown below (first-ever run for this repo) or you have a "
+        "specific reason to believe it's now significantly out of date.",
         {},
     )
     async def understand_codebase(_args):

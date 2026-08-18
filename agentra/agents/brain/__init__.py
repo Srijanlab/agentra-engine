@@ -29,7 +29,6 @@ from agentra.memory import Memory
 logger = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_TOOL_FAILURES = 2
-MAX_CYCLE_COST_USD = 3.0
 STAGNATION_WINDOW = 5
 
 
@@ -88,11 +87,17 @@ class OrchestratorSession:
         registry.record_agent_step(self.app_name, self.run_id, resolved_agent, ok, cost_usd, turns, action)
 
     def check_hard_stop(self) -> dict | None:
-        if self.cost_usd >= MAX_CYCLE_COST_USD:
-            self.hard_stop_reason = (
-                f"Cycle cost cap (${MAX_CYCLE_COST_USD:.2f}) reached. Stop calling tools -- "
-                "summarize what happened and end your turn."
-            )
+        # No per-cycle cost cap here: the previous $3.00 hard stop never actually
+        # bounded spend -- confirmed live via VM run logs, cycles routinely
+        # finishing at $4-5+ with the cap's own "Cycle cost cap reached" message
+        # never once printing. check_hard_stop only runs at the START of each
+        # tool call, so one expensive call (implement_feature routinely costs
+        # $1-4 by itself) can jump straight past the cap in a single step; by
+        # the time the next call would be gated, the model has often already
+        # finished its turn. Net effect was pure downside: cycles occasionally
+        # got cut off mid-implementation (see GitHub issue #2, "not able to
+        # pass implementation agent") for a limit that wasn't actually
+        # capping anything. self.cost_usd is still tracked for the dashboard.
         if self.hard_stop_reason:
             return {"content": [{"type": "text", "text": self.hard_stop_reason}], "is_error": True}
         return None
@@ -173,6 +178,15 @@ async def run_autonomous_cycle(
         analytics_summary=analytics_summary,
         skip_deploy=skip_deploy,
     )
+    # Pre-seed from any existing cached scan so the model doesn't have to spend
+    # a call on understand_codebase just to satisfy the "cb_summary is not None"
+    # gate every other tool checks -- codebase.run_cached (called by the
+    # understand_codebase tool itself) already treats an existing cache as
+    # authoritative rather than re-scanning, so seeding it here is consistent,
+    # not a separate cache. See codebase.run_cached's docstring / GitHub issue
+    # #20 ("orchestrator firing codebase agent every time even though
+    # codebase.md available") for why this needed fixing in the first place.
+    session.cb_summary = mem.read("architecture", "codebase") or None
     session.note(
         f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}",
         agent="cycle",
@@ -196,6 +210,13 @@ async def run_autonomous_cycle(
         prompt += f"A feature has been suggested to prioritize: {feature}\n"
     if skip_deploy:
         prompt += "Deployment is disabled for this run — do not call deploy_pre_prod or verify_pre_prod.\n"
+    if session.cb_summary:
+        prompt += (
+            "\nA codebase understanding summary from a prior cycle is already loaded "
+            "(see understand_codebase's tool description) — you do not need to call "
+            "understand_codebase again unless you have a specific reason to think it's "
+            "stale:\n" + session.cb_summary[:4000] + "\n"
+        )
     prompt += "Decide what to do and carry it out."
 
     options = ClaudeAgentOptions(
