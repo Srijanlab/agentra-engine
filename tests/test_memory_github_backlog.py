@@ -56,6 +56,7 @@ def test_known_bugs_reads_from_github(tmp_path, monkeypatch):
             "run_id": "7",
             "severity": "medium",
             "diagnosis": "Pagination bug",
+            "description": "Pagination bug",
             "proposed_fix": "off by one",
             "source": "github",
             "external_id": "7",
@@ -365,7 +366,7 @@ def test_feature_queue_reads_from_github(tmp_path, monkeypatch):
     queue = mem.feature_queue()
 
     assert captured["labels"] == ["feature", "agentra"]
-    assert queue == [{"description": "Add dark mode", "source": "github", "external_id": "5", "html_url": None}]
+    assert queue == [{"description": "Add dark mode", "detail": "Add dark mode", "source": "github", "external_id": "5", "html_url": None}]
 
 
 def test_feature_queue_returns_empty_without_a_github_remote(tmp_path):
@@ -626,6 +627,7 @@ def test_closed_bugs_reads_from_github(tmp_path, monkeypatch):
             "run_id": "6",
             "severity": "medium",
             "diagnosis": "Fixed bug",
+            "description": "Fixed bug",
             "proposed_fix": "details",
             "source": "github",
             "external_id": "6",

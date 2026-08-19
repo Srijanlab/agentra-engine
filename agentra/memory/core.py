@@ -114,6 +114,7 @@ def _github_bug_to_dict(issue: dict) -> dict:
         "run_id": issue_number,
         "severity": "medium",
         "diagnosis": issue["title"],
+        "description": _issue_description(issue),
         "proposed_fix": issue.get("body") or "",
         "source": "github",
         "external_id": issue_number,
@@ -133,6 +134,7 @@ def _github_closed_bug_to_dict(issue: dict) -> dict:
         "run_id": issue_number,
         "severity": "medium",
         "diagnosis": issue["title"],
+        "description": _issue_description(issue),
         "proposed_fix": issue.get("body") or "",
         "source": "github",
         "external_id": issue_number,
@@ -145,6 +147,7 @@ def _github_closed_bug_to_dict(issue: dict) -> dict:
 def _github_feature_to_dict(issue: dict) -> dict:
     return {
         "description": issue["title"],
+        "detail": _issue_description(issue),
         "source": "github",
         "external_id": str(issue["number"]),
         "html_url": issue.get("html_url"),
