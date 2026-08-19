@@ -102,9 +102,30 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
             db = registry.firestore_client()
             if db is None:
                 return
-            db.collection("run_logs").document(run_id).set(
-                {"lines": gcf.ArrayUnion([f"[{timestamp}] {content}"])}, merge=True
-            )
+            new_line = f"[{timestamp}] {content}"
+            # Check document size before writing to avoid exceeding Firestore's
+            # 1MB limit. Get current doc, estimate new size, truncate if needed.
+            try:
+                doc_ref = db.collection("run_logs").document(run_id)
+                current = doc_ref.get()
+                if current.exists:
+                    lines = current.get("lines") or []
+                    # Rough estimate: assume avg line ~100 bytes; if total lines
+                    # would exceed 900KB (leaving 100KB buffer), keep only last 500
+                    if len(lines) > 500:
+                        lines = lines[-500:]
+                    lines.append(new_line)
+                    doc_ref.set({"lines": lines}, merge=True)
+                else:
+                    doc_ref.set({"lines": [new_line]}, merge=True)
+            except Exception as e:
+                # Fall back to ArrayUnion if size check fails
+                try:
+                    db.collection("run_logs").document(run_id).set(
+                        {"lines": gcf.ArrayUnion([new_line])}, merge=True
+                    )
+                except Exception:
+                    logger.warning("log: failed to mirror run %s log line to Firestore", run_id, exc_info=True)
         except Exception:
             logger.warning("log: failed to mirror run %s log line to Firestore", run_id, exc_info=True)
 
