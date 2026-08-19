@@ -159,7 +159,6 @@ async def _app_digest(name: str, info: dict, github_data: dict | None = None) ->
 @router.get("/apps")
 async def list_apps() -> dict:
     from agentra.connectors import github_issues
-    from agentra.environments import load as load_env
     from agentra.connectors.github_app import owner_repo_from_url
 
     apps = registry.list_apps()
@@ -170,8 +169,7 @@ async def list_apps() -> dict:
         repo = Path(info["repo_path"])
         if not repo.exists():
             continue
-        env = load_env(repo)
-        url = (env.repo_url if env else None) or info.get("repo_url")
+        url = info.get("repo_url")
         if url and owner_repo_from_url(url):
             repo_url_map[name] = url
 
