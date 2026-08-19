@@ -5,8 +5,10 @@ features. Output feeds every downstream agent, so it never touches Write/Edit/Ba
 """
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
+from agentra.agents import codegraph
 from agentra.agents.base import AgentResult, extract_json_block, run_agent
 from agentra.memory import Memory
 
@@ -84,29 +86,42 @@ async def run_cached(repo: Path, mem: Memory) -> AgentResult:
     real scan only if the file is missing. Every call site that used to do
     `cb = await codebase.run(repo); mem.write(...)` should call this
     instead -- the mem.write() on a fresh generation happens here too, so
-    callers don't need to duplicate that."""
+    callers don't need to duplicate that.
+
+    Also folds in a code-graph excerpt for `repo` on every call, cache hit or
+    not (see agents/codegraph.py): reuses the existing graph as-is if one is
+    already built, since keeping it *current* is refresh()'s job -- called
+    once at the end of Implementation Agent's run, not on every read here.
+    The excerpt is appended to the *returned* text only, never persisted
+    into architecture/codebase.md itself, so the cached summary file stays
+    just the LLM's own scan and the graph context is always read fresh."""
     cached_text = mem.read("architecture", "codebase")
     if cached_text:
-        return AgentResult(
+        result = AgentResult(
             ok=True,
             text=cached_text,
             json_data=extract_json_block(cached_text),
             cost_usd=0.0,
             turns=0,
         )
+    else:
+        result = await run(repo)
+        if result.ok:
+            mem.write("architecture", "codebase", result.text)
+            design_notes = (result.json_data or {}).get("design_notes")
+            if design_notes:
+                # architecture/design.md: a live, agent-maintained snapshot of
+                # actual design decisions/patterns found in the code -- like
+                # codebase.md, overwritten fresh each real scan, not an
+                # accumulating log (see memory.py's append_documentation for
+                # the deliberately different, changelog-style file).
+                mem.write("architecture", "design", design_notes)
+            new_head = _current_head_sha(repo)
+            if new_head is not None:
+                mem.set_codebase_spec_commit(new_head)
 
-    result = await run(repo)
     if result.ok:
-        mem.write("architecture", "codebase", result.text)
-        design_notes = (result.json_data or {}).get("design_notes")
-        if design_notes:
-            # architecture/design.md: a live, agent-maintained snapshot of
-            # actual design decisions/patterns found in the code -- like
-            # codebase.md, overwritten fresh each real scan, not an
-            # accumulating log (see memory.py's append_documentation for
-            # the deliberately different, changelog-style file).
-            mem.write("architecture", "design", design_notes)
-        new_head = _current_head_sha(repo)
-        if new_head is not None:
-            mem.set_codebase_spec_commit(new_head)
+        graph_summary = codegraph.load_or_build(repo)
+        if graph_summary:
+            result = replace(result, text=result.text + "\n\n" + graph_summary)
     return result

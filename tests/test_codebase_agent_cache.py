@@ -22,9 +22,16 @@ import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from agentra.agents import codebase
+from agentra.agents import codebase, codegraph
 from agentra.agents.base import AgentResult
 from agentra.memory import Memory
+
+
+def _stub_no_graph(monkeypatch):
+    """codegraph.load_or_build shells out to the real `graphify` CLI; these
+    tests are about run_cached's caching behavior, not graphify's output for
+    whatever tiny throwaway repo _init_repo built, so stub it out."""
+    monkeypatch.setattr(codegraph, "load_or_build", lambda repo: "")
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -47,6 +54,7 @@ def _fake_result(text: str) -> AgentResult:
 
 
 def test_run_cached_calls_run_on_first_invocation(tmp_path, monkeypatch):
+    _stub_no_graph(monkeypatch)
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     mock_run = AsyncMock(return_value=_fake_result("summary v1"))
@@ -61,6 +69,7 @@ def test_run_cached_calls_run_on_first_invocation(tmp_path, monkeypatch):
 
 
 def test_run_cached_reuses_cache_when_head_unchanged(tmp_path, monkeypatch):
+    _stub_no_graph(monkeypatch)
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     mock_run = AsyncMock(return_value=_fake_result("summary v1"))
@@ -79,6 +88,7 @@ def test_run_cached_reuses_cache_when_head_unchanged(tmp_path, monkeypatch):
 
 
 def test_run_cached_reuses_cache_even_after_a_new_commit(tmp_path, monkeypatch):
+    _stub_no_graph(monkeypatch)
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     mock_run = AsyncMock(side_effect=[_fake_result("summary v1"), _fake_result("summary v2")])
@@ -99,6 +109,7 @@ def test_run_cached_reuses_cache_even_after_a_new_commit(tmp_path, monkeypatch):
 
 
 def test_run_cached_does_not_cache_a_failed_scan(tmp_path, monkeypatch):
+    _stub_no_graph(monkeypatch)
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     failed = AgentResult(ok=False, text="agent error", json_data=None, cost_usd=0.01, turns=1)
@@ -110,3 +121,28 @@ def test_run_cached_does_not_cache_a_failed_scan(tmp_path, monkeypatch):
     assert result.ok is False
     assert mem.codebase_spec_commit() is None
     assert mem.read("architecture", "codebase") is None
+
+
+def test_run_cached_reads_graph_summary_fresh_every_call(tmp_path, monkeypatch):
+    """The graph excerpt is read (never rebuilt here -- see codegraph.load_or_build)
+    on every call, even a cache hit, and appended to the *returned* text without
+    polluting the persisted architecture/codebase.md cache."""
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    mock_run = AsyncMock(return_value=_fake_result("summary v1"))
+    monkeypatch.setattr(codebase, "run", mock_run)
+    calls = []
+
+    def fake_load_or_build(repo_arg):
+        calls.append(repo_arg)
+        return "--- graphify code graph ---\nsome excerpt"
+
+    monkeypatch.setattr(codegraph, "load_or_build", fake_load_or_build)
+
+    first = asyncio.run(codebase.run_cached(repo, mem))
+    second = asyncio.run(codebase.run_cached(repo, mem))
+
+    assert "some excerpt" in first.text
+    assert "some excerpt" in second.text
+    assert mem.read("architecture", "codebase") == "summary v1"  # cache stays unpolluted
+    assert calls == [repo, repo]  # read fresh on both calls, cache hit or not

@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from agentra.agents import git_ops, implementation
+from agentra.agents import codegraph, git_ops, implementation
 from agentra.agents.base import AgentResult
 from agentra.environments import EnvironmentConfig
 
@@ -222,3 +222,67 @@ def test_run_still_returns_ok_when_the_push_fails(tmp_path, monkeypatch):
 
     assert result.ok is True
     assert "Could not push feature branch" in result.text
+
+
+def test_run_refreshes_the_code_graph_at_the_end(tmp_path, monkeypatch):
+    """codegraph.refresh(repo) must fire once, at the very end of run() --
+    after the commit and push -- so the graph reflects whatever the agent
+    (or the commit_if_dirty safety net) just changed, ready for the next
+    cycle's reads (codegraph.load_or_build deliberately never rebuilds on
+    its own)."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "beta", str(origin)], check=True, capture_output=True)
+    repo = _init_repo_with_branch(tmp_path / "repo", branch="beta")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "origin", "beta")
+
+    async def fake_run_agent(**kwargs):
+        (repo / "new_feature.txt").write_text("real work\n")
+        _git(repo, "add", "new_feature.txt")
+        _git(repo, "commit", "-m", "implement the thing")
+        return AgentResult(ok=True, text="done", json_data={"status": "implemented"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(implementation, "run_agent", fake_run_agent)
+    calls = []
+    monkeypatch.setattr(codegraph, "refresh", lambda repo_arg: calls.append(repo_arg))
+
+    asyncio.run(
+        implementation.run(
+            repo=repo,
+            objective="obj",
+            feature="a feature",
+            codebase_summary="summary",
+            env=EnvironmentConfig(pre_prod_branch="beta"),
+            feature_branch="feature/refresh-graph",
+        )
+    )
+
+    assert calls == [repo]
+
+
+def test_run_does_not_refresh_the_graph_when_checkout_fails(tmp_path, monkeypatch):
+    """No code changed (checkout never even succeeded), so nothing for the
+    graph to reflect -- refresh() must not fire on this early-return path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        implementation.git_ops,
+        "fetch_ref",
+        lambda repo_arg, branch_arg: (_ for _ in ()).throw(git_ops.GitOpError("simulated failure")),
+    )
+    monkeypatch.setattr(implementation, "run_agent", AsyncMock())
+    calls = []
+    monkeypatch.setattr(codegraph, "refresh", lambda repo_arg: calls.append(repo_arg))
+
+    asyncio.run(
+        implementation.run(
+            repo=repo,
+            objective="obj",
+            feature="a feature",
+            codebase_summary="summary",
+            env=EnvironmentConfig(pre_prod_branch="beta"),
+            feature_branch="feature/never-checked-out",
+        )
+    )
+
+    assert calls == []

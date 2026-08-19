@@ -13,6 +13,7 @@ dependencies = [
     "google-cloud-firestore>=2.19",
     "google-cloud-texttospeech>=2.16",
     "playwright>=1.48",
+    "graphifyy>=0.9.46",
 ]
 
 [project.optional-dependencies]

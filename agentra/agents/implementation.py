@@ -27,7 +27,7 @@ than hoping a better-worded prompt fixes it.
 import subprocess
 from pathlib import Path
 
-from agentra.agents import git_ops
+from agentra.agents import codegraph, git_ops
 from agentra.agents.base import AgentResult, run_agent
 from agentra.environments import EnvironmentConfig
 
@@ -43,8 +43,14 @@ branch. Work in a tight loop:
    irreversible destructive migration -- do not guess and do not implement. Stop and report \
    status HUMAN_INPUT_REQUIRED instead, with a concrete reason, the specific question, and \
    the discrete options if there are any.
-1. Implement the smallest coherent version of the feature.
-2. Run EVERY test/build command actually configured in the project yourself \
+1. If graphify-out/graph.json exists (a local, prebuilt code graph of this repo -- see the \
+   codebase summary below for an excerpt), query it before grepping or reading files blind: \
+   `graphify query "<question>"` for anything touching more than one file, `graphify path "<A>" \
+   "<B>"` to see how two things connect, `graphify explain "<name>"` for a focused look at one \
+   symbol and its neighbors. This is local and free (no LLM call) -- prefer it over guessing at \
+   blast radius from memory or from a partial grep.
+2. Implement the smallest coherent version of the feature.
+3. Run EVERY test/build command actually configured in the project yourself \
    via Bash -- e.g. both a Python suite and a separate frontend one, if both \
    exist -- not just whichever you think is relevant to your change. You are \
    responsible for the whole repo being green when you're done, not just the \
@@ -52,15 +58,15 @@ branch. Work in a tight loop:
    leave an unrelated suite red, and the next agent to run has no way to tell \
    "pre-existing" from "I broke this" unless you check now, while you still \
    know which one it is.
-3. If you added new tests, they must pass too.
-4. If anything fails, fix it and re-run. Repeat until every suite is green. \
+4. If you added new tests, they must pass too.
+5. If anything fails, fix it and re-run. Repeat until every suite is green. \
    The one exception: a failure you've confirmed is pre-existing and \
    unrelated to your change (e.g. via `git stash` and re-running against the \
    base branch) is not yours to silently absorb scope-creeping into — fix it \
    anyway if it's a small, safe, unrelated fix, but if it's not, say so \
    explicitly in self_test_result/notes below rather than reporting "pass" \
    over a suite that isn't actually green.
-5. Make a git commit of your change once it's working. Do not push, do not \
+6. Make a git commit of your change once it's working. Do not push, do not \
    open a PR, do not touch git history beyond one commit.
 
 Constraints:
@@ -304,5 +310,12 @@ Implement this feature now, following the loop in your system prompt."""
         git_ops.push_branch(repo, feature_branch)
     except git_ops.GitOpError as exc:
         result.text += f"\n\n[agentra] Could not push feature branch {feature_branch!r} (work is committed locally only, not recoverable after a redeploy): {exc}"
+
+    # End-of-run graph refresh: whatever code changed above (commit_if_dirty's
+    # safety net included, even on a failed/partial result) should be reflected
+    # in the graph the *next* cycle's understand_codebase/architecture-review
+    # reads -- see codegraph.load_or_build, which deliberately never rebuilds on
+    # its own. AST-only, no LLM, best-effort; never raises.
+    codegraph.refresh(repo)
 
     return result
