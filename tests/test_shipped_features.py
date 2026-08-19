@@ -230,6 +230,32 @@ def test_record_shipped_marks_shipped_the_originating_feature_queue_issue_instea
     assert result == {"issue_number": 42, "board_issue_number": 42}
 
 
+def test_record_shipped_with_known_bug_issue_reuses_it_without_a_second_shipped_comment(tmp_path, monkeypatch):
+    """Regression test for issue #33: a known-bug resolution used to have no
+    way to tell record_shipped which issue it belongs to (resolves_id is only
+    forwarded for resolves_origin=="feature_queue"), so its fallback fuzzy
+    similarity check had to guess -- and sometimes missed, creating an
+    orphaned duplicate instead of reusing the real tracking issue (#21).
+    known_bug_issue fixes this by passing the known issue number through
+    directly. mark_shipped must NOT be called here -- the caller's own
+    clear_known_bug() (a separate call, not exercised by this test) already
+    stamps status:shipped and posts the resolution comment on that same
+    issue; calling mark_shipped again here would double the comment."""
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not create a new issue"))
+    )
+    monkeypatch.setattr(
+        github_issues, "mark_shipped", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not double-post a shipped comment"))
+    )
+
+    result = mem.record_shipped("Standup dedup fix", commit_sha="abc1234", run_id="run21", known_bug_issue="21")
+
+    assert result == {"issue_number": 21, "board_issue_number": 21}
+
+
 def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)

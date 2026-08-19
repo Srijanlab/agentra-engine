@@ -371,6 +371,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             sub_feature_of=sub_feature_of or None,
             more_parts_expected=more_parts_expected,
             session_id=session.session_id,
+            known_bug_issue=resolves_id if resolves_origin == "known_bug" else None,
         )
         session.mem.append_documentation(
             f"Shipped **{feature_name}**"

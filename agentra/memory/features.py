@@ -105,10 +105,25 @@ class MemoryFeaturesMixin:
         sub_feature_of: str | None = None,
         more_parts_expected: bool = False,
         session_id: str | None = None,
+        known_bug_issue: str | None = None,
     ) -> dict | None:
         """Records a shipped feature as an open 'feature'-labeled issue stamped
         'status:shipped' — the same ledger feature_queue() and shipped_features()
         read, so pending/shipped/released is just an issue's own state/labels.
+
+        known_bug_issue: set when this call resolves a known bug (not a
+        feature_queue item) whose caller is ALSO calling clear_known_bug() on
+        the same issue number right after this returns -- that call already
+        stamps status:shipped and posts its own resolution comment on the bug
+        issue itself, so this just reuses that number as board_issue_number
+        without posting a second, redundant "Shipped as ..." comment (unlike
+        resolves_id below, which does post one, since nothing else does for
+        the feature_queue case). Without this, a known-bug fix had no way to
+        tell record_shipped which issue it belongs to, so the fallback path's
+        similarity check (comparing the shipped feature's generated title
+        against each open bug's original diagnosis text) had to guess --
+        confirmed live to miss and create an orphaned duplicate (issue #33,
+        which should have matched #21).
 
         Three paths:
         - sub_feature_of set: continues a multi-part feature (existing parent).
@@ -169,6 +184,15 @@ class MemoryFeaturesMixin:
             elif resolves_id and resolves_id.isdigit():
                 issue_number = int(resolves_id)
                 github_issues.mark_shipped(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                board_issue_number = issue_number
+
+            elif known_bug_issue and known_bug_issue.isdigit():
+                # No mark_shipped/comment here -- the caller's own clear_known_bug()
+                # call on this same issue number handles that (status:shipped label +
+                # its own resolution comment). This branch exists purely so the known
+                # issue number is used directly instead of falling through to the
+                # fuzzy-match safety net below, which is what actually created #33.
+                issue_number = int(known_bug_issue)
                 board_issue_number = issue_number
 
             else:
