@@ -489,6 +489,57 @@ def test_record_feature_request_with_a_title_uses_it_as_the_issue_title(tmp_path
     assert "Description: Let power users jump between panels without the mouse" in created["body"]
 
 
+def test_record_feature_request_with_extra_labels_appends_them_never_replacing_the_base_pair(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    created = {}
+    monkeypatch.setattr(
+        github_issues, "create_issue",
+        lambda repo_url, title, body, labels=None: created.update(labels=labels) or {"number": 11},
+    )
+
+    mem.record_feature_request("A self-discovered opportunity", source="github", extra_labels=["discovery"])
+
+    assert created["labels"] == ["feature", "agentra", "discovery"]
+    assert "bug" not in created["labels"]
+
+
+def test_record_feature_request_without_extra_labels_only_uses_the_base_pair(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    created = {}
+    monkeypatch.setattr(
+        github_issues, "create_issue",
+        lambda repo_url, title, body, labels=None: created.update(labels=labels) or {"number": 11},
+    )
+
+    mem.record_feature_request("Add keyboard shortcuts")
+
+    assert created["labels"] == ["feature", "agentra"]
+
+
+def test_record_feature_request_returns_the_created_issues_number_and_url(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "create_issue",
+        lambda repo_url, title, body, labels=None: {"number": 42, "html_url": "https://github.com/acme/app/issues/42"},
+    )
+
+    result = mem.record_feature_request("A self-discovered opportunity")
+
+    assert result == {"number": 42, "html_url": "https://github.com/acme/app/issues/42"}
+
+
+def test_record_feature_request_returns_none_without_a_github_remote(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo", remote=None)
+    mem = Memory(repo)
+
+    result = mem.record_feature_request("Add keyboard shortcuts")
+
+    assert result is None
+
+
 def test_clear_feature_request_closes_the_github_issue(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)

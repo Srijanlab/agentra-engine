@@ -39,7 +39,17 @@ IMAGE_NAME="agentra:local"
 
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
   echo "🔨  Building $IMAGE_NAME (first run only)…"
-  docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+  # Explicitly enable BuildKit, not the deprecated legacy builder --
+  # DOCKER_BUILDKIT=1 works against any modern docker daemon without
+  # requiring the buildx CLI plugin to be installed (unlike `docker buildx
+  # build`), so it's the more portable of the two ways to opt in here.
+  # Also reclaim any stale build cache/dangling images first (best-effort)
+  # so a long-lived host doesn't run this out of disk mid-build (the same
+  # Playwright-chromium-install-triggered failure mode this guards against
+  # in the deployment pipeline's own docker build calls).
+  docker builder prune -f &>/dev/null || true
+  docker image prune -f &>/dev/null || true
+  DOCKER_BUILDKIT=1 docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
 fi
 
 # ── Run ───────────────────────────────────────────────────────────────────────

@@ -41,16 +41,18 @@ def _patch_registry(monkeypatch):
     monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
 
 
-def _stub_backlog(session, monkeypatch):
+def _stub_backlog(session, monkeypatch, in_progress=None, bugs=None, queue=None):
     monkeypatch.setattr(session.mem, "shipped_features", lambda: [])
-    monkeypatch.setattr(session.mem, "known_bugs", lambda: [])
-    monkeypatch.setattr(session.mem, "feature_queue", lambda: [])
+    monkeypatch.setattr(session.mem, "in_progress_features", lambda: in_progress or [])
+    monkeypatch.setattr(session.mem, "known_bugs", lambda: bugs or [])
+    monkeypatch.setattr(session.mem, "feature_queue", lambda: queue or [])
 
 
 def test_discover_opportunities_ranks_and_returns_opportunities_on_the_normal_path(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(tmp_path)
     _stub_backlog(session, monkeypatch)
+    monkeypatch.setattr(session.mem, "record_feature_request", lambda *a, **k: {"number": 5, "html_url": "https://x/5"})
 
     async def fake_discovery_run(*a, **k):
         return AgentResult(
@@ -121,3 +123,146 @@ def test_discover_opportunities_human_input_required_does_not_count_as_a_tool_fa
     asyncio.run(_tool(session, "discover_opportunities").handler({}))
 
     assert session.tool_failure_counts.get("discover_opportunities", 0) == 0
+
+
+# -- backlog-empty auto-filing (issue #23) --------------------------------------------
+
+
+def _fake_discovery_run_with_opportunities(*opportunities):
+    async def fake_run(*a, **k):
+        return AgentResult(ok=True, text="ok", json_data={"opportunities": list(opportunities)}, cost_usd=0.02, turns=3)
+
+    return fake_run
+
+
+_TOP_OPPORTUNITY = {
+    "feature": "add_saved_searches",
+    "description": "Let users save a search query and re-run it with one click.",
+    "impact": "high",
+    "effort": "low",
+    "reason": "Several support tickets ask for this; low effort, high retention impact.",
+    "origin": "autonomous",
+    "id": None,
+}
+_SECOND_OPPORTUNITY = {
+    "feature": "add_dark_mode",
+    "description": "Add a dark color theme toggle.",
+    "impact": "medium",
+    "effort": "medium",
+    "reason": "Frequently requested but lower urgency than saved searches.",
+    "origin": "autonomous",
+    "id": None,
+}
+
+
+def test_discover_opportunities_files_the_top_opportunity_when_backlog_is_empty(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch)  # in_progress=[], bugs=[], queue=[] -- genuinely empty
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_SECOND_OPPORTUNITY, _TOP_OPPORTUNITY))
+
+    calls = []
+    monkeypatch.setattr(
+        session.mem, "record_feature_request",
+        lambda description, **k: calls.append((description, k)) or {"number": 42, "html_url": "https://github.com/acme/app/issues/42"},
+    )
+
+    result = asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+    assert result.get("is_error") is not True
+    assert len(calls) == 1  # exactly one issue filed, regardless of how many opportunities were ranked
+    description, kwargs = calls[0]
+    # The ranked top pick (impact/effort score) is add_saved_searches, not
+    # whichever happened to be listed first in the raw discovery output.
+    assert kwargs["title"] == "add_saved_searches"
+    assert kwargs["source"] == "github"
+    assert kwargs["extra_labels"] == ["discovery"]
+    assert "Let users save a search query and re-run it with one click." in description
+    assert "Several support tickets ask for this" in description  # the "why", not just the what
+    assert "#42" in result["content"][0]["text"]
+
+
+def test_discover_opportunities_filed_issue_never_uses_the_bug_path(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch)
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    monkeypatch.setattr(session.mem, "record_feature_request", lambda *a, **k: {"number": 1, "html_url": "https://x/1"})
+    monkeypatch.setattr(
+        session.mem, "record_known_bug",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("a discovered opportunity must never be filed via record_known_bug")),
+    )
+
+    asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+
+def test_discover_opportunities_does_not_file_when_the_feature_queue_is_non_empty(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch, queue=[{"external_id": "9", "feature": "existing queued feature"}])
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    monkeypatch.setattr(
+        session.mem, "record_feature_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not file -- feature queue is non-empty")),
+    )
+
+    result = asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+    assert result.get("is_error") is not True
+
+
+def test_discover_opportunities_does_not_file_when_there_is_an_actionable_known_bug(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch, bugs=[{"external_id": "3", "diagnosis": "checkout crashes", "needs_human": False}])
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    monkeypatch.setattr(
+        session.mem, "record_feature_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not file -- there is an actionable known bug")),
+    )
+
+    asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+
+def test_discover_opportunities_files_despite_a_needs_human_bug_since_it_is_not_actionable(tmp_path, monkeypatch):
+    # A bug already escalated to a human (needs_human=True) is excluded from
+    # _actionable_bugs -- it must not itself count as "backlog not empty"
+    # (same filtering check_backlog already applies).
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch, bugs=[{"external_id": "3", "diagnosis": "needs a human call", "needs_human": True}])
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    calls = []
+    monkeypatch.setattr(session.mem, "record_feature_request", lambda *a, **k: calls.append(1) or {"number": 1, "html_url": "https://x/1"})
+
+    asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+    assert calls == [1]
+
+
+def test_discover_opportunities_does_not_file_when_there_is_an_in_progress_feature(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch, in_progress=[{"external_id": "7", "description": "multi-part feature underway"}])
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    monkeypatch.setattr(
+        session.mem, "record_feature_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not file -- an in-progress feature exists")),
+    )
+
+    asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+
+def test_discover_opportunities_filing_failure_does_not_fail_the_tool_call(tmp_path, monkeypatch):
+    # record_feature_request already handles "no repo remote"/GitHub errors
+    # internally and returns None -- the tool call's own success must not
+    # depend on the filing actually landing.
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch)
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    monkeypatch.setattr(session.mem, "record_feature_request", lambda *a, **k: None)
+
+    result = asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+    assert result.get("is_error") is not True

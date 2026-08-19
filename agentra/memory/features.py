@@ -259,23 +259,37 @@ class MemoryFeaturesMixin:
         source: str = "customer",
         external_id: str | None = None,
         title: str | None = None,
-    ) -> None:
+        extra_labels: list[str] | None = None,
+    ) -> dict | None:
         """`title` (from the dashboard's form) becomes the issue's actual title;
         `description` is recorded as a 'Description: ...' body line (same
-        pattern as record_known_bug's title param)."""
+        pattern as record_known_bug's title param).
+
+        extra_labels is additive on top of the standard [_FEATURE_LABEL,
+        _AGENTRA_LABEL] pair (e.g. discover_opportunities passes
+        [core._DISCOVERY_LABEL] -- see that constant's docstring in
+        memory/core.py) -- never _BUG_LABEL; a feature request always goes
+        through this path, never record_known_bug's.
+
+        Returns {"number": int, "html_url": str} for the created issue, or
+        None if it could not be recorded anywhere (no repo_url, or the
+        GitHub API call failed)."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_feature_request: %s has no github.com remote -- feature %r was NOT recorded anywhere", self.repo, description)
-            return
+            return None
         try:
             from agentra.connectors import github_issues
 
             body = f"Description: {description}\n\nSource: {source}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, title or description, body, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
+            labels = [_FEATURE_LABEL, _AGENTRA_LABEL, *(extra_labels or [])]
+            issue = github_issues.create_issue(repo_url, title or description, body, labels=labels)
+            return {"number": issue.get("number"), "html_url": issue.get("html_url")}
         except Exception:
             logger.error("record_feature_request: failed to create a GitHub issue on %s -- feature %r was NOT recorded anywhere", repo_url, description, exc_info=True)
+            return None
 
     def clear_feature_request(self, external_id: str, resolution_note: str | None = None) -> None:
         if not external_id.isdigit():

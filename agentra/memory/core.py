@@ -18,6 +18,12 @@ _AGENTRA_LABEL = "agentra"
 _BUG_LABEL = "bug"
 _FEATURE_LABEL = "feature"
 _STORY_LABEL = "story"
+# Marks a feature-request issue as self-originated by discover_opportunities
+# (issue #23) rather than customer/dashboard-submitted -- always applied
+# alongside _FEATURE_LABEL/_AGENTRA_LABEL, never on its own and never
+# together with _BUG_LABEL (record_feature_request's path, not
+# record_known_bug's).
+_DISCOVERY_LABEL = "discovery"
 _NEED_HUMAN_LABEL = "need_human"
 _BLOCKING_AGENTRA_LABEL = "blocking_agentra"
 _STATUS_IN_PROGRESS_LABEL = "status:in-progress"

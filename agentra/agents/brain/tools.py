@@ -16,6 +16,7 @@ from agentra.agents import architecture_review, codebase, deployment, discovery,
 from agentra.agents import catalog as agents_catalog
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
 from agentra.environments import feature_branch_name
+from agentra.memory.core import _DISCOVERY_LABEL
 from agentra.ranking import rank
 
 if TYPE_CHECKING:
@@ -40,6 +41,43 @@ def _format_spec(spec: dict) -> str:
         lines.append("\nAcceptance criteria:")
         lines.extend(f"- {c}" for c in criteria)
     return "\n".join(lines)
+
+
+def _file_top_opportunity_as_feature_request(session: OrchestratorSession, opportunities: list[dict]) -> dict | None:
+    """When the backlog is genuinely empty (no in-progress feature, no
+    actionable known bug, no queued feature request -- the same emptiness
+    that already makes discover_opportunities the documented last resort in
+    check_backlog's own tool description), durably files the single
+    top-ranked opportunity as a real GitHub feature-request issue (issue
+    #23) so it shows up in check_backlog's feature queue on a future cycle
+    like any other GitHub-sourced feature request.
+
+    Deliberately goes through record_feature_request (feature/agentra/
+    discovery labels) -- never record_known_bug/needs_human. An opportunity
+    is not a bug and must never carry the bug label or trigger a human
+    escalation. Re-checks emptiness live here rather than trusting the
+    caller already confirmed it earlier this turn (state can change
+    between calls), and only ever files opportunities[0] -- one issue per
+    empty-backlog occurrence, regardless of how many were ranked.
+
+    Returns the created issue's {"number", "html_url"} (per
+    Memory.record_feature_request), or None if the backlog wasn't actually
+    empty, there was nothing to file, or filing failed."""
+    if not opportunities:
+        return None
+    if session.mem.in_progress_features() or _actionable_bugs(session.mem.known_bugs()) or session.mem.feature_queue():
+        return None
+    top = opportunities[0]
+    feature = (top.get("feature") or "").strip() or "New opportunity"
+    description = (top.get("description") or "").strip() or "No further description was provided by Discovery Agent."
+    reason = (top.get("reason") or "").strip()
+    body = description
+    if reason:
+        body += f"\n\nWhy: {reason}"
+    impact, effort = top.get("impact"), top.get("effort")
+    if impact or effort:
+        body += f"\n\nImpact: {impact or 'unspecified'}, Effort: {effort or 'unspecified'}"
+    return session.mem.record_feature_request(body, source="github", title=feature, extra_labels=[_DISCOVERY_LABEL])
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
@@ -153,7 +191,11 @@ def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "discover_opportunities",
         "Last resort: ideate new features once the backlog is empty. Asks "
-        "Product Discovery Agent for ranked feature opportunities.",
+        "Product Discovery Agent for ranked feature opportunities. When the "
+        "backlog was genuinely empty, automatically files the single "
+        "top-ranked opportunity as a new GitHub feature-request issue "
+        "(discovery label) so it isn't lost -- you don't need to file it "
+        "yourself, but may still call implement_feature on it this turn.",
         {},
     )
     async def discover_opportunities(_args):
@@ -206,7 +248,26 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("discover_opportunities")
             return {"content": [{"type": "text", "text": "Discovery failed to produce opportunities."}], "is_error": True}
         session.record_success("discover_opportunities")
-        return {"content": [{"type": "text", "text": json.dumps(opportunities, indent=2)}]}
+
+        # Backlog-empty auto-filing (issue #23): discover_opportunities is
+        # only ever reached as a last resort once check_backlog has nothing
+        # left -- when that's genuinely true, durably file the single
+        # top-ranked opportunity as a real GitHub feature-request issue
+        # (never a bug/needs_human escalation) so it survives past this
+        # run and flows into check_backlog's queue like any other
+        # GitHub-sourced feature request next cycle.
+        filed = _file_top_opportunity_as_feature_request(session, opportunities)
+        text = json.dumps(opportunities, indent=2)
+        if filed:
+            issue_note = f" (issue #{filed['number']})" if filed.get("number") else ""
+            session.note(f"discover_opportunities: backlog was empty -- filed top opportunity as a new feature request{issue_note}", ok=True)
+            text += (
+                f"\n\nBacklog was empty, so the top-ranked opportunity above was filed as a new "
+                f"GitHub feature-request issue{issue_note} (label: discovery) -- it will surface via "
+                "check_backlog on a future cycle like any other feature request; no need to "
+                "call implement_feature on it this same turn unless you want to."
+            )
+        return {"content": [{"type": "text", "text": text}]}
 
     @tool(
         "assess_design_impact",
