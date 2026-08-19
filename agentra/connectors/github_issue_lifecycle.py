@@ -191,12 +191,57 @@ def get_human_input_context(repo_url: str, issue_number: int) -> dict | None:
     return None
 
 
+# Every marker this module posts as a plain comment, in one place, so
+# find_unanswered_human_input_comment (below) can recognize "one of ours"
+# and skip it rather than mistaking it for a human's reply.
+_INTERNAL_COMMENT_PREFIXES = (
+    "In-Progress-Branch:",
+    _SPEC_MARKER,
+    "Commit:",
+    _HUMAN_INPUT_MARKER,
+    "Answered:",
+)
+
+
+def find_unanswered_human_input_comment(repo_url: str, issue_number: int) -> str | None:
+    """Polling-based half of the GitHub-issue-comment answer channel -- no
+    inbound webhook (see connectors/slack.py's module docstring and
+    design.md for why Slack-reply-driven resume is deferred to its own
+    security review). Scans comments oldest-first for the first one posted
+    after the most recent Human-Input-Required marker that isn't itself one
+    of this module's own structured marker comments -- that is treated as
+    the human's answer. Returns None if the issue has no Human-Input-Required
+    marker yet, or nothing has been posted since it.
+
+    Best-effort and coarse: this can't tell a genuine answer from an
+    unrelated human comment on the same issue. Acceptable for a v1 --
+    record_human_answer removes the needs_human label the moment one is
+    found, so a stray comment can trigger at most one unwanted resume
+    attempt, not a silent infinite loop."""
+    comments = list_comments(repo_url, issue_number)
+    marker_seen = False
+    for comment in comments:  # oldest-first: the marker must come before its answer
+        body = comment.get("body") or ""
+        if body.startswith(_HUMAN_INPUT_MARKER):
+            marker_seen = True
+            continue
+        if not marker_seen:
+            continue
+        if any(body.startswith(prefix) for prefix in _INTERNAL_COMMENT_PREFIXES):
+            continue
+        if not body.strip():
+            continue
+        return body.strip()
+    return None
+
+
 def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
     """Comments the human's answer onto the needs_human issue -- called once
-    a dashboard answer submission (or, in a future part, a GitHub-comment-
-    driven resume) has been accepted. Leaves the issue open (a resumed run
-    can still hit a second HUMAN_INPUT_REQUIRED); memory.py's
-    record_human_answer also strips the need_human label right after this."""
+    a dashboard answer submission (or a GitHub-comment-driven resume via
+    find_unanswered_human_input_comment) has been accepted. Leaves the issue
+    open (a resumed run can still hit a second HUMAN_INPUT_REQUIRED);
+    memory.py's record_human_answer also strips the need_human label right
+    after this."""
     body = f"Answered: {answer}"
     if resumed_run_key:
         body += f"\n\nResuming as run {resumed_run_key}."

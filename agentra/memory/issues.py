@@ -205,6 +205,39 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("record_human_answer: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
+    def issue_html_url(self, issue_number: int) -> str | None:
+        """The browsable GitHub URL for an issue, or None if this repo has
+        no github.com remote. Used to build the GitHub-issue link in a
+        HUMAN_INPUT_REQUIRED Slack notification and the dashboard's 'Needs
+        your input' panel -- no live API call, just owner/repo/number."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.issue_html_url(repo_url, issue_number)
+        except Exception:
+            return None
+
+    def find_unanswered_human_input_comment(self, issue_number: int) -> str | None:
+        """The human's answer to a needs_human issue's blocking question, if
+        one has been posted as a plain GitHub comment since the question was
+        filed -- the polling-based half of the GitHub-issue-comment resume
+        channel (see github_issue_lifecycle.py's
+        find_unanswered_human_input_comment for the matching heuristic;
+        there is no inbound webhook receiving these). None if the issue has
+        no Human-Input-Required marker yet or nothing has been posted since."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.find_unanswered_human_input_comment(repo_url, issue_number)
+        except Exception:
+            return None
+
     def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
         """Marks status:shipped and leaves the issue OPEN (mark_shipped) —
         it only actually closes once production promotion runs it through

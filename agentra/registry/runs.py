@@ -136,6 +136,47 @@ def reconcile_stale_runs() -> list[str]:
     return marked
 
 
+def list_waiting_for_human(limit: int = 200) -> list[dict]:
+    """Runs currently parked in the 'waiting_for_human' state -- backs the
+    dashboard's 'Needs your input' panel. Deliberately excludes 'escalated'
+    (past its max-wait timeout, see reconcile_waiting_for_human) so the
+    panel's own polling loop (see reconcile_waiting_for_human's docstring)
+    is the only thing that has to reason about that distinction; the panel
+    itself still shows escalated runs, just with a distinct badge -- see
+    server/routes/human_input.py."""
+    return [r for r in list_runs(limit=limit) if r.get("status") in ("waiting_for_human", "escalated")]
+
+
+def reconcile_waiting_for_human() -> list[dict]:
+    """Human-in-the-loop escalation (GitHub issue #34): a run sitting in
+    'waiting_for_human' must never silently stay there forever with no
+    further signal -- past core.HUMAN_INPUT_MAX_WAIT_SECONDS since it
+    started waiting, flip it to the distinguishable 'escalated' state so a
+    human looking at the dashboard (or a re-sent Slack message, dispatched
+    by the caller using the human_input context this returns) can tell
+    "still within normal wait" from "this has been sitting here too long."
+
+    Pure state transition only, no outbound calls (GitHub/Slack) -- keeps
+    registry/ dependency-free of connectors/, same layering as the rest of
+    this module. Callers (server/routes/human_input.py) re-notify using the
+    human_input dict on each returned record. Returns the list of run
+    records that were just escalated this call, so a caller doesn't have to
+    re-scan to find out what changed."""
+    now = time.time()
+    escalated: list[dict] = []
+    for run in list_runs(limit=500):
+        if run.get("status") != "waiting_for_human":
+            continue
+        human_input = run.get("human_input") or {}
+        waiting_since = human_input.get("waiting_since")
+        if waiting_since is None or now - waiting_since <= core.HUMAN_INPUT_MAX_WAIT_SECONDS:
+            continue
+        record_run(run["run_key"], status="escalated")
+        run["status"] = "escalated"
+        escalated.append(run)
+    return escalated
+
+
 def record_agent_step(
     app: str, run_id: str, agent: str, ok: bool | None, cost_usd: float, turns: int | None, summary: str
 ) -> None:

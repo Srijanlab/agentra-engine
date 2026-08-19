@@ -32,14 +32,86 @@ def _actionable_bugs(bugs: list[dict]) -> list[dict]:
     return [b for b in bugs if not b.get("needs_human")]
 
 
-def _format_spec(spec: dict) -> str:
-    """Requirements Agent's JSON spec formatted as readable text."""
+def _format_spec(spec: dict, human_answer: str | None = None) -> str:
+    """Requirements Agent's JSON spec formatted as readable text.
+
+    human_answer: human-in-the-loop escalation (GitHub issue #34) -- when
+    resuming an implement_feature call that previously hit
+    HUMAN_INPUT_REQUIRED, the human's answer to the blocking question gets
+    woven directly into this spec text (not just the outer cycle prompt),
+    so the Implementation Agent's resumed turn sees it as part of what it's
+    building, not as a detached side note it might not read."""
     lines = [f"Spec: {spec.get('spec', '')}"]
     criteria = spec.get("acceptance_criteria") or []
     if criteria:
         lines.append("\nAcceptance criteria:")
         lines.extend(f"- {c}" for c in criteria)
+    if human_answer:
+        lines.append(
+            "\nA human has answered your previous blocking question -- use this to proceed, "
+            "do not ask it again:\n" + human_answer.strip()
+        )
     return "\n".join(lines)
+
+
+def _escalate_to_human(
+    session: OrchestratorSession,
+    *,
+    diagnosis: str,
+    question: str,
+    source: str,
+    title: str,
+    branch: str | None = None,
+) -> int | None:
+    """Human-in-the-loop escalation (GitHub issue #34), shared by
+    implement_feature and discover_opportunities' HUMAN_INPUT_REQUIRED
+    branches (deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly
+    out of scope for this -- see deploy_pre_prod's own handling, left
+    untouched). Does everything the architecture review scoped for this
+    part beyond the pre-existing needs_human GitHub issue filing:
+
+    1. Stamps resume-correlation data (app, run_id, branch, session_id,
+       question) onto the filed/updated needs_human issue.
+    2. Posts an outbound Slack notification if SLACK_BOT_TOKEN/
+       SLACK_HUMAN_INPUT_CHANNEL are configured -- silently skipped
+       otherwise (see connectors/slack.py), never surfaced as a run
+       failure.
+    3. Marks the run waiting_for_human immediately (session.mark_waiting_for_human).
+
+    Returns the needs_human issue number (or None if GitHub was
+    unreachable/unconfigured -- matching every other best-effort write in
+    memory.py), so implement_feature can also stamp record_in_progress_branch/
+    record_spec on it to make the escalation issue itself resumable when
+    there's no separate tracking issue (a self-initiated idea with no
+    resolves_id/sub_feature_of)."""
+    issue_number = session.mem.record_known_bug(
+        session.run_id, "medium", diagnosis,
+        "Requires an explicit human decision -- not an implementation/discovery failure, "
+        "not something a different brief/approach fixes.",
+        source=source,
+        needs_human=True,
+        title=title,
+    )
+    issue_url = session.mem.issue_html_url(issue_number) if issue_number is not None else None
+    if issue_number is not None:
+        session.mem.record_human_input_context(
+            issue_number, app=session.app_name, run_id=session.run_id, question=question,
+            branch=branch, session_id=session.session_id,
+        )
+    from agentra import urls
+    from agentra.connectors import slack
+
+    slack.notify_human_input_required(
+        app=session.app_name,
+        run_id=session.run_id,
+        question=question,
+        issue_url=issue_url,
+        dashboard_url=urls.dashboard_run_url(session.run_id, session.app_name),
+        branch=branch,
+        session_id=session.session_id,
+    )
+    session.mark_waiting_for_human(issue_number=issue_number, issue_url=issue_url, question=question, branch=branch)
+    return issue_number
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
@@ -182,16 +254,26 @@ def _tools_for(session: OrchestratorSession) -> list:
                 diagnosis += f"\n\nQuestion for a human: {question}"
             if options:
                 diagnosis += f"\n\nOptions considered: {options}"
-            session.mem.record_known_bug(
-                session.run_id, "medium", diagnosis,
-                "Requires an explicit human decision about product direction before Discovery Agent can propose opportunities.",
+            # No resume contract for discover_opportunities (out of scope for this
+            # part, per the architecture review -- resuming discovery with an
+            # answer is a separate future feature): _escalate_to_human still files
+            # the needs_human issue, notifies Slack, and marks this run
+            # waiting_for_human, but passes branch=None since there is no
+            # branch/session for a human's answer to resume onto here.
+            _escalate_to_human(
+                session,
+                diagnosis=diagnosis,
+                question=question or reason,
                 source="discovery-agent-human-input-required",
-                needs_human=True,
                 title="Human input required: product direction",
             )
             session.note(f"discover_opportunities: human input required -- {reason[:200]}", ok=None)
             return {
-                "content": [{"type": "text", "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human)."}],
+                "content": [{
+                    "type": "text",
+                    "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human) and notified via "
+                    "Slack (if configured); this run is now waiting_for_human.",
+                }],
                 "is_error": True,
             }
 

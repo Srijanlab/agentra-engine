@@ -40,6 +40,18 @@ def _owner_repo_or_raise(repo_url: str) -> str:
     return owner_repo
 
 
+def issue_html_url(repo_url: str, issue_number: int) -> str | None:
+    """The browsable https://github.com/OWNER/REPO/issues/N URL for an
+    issue, or None if repo_url isn't a github.com HTTPS remote. No API call
+    needed -- GitHub issue URLs are deterministic from owner/repo/number.
+    Used to build the GitHub-issue link in a HUMAN_INPUT_REQUIRED Slack
+    notification and in the dashboard's 'Needs your input' panel."""
+    owner_repo = owner_repo_from_url(repo_url)
+    if owner_repo is None:
+        return None
+    return f"https://github.com/{owner_repo}/issues/{issue_number}"
+
+
 def _headers(repo_url: str) -> dict[str, str]:
     token = get_installation_token(repo_url)
     return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
@@ -296,12 +308,16 @@ def list_comments(repo_url: str, issue_number: int) -> list[dict]:
 # Backward-compatible re-exports from github_issue_lifecycle.py
 from agentra.connectors.github_issue_lifecycle import (  # noqa: E402
     close_issue,
+    find_unanswered_human_input_comment,
+    get_human_input_context,
     get_in_progress_branch,
     get_in_progress_run_id,
     get_in_progress_session_id,
     get_spec,
     mark_shipped,
     record_commit,
+    record_human_answer,
+    record_human_input_context,
     record_in_progress_branch,
     record_spec,
 )
@@ -316,8 +332,10 @@ __all__ = [
     "list_in_progress_features",
     "ensure_labels",
     "add_labels",
+    "remove_label",
     "add_comment",
     "list_comments",
+    "issue_html_url",
     "close_issue",
     "mark_shipped",
     "record_in_progress_branch",
@@ -325,6 +343,10 @@ __all__ = [
     "get_in_progress_run_id",
     "get_in_progress_session_id",
     "record_commit",
+    "record_human_input_context",
+    "get_human_input_context",
+    "record_human_answer",
+    "find_unanswered_human_input_comment",
     "record_spec",
     "get_spec",
 ]
