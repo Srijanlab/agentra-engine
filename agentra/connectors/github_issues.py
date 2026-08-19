@@ -109,7 +109,7 @@ def list_open_issues(repo_url: str, labels: list[str] | None = None) -> list[dic
     return [issue for issue in resp.json() if "pull_request" not in issue]
 
 
-def list_closed_issues(repo_url: str, labels: list[str] | None = None, limit: int = 30) -> list[dict]:
+def list_closed_issues(repo_url: str, labels: list[str] | None = None, limit: int = 5) -> list[dict]:
     """Closed issues only, newest-closed first. Used by memory.py's
     shipped_features() — no local mirror involved."""
     owner_repo = _owner_repo_or_raise(repo_url)
@@ -165,6 +165,119 @@ def create_sub_issue(
             sub_issue["number"], parent_issue_number, repo_url, exc_info=True,
         )
     return sub_issue
+
+
+def fetch_app_digest_batch(repo_urls: list[str], closed_limit: int = 5) -> dict[str, dict]:
+    """Single GraphQL call fetching open bugs, open features, and most-recent
+    closed issues for every repo in repo_urls simultaneously.
+
+    Returns a dict keyed by repo_url:
+      {
+        "open_bugs":     [{"number", "title", "body", "html_url", "labels"}, ...],
+        "open_features": [{"number", "title", "body", "html_url", "labels"}, ...],
+        "closed_features": [...],   # newest closed_limit items, feature-labeled
+        "closed_bugs":   [...],     # newest closed_limit items, bug-labeled
+      }
+
+    Falls back to an empty dict for any repo that has no github.com remote or
+    whose token can't be fetched.  If the whole batch call fails the caller
+    should degrade gracefully rather than explode.
+
+    Alias naming: GraphQL field aliases can't contain slashes or dots, so each
+    repo is addressed by a stable index (r0, r1, …) and the result is mapped
+    back to repo_urls by position.
+    """
+    if not repo_urls:
+        return {}
+
+    # All repos must share the same installation token — they do in practice
+    # (they all live under the same GitHub App installation). Use the first
+    # url's token for the single request.
+    first_url = repo_urls[0]
+    try:
+        token = get_installation_token(first_url)
+    except Exception:
+        logger.warning("fetch_app_digest_batch: could not get installation token for %s", first_url)
+        return {}
+
+    # Build one big aliased query.  Each repo contributes four aliased fields.
+    fragments: list[str] = []
+    owner_repos: list[str | None] = []
+    for idx, url in enumerate(repo_urls):
+        or_ = owner_repo_from_url(url)
+        owner_repos.append(or_)
+        if or_ is None:
+            # Not a github.com URL — pad with empty aliases so indices stay aligned
+            fragments.append(f"r{idx}_ob: __typename r{idx}_of: __typename r{idx}_cf: __typename r{idx}_cb: __typename")
+            continue
+        owner, name = or_.split("/", 1)
+        fragments.append(f"""
+        r{idx}_ob: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+          issues(states: OPEN, first: 100, labels: ["bug", "agentra"], orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
+            nodes {{ number title body url labels(first: 20) {{ nodes {{ name }} }} }}
+          }}
+        }}
+        r{idx}_of: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+          issues(states: OPEN, first: 100, labels: ["feature", "agentra"], orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
+            nodes {{ number title body url labels(first: 20) {{ nodes {{ name }} }} }}
+          }}
+        }}
+        r{idx}_cf: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+          issues(states: CLOSED, first: {closed_limit}, labels: ["feature", "agentra"], orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
+            nodes {{ number title body url closedAt labels(first: 20) {{ nodes {{ name }} }} }}
+          }}
+        }}
+        r{idx}_cb: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+          issues(states: CLOSED, first: {closed_limit}, labels: ["bug", "agentra"], orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
+            nodes {{ number title body url closedAt labels(first: 20) {{ nodes {{ name }} }} }}
+          }}
+        }}
+        """)
+
+    query = "{ " + "\n".join(fragments) + " }"
+    try:
+        resp = httpx.post(
+            f"{GITHUB_API}/graphql",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"query": query},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("errors"):
+            logger.warning("fetch_app_digest_batch: GraphQL errors: %s", body["errors"])
+            return {}
+        data = body["data"]
+    except Exception:
+        logger.warning("fetch_app_digest_batch: request failed", exc_info=True)
+        return {}
+
+    def _normalise_node(node: dict) -> dict:
+        return {
+            "number": node["number"],
+            "title": node["title"],
+            "body": node.get("body"),
+            "html_url": node.get("url"),
+            "closed_at": node.get("closedAt"),
+            "labels": [l["name"] for l in node.get("labels", {}).get("nodes", [])],
+            "state": "closed" if node.get("closedAt") else "open",
+        }
+
+    result: dict[str, dict] = {}
+    for idx, url in enumerate(repo_urls):
+        if owner_repos[idx] is None:
+            continue
+        ob = data.get(f"r{idx}_ob") or {}
+        of_ = data.get(f"r{idx}_of") or {}
+        cf = data.get(f"r{idx}_cf") or {}
+        cb = data.get(f"r{idx}_cb") or {}
+        result[url] = {
+            "open_bugs":      [_normalise_node(n) for n in (ob.get("issues") or {}).get("nodes", [])],
+            "open_features":  [_normalise_node(n) for n in (of_.get("issues") or {}).get("nodes", [])],
+            "closed_features":[_normalise_node(n) for n in (cf.get("issues") or {}).get("nodes", [])],
+            "closed_bugs":    [_normalise_node(n) for n in (cb.get("issues") or {}).get("nodes", [])],
+        }
+    return result
 
 
 def list_in_progress_features(repo_url: str, labels: list[str] | None = None) -> list[dict]:
@@ -292,6 +405,7 @@ from agentra.connectors.github_issue_lifecycle import (  # noqa: E402
 )
 
 __all__ = [
+    "fetch_app_digest_batch",
     "GitHubIssuesError",
     "get_issue",
     "create_issue",

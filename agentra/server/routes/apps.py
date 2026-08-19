@@ -102,7 +102,7 @@ def _apply_app_config(
         return str(exc)
 
 
-async def _app_digest(name: str, info: dict) -> tuple[str, dict]:
+async def _app_digest(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
     repo = Path(info["repo_path"])
     if not repo.exists():
         defaults = environments.EnvironmentConfig()
@@ -119,15 +119,36 @@ async def _app_digest(name: str, info: dict) -> tuple[str, dict]:
         }
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
-    shipped, bugs = await asyncio.gather(
-        asyncio.to_thread(mem.shipped_features), asyncio.to_thread(mem.known_bugs)
-    )
+
+    if github_data is not None:
+        # Use pre-fetched batch data — no GitHub API calls here.
+        from agentra.memory.core import _STATUS_SHIPPED_LABEL, _label_names
+        open_bugs = [i for i in github_data.get("open_bugs", [])
+                     if _STATUS_SHIPPED_LABEL not in i.get("labels", [])]
+        # shipped = open features with status:shipped + closed features
+        open_shipped = [i for i in github_data.get("open_features", [])
+                        if _STATUS_SHIPPED_LABEL in i.get("labels", [])]
+        closed_features = github_data.get("closed_features", [])
+        shipped_count = len(open_shipped) + len(closed_features)
+        # released = closed features with status:done label
+        from agentra.memory.core import _STATUS_DONE_LABEL
+        released_count = len([i for i in closed_features
+                               if _STATUS_DONE_LABEL in i.get("labels", [])])
+        known_bugs = len(open_bugs)
+    else:
+        shipped, bugs = await asyncio.gather(
+            asyncio.to_thread(mem.shipped_features), asyncio.to_thread(mem.known_bugs)
+        )
+        shipped_count = len(shipped)
+        released_count = len(mem.released_features())
+        known_bugs = len(bugs)
+
     return name, {
         "repo_path": info["repo_path"],
         "objective": mem.get_objective(),
-        "shipped_count": len(shipped),
-        "released_count": len(mem.released_features()),
-        "known_bugs": len(bugs),
+        "shipped_count": shipped_count,
+        "released_count": released_count,
+        "known_bugs": known_bugs,
         "pre_prod_branch": env_config.pre_prod_branch,
         "prod_branch": env_config.prod_branch,
         "schedule_hours": env_config.schedule_hours,
@@ -137,9 +158,42 @@ async def _app_digest(name: str, info: dict) -> tuple[str, dict]:
 
 @router.get("/apps")
 async def list_apps() -> dict:
+    from agentra.connectors import github_issues
+    from agentra.environments import load as load_env
+    from agentra.connectors.github_app import owner_repo_from_url
+
     apps = registry.list_apps()
-    results = await asyncio.gather(*(_app_digest(name, info) for name, info in apps.items()))
+
+    # Collect repo_urls for all apps that have a github remote configured.
+    repo_url_map: dict[str, str] = {}  # name -> repo_url
+    for name, info in apps.items():
+        repo = Path(info["repo_path"])
+        if not repo.exists():
+            continue
+        env = load_env(repo)
+        url = (env.repo_url if env else None) or info.get("repo_url")
+        if url and owner_repo_from_url(url):
+            repo_url_map[name] = url
+
+    # Single GraphQL call for all apps — falls back to {} on any error
+    # so individual _app_digest calls degrade gracefully to the REST path.
+    batch: dict[str, dict] = {}
+    if repo_url_map:
+        try:
+            batch = await asyncio.to_thread(
+                github_issues.fetch_app_digest_batch, list(repo_url_map.values())
+            )
+            # Re-key by app name
+            url_to_name = {v: k for k, v in repo_url_map.items()}
+            batch = {url_to_name[url]: data for url, data in batch.items() if url in url_to_name}
+        except Exception:
+            batch = {}
+
+    results = await asyncio.gather(
+        *(_app_digest(name, info, github_data=batch.get(name)) for name, info in apps.items())
+    )
     return {"apps": dict(results)}
+
 
 
 @router.post("/apps")

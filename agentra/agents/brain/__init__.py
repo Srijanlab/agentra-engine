@@ -18,7 +18,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query
 
-from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, implementation, requirements, testing
+from agentra.agents import architecture_review, codebase, codegraph, deployment, discovery, feedback, implementation, requirements, testing
 from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.brain.tools import _file_incidental_findings, _format_spec, _tools_for, MAX_SELF_HEAL_ATTEMPTS
 from agentra.agents.brain.prompts import SYSTEM_PROMPT
@@ -187,6 +187,18 @@ async def run_autonomous_cycle(
     # #20 ("orchestrator firing codebase agent every time even though
     # codebase.md available") for why this needed fixing in the first place.
     session.cb_summary = mem.read("architecture", "codebase") or None
+    # Same reasoning applies to the code graph: codebase.run_cached is the only
+    # place that calls codegraph.load_or_build, but on a repo with a cache this
+    # pre-seed means understand_codebase (and therefore run_cached) may never
+    # get called at all this cycle -- confirmed live, this exact gap left
+    # mcp_config(repo) returning {} for assess_design_impact on every cycle of
+    # a mature/cached repo, silently never building a graph. Build/reuse it
+    # here too so it's available regardless of whether the model calls
+    # understand_codebase.
+    if session.cb_summary:
+        graph_summary = codegraph.load_or_build(repo)
+        if graph_summary:
+            session.cb_summary += graph_summary
     session.note(
         f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}",
         agent="cycle",

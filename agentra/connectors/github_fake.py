@@ -101,7 +101,7 @@ class FakeGitHubBackend:
             results = [i for i in results if any(label in i["labels"] for label in labels)]
         return [dict(i) for i in results]
 
-    def list_closed_issues(self, repo_url: str, labels: list[str] | None = None, limit: int = 30) -> list[dict]:
+    def list_closed_issues(self, repo_url: str, labels: list[str] | None = None, limit: int = 5) -> list[dict]:
         results = [i for i in self.issues[repo_url].values() if i["state"] == "closed"]
         if labels:
             results = [i for i in results if any(label in i["labels"] for label in labels)]
