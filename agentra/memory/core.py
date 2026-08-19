@@ -47,6 +47,7 @@ _TRANSIENT_FAILURE_PATTERNS = [
     re.compile(r"Reached maximum number of turns \(\d+\)"),
     re.compile(r"rate.?limit", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
+    re.compile(r"session limit", re.IGNORECASE),
     re.compile(r"overloaded", re.IGNORECASE),
     re.compile(r"returned an error result: success"),
 ]

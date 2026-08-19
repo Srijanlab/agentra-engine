@@ -18,6 +18,11 @@ def test_is_transient_failure_detects_known_patterns():
     assert is_transient_failure("You have hit your usage limit for this period")
     assert is_transient_failure("api.anthropic.com is currently overloaded")
     assert is_transient_failure("Claude Code returned an error result: success")
+    # GitHub issue #36: session-limit errors must not create bug reports
+    assert is_transient_failure(
+        "Claude Code returned an error result: You've hit your session limit"
+        " · resets 8:20am (UTC) (exit code: 1)"
+    )
 
 
 def test_is_transient_failure_false_for_a_real_defect():
