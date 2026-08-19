@@ -170,7 +170,7 @@ def test_dashboard_bug_submission_reaches_bug_backlog(tmp_path, monkeypatch):
     assert response.json()["submitted"] is True
     bugs = Memory(repo).known_bugs()
     assert len(bugs) == 1
-    assert bugs[0]["diagnosis"] == "Export crashes on an empty result set."
+    assert bugs[0]["diagnosis"] == "Export crashes on empty results"
 
 
 def test_dashboard_bug_submission_without_a_title_is_rejected(tmp_path, monkeypatch):
