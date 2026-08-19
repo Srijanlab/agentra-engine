@@ -28,6 +28,7 @@ URLs, running smoke tests.
 
 import asyncio
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -486,6 +487,35 @@ def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hou
     return removed
 
 
+def _docker_build_env() -> dict:
+    """Env for every `docker build` subprocess call in this module --
+    explicitly enables BuildKit (DOCKER_BUILDKIT=1) rather than relying on
+    whatever the legacy default happens to be on the build host: the legacy
+    builder is deprecated and, unlike BuildKit, doesn't skip/cache unchanged
+    layers as effectively, which matters directly on a disk-constrained
+    long-lived host. Merges into (rather than replaces) the current
+    environment so PATH/HOME/etc the docker CLI itself needs stay intact."""
+    return {**os.environ, "DOCKER_BUILDKIT": "1"}
+
+
+def _reclaim_build_disk_space() -> None:
+    """Best-effort disk reclaim, run immediately before every `docker build`
+    call in this module -- same non-fatal, swallow-everything pattern as
+    cleanup_stale_preprod above, just aimed at generic build-cache/dangling-
+    image bloat rather than leaked preprod siblings specifically. On the
+    long-lived self-hosted build host, dangling layers and build cache from
+    earlier runs accumulate across every deploy unless something reclaims
+    them, which is the actual root cause of "no space left on device" build
+    failures. `docker builder prune -f` / `docker image prune -f` only ever
+    remove cache/images that aren't backing anything currently in use, so
+    this never touches a live container's image out from under it. A prune
+    failure (e.g. docker not reachable) just leaves that space unclaimed for
+    this build to potentially fail on -- never blocks the deploy attempt
+    itself."""
+    subprocess.run(["docker", "builder", "prune", "-f"], capture_output=True, text=True)
+    subprocess.run(["docker", "image", "prune", "-f"], capture_output=True, text=True)
+
+
 async def deploy_pre_prod_self_hosted(
     repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str
 ) -> AgentResult:
@@ -537,8 +567,10 @@ async def deploy_pre_prod_self_hosted(
     # container's own filesystem.
     claude_home = f"{config.data_mount}/claude"
 
+    _reclaim_build_disk_space()
     build = subprocess.run(
         ["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True,
+        env=_docker_build_env(),
     )
     if build.returncode != 0:
         return AgentResult(
@@ -699,7 +731,11 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
     image_tag = _candidate_image_tag(config, run_id)
     new_container = f"{base_name}-{new_color}"
 
-    build = subprocess.run(["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True)
+    _reclaim_build_disk_space()
+    build = subprocess.run(
+        ["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True,
+        env=_docker_build_env(),
+    )
     if build.returncode != 0:
         return AgentResult(
             ok=False, text=f"docker build {image_tag} failed: {build.stderr.strip()}",

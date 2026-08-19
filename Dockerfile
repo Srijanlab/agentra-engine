@@ -35,11 +35,19 @@ FROM python:3.12-slim
 # deploy_pre_prod_self_hosted, agentra's own EnvironmentConfig.self_hosted_vm
 # path, to spin up a sibling pre-prod container alongside this one on the
 # same VM).
+#
+# `docker-buildx` is the BuildKit CLI plugin -- required for agents/
+# deployment.py's own `docker build` calls (which run from inside this very
+# container, against the host daemon over that same socket) to actually get
+# BuildKit rather than erroring out ("buildx component is missing") once the
+# legacy, non-buildx BuildKit code path is gone from the docker CLI. Plain
+# `docker-cli` alone does not include it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
         ca-certificates \
         docker-cli \
+        docker-buildx \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean \
@@ -59,8 +67,15 @@ COPY --from=builder /install /usr/local
 # --with-deps pulls the OS-level libraries (fonts, libnss3, etc.) headless
 # Chromium needs to launch at all, not just the browser binary itself.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+# --with-deps runs its own `apt-get install` for chromium's OS-level libs,
+# which leaves the downloaded .deb cache and apt lists behind in this same
+# layer -- clean them up here (same RUN, so the layer itself doesn't carry
+# the bloat forward) rather than in a later layer, where the apt cache
+# would already be baked into an earlier, unremovable layer.
 RUN playwright install --with-deps chromium \
-    && chmod -R a+rX /opt/playwright-browsers
+    && chmod -R a+rX /opt/playwright-browsers \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for safer execution, and pre-create /workspace owned by it --
 # so a *fresh* named/anonymous volume mounted at /workspace (the server/clone-on-start
