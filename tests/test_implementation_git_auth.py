@@ -286,3 +286,74 @@ def test_run_does_not_refresh_the_graph_when_checkout_fails(tmp_path, monkeypatc
     )
 
     assert calls == []
+
+
+def test_run_grants_mcp_graph_tools_alongside_bash_when_a_graph_exists(tmp_path, monkeypatch):
+    """Unlike Architecture Review Agent, Implementation Agent keeps Bash
+    regardless (still needed for tests/build/commit) -- MCP is additive here,
+    not a replacement for it."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "beta", str(origin)], check=True, capture_output=True)
+    repo = _init_repo_with_branch(tmp_path / "repo", branch="beta")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "origin", "beta")
+
+    fake_config = {"graphify": {"command": "graphify-mcp", "args": ["/fake/graph.json"]}}
+    monkeypatch.setattr(codegraph, "mcp_config", lambda repo_arg: fake_config)
+    monkeypatch.setattr(codegraph, "refresh", lambda repo_arg: None)
+
+    captured = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentResult(ok=True, text="done", json_data={"status": "implemented"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(implementation, "run_agent", fake_run_agent)
+
+    asyncio.run(
+        implementation.run(
+            repo=repo,
+            objective="obj",
+            feature="a feature",
+            codebase_summary="summary",
+            env=EnvironmentConfig(pre_prod_branch="beta"),
+            feature_branch="feature/mcp-graph",
+        )
+    )
+
+    assert captured["mcp_servers"] == fake_config
+    assert "Bash" in captured["allowed_tools"]
+    assert set(codegraph.READ_ONLY_MCP_TOOLS).issubset(captured["allowed_tools"])
+
+
+def test_run_omits_mcp_graph_tools_when_no_graph_exists_yet(tmp_path, monkeypatch):
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "beta", str(origin)], check=True, capture_output=True)
+    repo = _init_repo_with_branch(tmp_path / "repo", branch="beta")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "origin", "beta")
+
+    monkeypatch.setattr(codegraph, "mcp_config", lambda repo_arg: {})
+    monkeypatch.setattr(codegraph, "refresh", lambda repo_arg: None)
+
+    captured = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentResult(ok=True, text="done", json_data={"status": "implemented"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(implementation, "run_agent", fake_run_agent)
+
+    asyncio.run(
+        implementation.run(
+            repo=repo,
+            objective="obj",
+            feature="a feature",
+            codebase_summary="summary",
+            env=EnvironmentConfig(pre_prod_branch="beta"),
+            feature_branch="feature/no-graph-yet",
+        )
+    )
+
+    assert captured["mcp_servers"] == {}
+    assert captured["allowed_tools"] == ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]

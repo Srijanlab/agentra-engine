@@ -243,6 +243,7 @@ async def run_agent(
     retry_on_contradictory_result: bool = True,
     agent_label: str | None = None,
     resume: str | None = None,
+    mcp_servers: dict[str, Any] | None = None,
 ) -> AgentResult:
     """Run one agent to completion and return its final result message.
 
@@ -275,10 +276,33 @@ async def run_agent(
     undifferentiated firehose. None (the CLI's own direct calls have no
     caller-supplied label) falls back to a generic "Agent" tag rather than
     silently dropping the prefix, so parsing on the frontend stays uniform.
+
+    mcp_servers: e.g. {"graphify": {"command": "graphify-mcp", "args": [...]}}
+    (see agents/codegraph.py's mcp_config) -- lets a caller grant scoped,
+    read-only tool access (mcp__<server>__<tool>, added to allowed_tools by
+    the caller) without opening full Bash. None/omitted for every agent that
+    doesn't need it, same as before this parameter existed.
     """
+    # tools= (built-in tool *availability*) is distinct from allowed_tools=
+    # (auto-approval) -- confirmed live (run 26bf7dee, tests/test_brain_tool_
+    # isolation.py): leaving tools=None (the SDK default) grants the full
+    # built-in Claude Code toolset regardless of allowed_tools, since every
+    # call here uses permission_mode="bypassPermissions", which auto-approves
+    # everything and never consults allowed_tools to gate availability either.
+    # A "read-only" agent (allowed_tools=["Read","Glob","Grep"]) was therefore
+    # never actually prevented from calling Bash/Write/WebSearch/... -- only
+    # asked not to, in its system prompt. Every caller's allowed_tools is
+    # already meant to be that agent's *complete* tool set (see agents/
+    # catalog.py's per-agent metadata, hand-kept in sync with each module's
+    # own allowed_tools), so mirroring it into tools= here closes that gap for
+    # every agent at once. mcp__-prefixed entries are excluded: those aren't
+    # built-in tool names, and MCP tool availability is controlled separately
+    # by mcp_servers, not by tools=.
+    built_in_tools = [t for t in allowed_tools if not t.startswith("mcp__")]
     options = ClaudeAgentOptions(
         cwd=str(cwd),
         system_prompt=system_prompt,
+        tools=built_in_tools,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
         hooks=make_hooks(allow_prod=allow_prod),
@@ -286,6 +310,7 @@ async def run_agent(
         include_partial_messages=True,
         include_hook_events=True,
         resume=resume,
+        mcp_servers=mcp_servers or {},
     )
 
     max_contradictory_attempts = 2 if retry_on_contradictory_result else 1

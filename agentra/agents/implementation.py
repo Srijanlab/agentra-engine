@@ -43,12 +43,11 @@ branch. Work in a tight loop:
    irreversible destructive migration -- do not guess and do not implement. Stop and report \
    status HUMAN_INPUT_REQUIRED instead, with a concrete reason, the specific question, and \
    the discrete options if there are any.
-1. If graphify-out/graph.json exists (a local, prebuilt code graph of this repo -- see the \
-   codebase summary below for an excerpt), query it before grepping or reading files blind: \
-   `graphify query "<question>"` for anything touching more than one file, `graphify path "<A>" \
-   "<B>"` to see how two things connect, `graphify explain "<name>"` for a focused look at one \
-   symbol and its neighbors. This is local and free (no LLM call) -- prefer it over guessing at \
-   blast radius from memory or from a partial grep.
+1. If mcp__graphify__* tools are available (a local, prebuilt code graph of this repo -- see \
+   the codebase summary below for an excerpt), query it before grepping or reading files blind: \
+   query_graph for anything touching more than one file, shortest_path to see how two things \
+   connect, get_neighbors/get_node for a focused look at one symbol. This is local and free (no \
+   LLM call) -- prefer it over guessing at blast radius from memory or from a partial grep.
 2. Implement the smallest coherent version of the feature.
 3. Run EVERY test/build command actually configured in the project yourself \
    via Bash -- e.g. both a Python suite and a separate frontend one, if both \
@@ -272,13 +271,32 @@ Implement this feature now, following the loop in your system prompt."""
         pre_prod_branch=env.pre_prod_branch,
         prod_branch=env.prod_branch,
     )
+    # mcp_config is {} when no graph has been built for `repo` yet (best-effort,
+    # see codegraph.py) -- allowed_tools then stays exactly the base set, same
+    # as before this existed, rather than granting mcp__graphify__* tool names
+    # with no server behind them. Bash stays regardless -- still needed for
+    # tests/build/commit, unrelated to graph querying.
+    mcp_servers = codegraph.mcp_config(repo)
+    allowed_tools = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"] + (
+        codegraph.READ_ONLY_MCP_TOOLS if mcp_servers else []
+    )
     result = await run_agent(
         prompt=prompt,
         system_prompt=system_prompt,
         cwd=repo,
-        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
-        max_turns=60,
+        # Raised from 60 -- confirmed live (issue #34) that a genuinely
+        # multi-layer feature (new state machine, a new integration, a
+        # dashboard endpoint) can hit 60 turns twice even after narrowing
+        # the brief each time, leaving a half-finished, sometimes-unpushed
+        # branch behind. Rather than prompt-instructing the orchestrator to
+        # preemptively chop every ambitious feature into artificial slices
+        # (tried and reverted -- the model's own judgment on when to split
+        # via more_parts_expected/sub_feature_of is preferable to a rule
+        # forcing it every time), give it more room to actually finish a
+        # large feature in one real attempt.
+        max_turns=120,
         # This agent commits real changes; a blind from-scratch retry on the
         # self-contradictory CLI result (see base.py's _CONTRADICTORY_RESULT_SUFFIX)
         # could re-attempt on top of a first pass that already committed. Let it
@@ -287,6 +305,7 @@ Implement this feature now, following the loop in your system prompt."""
         retry_on_contradictory_result=False,
         agent_label="Implementation Agent",
         resume=session_id,
+        mcp_servers=mcp_servers,
     )
 
     try:

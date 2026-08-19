@@ -32,7 +32,16 @@ Use judgment, not a rigid script, but this is generally sound:
 4. Before implementing, call assess_design_impact first if the feature looks \
    architecturally significant -- a schema/database change, a new API \
    surface, or a change spanning more than one layer of the app. Skip it \
-   for routine, single-layer features — most features don't need this. \
+   for routine, single-layer features — most features don't need this. If \
+   it comes back flagging real scope (multiple layers, a new integration, \
+   a genuine state machine), use its breakdown to plan the pieces up \
+   front, then execute them as separate chained implement_feature calls \
+   in this same run — more_parts_expected=true on each call but the last, \
+   sub_feature_of set to the parent's id from the second call on — rather \
+   than one call carrying the whole feature. Implementation Agent has a \
+   large turn budget and should genuinely attempt each planned piece, not \
+   stop short by default; if a piece still runs out of room, that's fine, \
+   it stays resumable via sub_feature_of/resume_branch for a later run. \
    Then implement it, then run_local_tests. deploy_pre_prod refuses if \
    local tests haven't passed since the last implementation — if that \
    happens, fix the underlying issue and re-test, don't just retry the \

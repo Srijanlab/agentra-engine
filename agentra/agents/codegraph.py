@@ -34,6 +34,23 @@ from pathlib import Path
 _EXCLUDE_LINE = "graphify-out/"
 _GRAPHIFY_TIMEOUT = 600
 
+# The subset of graphify-mcp's tools that are pure local reads against the
+# already-built graph.json -- excludes list_prs/get_pr_impact/triage_prs,
+# which hit the GitHub API (not local, not relevant to assessing a brief
+# that hasn't been implemented yet). Server name below ("graphify") is the
+# key callers use in mcp_servers={} and the mcp__<server>__<tool> prefix
+# Claude Code applies to every tool name.
+MCP_SERVER_NAME = "graphify"
+READ_ONLY_MCP_TOOLS = [
+    f"mcp__{MCP_SERVER_NAME}__query_graph",
+    f"mcp__{MCP_SERVER_NAME}__get_node",
+    f"mcp__{MCP_SERVER_NAME}__get_neighbors",
+    f"mcp__{MCP_SERVER_NAME}__get_community",
+    f"mcp__{MCP_SERVER_NAME}__god_nodes",
+    f"mcp__{MCP_SERVER_NAME}__graph_stats",
+    f"mcp__{MCP_SERVER_NAME}__shortest_path",
+]
+
 _SUMMARY_PREAMBLE = (
     "\n\n--- graphify code graph ---\n"
     "A local, queryable knowledge graph of this repo is available at graphify-out/graph.json. "
@@ -104,6 +121,22 @@ def load_or_build(repo: Path) -> str:
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return ""
     return _cluster_and_summarize(repo, graph_json)
+
+
+def mcp_config(repo: Path) -> dict[str, dict]:
+    """The mcp_servers={} entry that gives a caller live, scoped graph
+    queries (see READ_ONLY_MCP_TOOLS) without opening full Bash -- for
+    agents like Architecture Review that are deliberately kept read-only.
+    Empty dict if no graph has been built yet for `repo` (load_or_build
+    builds one lazily on the *next* call that reads the codebase summary;
+    this function itself never builds anything, just points at what's
+    already there). A stdio server, spawned fresh per agent turn by the
+    Claude Agent SDK -- same lifecycle as every other tool call, no
+    standing process to manage."""
+    graph_json = repo / "graphify-out" / "graph.json"
+    if not graph_json.exists():
+        return {}
+    return {MCP_SERVER_NAME: {"command": "graphify-mcp", "args": [str(graph_json)]}}
 
 
 def refresh(repo: Path) -> None:

@@ -13,6 +13,7 @@ assessment and decides what to do with it.
 
 from pathlib import Path
 
+from agentra.agents import codegraph
 from agentra.agents.base import AgentResult, run_agent
 
 SYSTEM_PROMPT = """You are the Architecture Review Agent in an autonomous product \
@@ -24,7 +25,10 @@ flag what an implementer should be careful about.
 
 1. Read the brief and the codebase summary. Identify every layer of the system the brief \
    plausibly touches: frontend, backend, database/schema, public API surface, \
-   infra/deployment config, or cross-cutting shared code used by multiple features.
+   infra/deployment config, or cross-cutting shared code used by multiple features. If \
+   mcp__graphify__* tools are available, use them to check real blast radius before guessing \
+   from memory: query_graph/get_neighbors for what touches a given area, shortest_path for \
+   how two things connect, god_nodes for the hubs most likely to ripple across layers.
 2. For each layer touched, name the concrete risk in plain terms -- not a generic warning. \
    "Adding a NOT NULL column to the users table requires a backfill for existing rows" is a \
    valid concern; "this could affect the database" is not.
@@ -59,12 +63,19 @@ Codebase summary:
 Feature brief to assess: {feature_brief}
 
 Assess architectural blast radius and risk now, following your system prompt."""
+    # mcp_config is {} when no graph has been built for `repo` yet (best-effort,
+    # see codegraph.py) -- allowed_tools then stays exactly Read/Glob/Grep, same
+    # as before this existed, rather than granting mcp__graphify__* tool names
+    # with no server behind them.
+    mcp_servers = codegraph.mcp_config(repo)
+    allowed_tools = ["Read", "Glob", "Grep"] + (codegraph.READ_ONLY_MCP_TOOLS if mcp_servers else [])
     return await run_agent(
         prompt=prompt,
         system_prompt=SYSTEM_PROMPT,
         cwd=repo,
-        allowed_tools=["Read", "Glob", "Grep"],
+        allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
         max_turns=15,
         agent_label="Architecture Review Agent",
+        mcp_servers=mcp_servers,
     )

@@ -143,3 +143,30 @@ def test_refresh_is_best_effort_on_missing_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _raise)
 
     codegraph.refresh(repo)  # must not raise
+
+
+def test_mcp_config_empty_when_no_graph_built_yet(tmp_path):
+    repo = _init_repo_with_code(tmp_path / "repo")
+
+    assert codegraph.mcp_config(repo) == {}
+
+
+def test_mcp_config_points_graphify_mcp_at_the_built_graph(tmp_path):
+    repo = _init_repo_with_code(tmp_path / "repo")
+    codegraph.load_or_build(repo)
+
+    config = codegraph.mcp_config(repo)
+
+    assert set(config) == {codegraph.MCP_SERVER_NAME}
+    server = config[codegraph.MCP_SERVER_NAME]
+    assert server["command"] == "graphify-mcp"
+    assert server["args"] == [str(repo / "graphify-out" / "graph.json")]
+
+
+def test_read_only_mcp_tools_excludes_github_pr_tools():
+    """list_prs/get_pr_impact/triage_prs hit the GitHub API -- not a local
+    read against graph.json, and not relevant to assessing a brief that
+    hasn't been implemented yet -- so they must never be granted here."""
+    for name in codegraph.READ_ONLY_MCP_TOOLS:
+        assert "pr" not in name.lower()
+    assert all(name.startswith(f"mcp__{codegraph.MCP_SERVER_NAME}__") for name in codegraph.READ_ONLY_MCP_TOOLS)
