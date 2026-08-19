@@ -325,6 +325,7 @@ _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
     "bug": ("d73a4a", "Something isn't working"),
     "feature": ("a2eeef", "A whole feature -- may have multiple 'story' sub-issues"),
     "story": ("c5def5", "One part of a multi-part feature"),
+    "discovery": ("0052cc", "Self-originated by the Product Discovery Agent when the backlog was empty, not customer/dashboard-submitted"),
     "need_human": ("fbca04", "Needs a human decision or action -- agentra should not attempt this"),
     "blocking_agentra": ("b60205", "Blocks agentra's own further progress until a human resolves it"),
     "status:in-progress": ("fef2c0", "Real work has started -- see In-Progress-Branch comment for where"),
