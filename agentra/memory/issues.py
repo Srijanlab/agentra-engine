@@ -106,15 +106,21 @@ class MemoryIssuesMixin:
         needs_human: bool = False,
         blocking_agentra: bool = False,
         title: str | None = None,
-    ) -> None:
+    ) -> int | None:
         """If a similar bug is already open, adds a comment instead of filing
         a duplicate — and applies needs_human/blocking_agentra labels to
         THAT issue (GitHub's add-labels endpoint is additive), since the
-        original occurrence might not have been recognized as unfixable."""
+        original occurrence might not have been recognized as unfixable.
+
+        Returns the issue number (the duplicate's, or the freshly created
+        one's) so a HUMAN_INPUT_REQUIRED escalation can stamp resume
+        correlation data onto it via record_human_input_context -- or None
+        if GitHub is unreachable/has no remote, matching every other
+        best-effort write in this module."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_known_bug: %s has no github.com remote -- bug %r was NOT recorded anywhere", self.repo, diagnosis)
-            return
+            return None
         extra_labels = ([_NEED_HUMAN_LABEL] if needs_human else []) + ([_BLOCKING_AGENTRA_LABEL] if blocking_agentra else [])
         try:
             from agentra.connectors import github_issues
@@ -125,14 +131,79 @@ class MemoryIssuesMixin:
                 if extra_labels:
                     github_issues.add_labels(repo_url, int(duplicate_of), extra_labels)
                 logger.info("record_known_bug: run %s matched existing open bug #%s -- commented instead of filing a duplicate", run_id, duplicate_of)
-                return
+                return int(duplicate_of)
 
             body = f"Description: {diagnosis}\n\nSeverity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, title or diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
+            created = github_issues.create_issue(repo_url, title or diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
+            return created.get("number")
         except Exception:
             logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
+            return None
+
+    def record_human_input_context(
+        self,
+        issue_number: int,
+        *,
+        app: str,
+        run_id: str,
+        question: str,
+        branch: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Stamps resume-correlation data (app id, run id, branch, session_id,
+        the original question) onto a needs_human issue that record_known_bug
+        just filed/updated -- the same post-and-read-most-recent comment
+        pattern as record_in_progress_branch/record_spec, so the needs_human
+        GitHub issue stays the single source of truth for blocked-run state
+        (per architecture review) rather than a new database collection.
+        Best-effort: a failure here just means a resume has to fall back to
+        whatever the run record in the dashboard's own registry still has."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_human_input_context(
+                repo_url, issue_number, app=app, run_id=run_id, branch=branch,
+                session_id=session_id, question=question,
+            )
+        except Exception:
+            logger.warning("record_human_input_context: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def get_human_input_context(self, issue_number: int) -> dict | None:
+        """The most recently stamped resume-correlation data for a
+        needs_human issue, or None. Read back by a future GitHub-comment-
+        driven resume path (not built in this pass -- see
+        .agentra/memory/architecture/design.md)."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_human_input_context(repo_url, issue_number)
+        except Exception:
+            return None
+
+    def record_human_answer(self, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
+        """Comments the human's answer onto the needs_human issue and removes
+        the need_human label (GitHub issue is updated to reflect it was
+        answered) -- called once a dashboard answer submission has been
+        accepted and a resume dispatched. Best-effort, same as every other
+        issue-lifecycle write here."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_human_answer(repo_url, issue_number, answer, resumed_run_key)
+            github_issues.remove_label(repo_url, issue_number, _NEED_HUMAN_LABEL)
+        except Exception:
+            logger.warning("record_human_answer: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
     def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
         """Marks status:shipped and leaves the issue OPEN (mark_shipped) —

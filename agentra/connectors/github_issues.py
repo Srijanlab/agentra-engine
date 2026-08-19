@@ -255,6 +255,21 @@ def add_labels(repo_url: str, issue_number: int, labels: list[str]) -> None:
     ).raise_for_status()
 
 
+def remove_label(repo_url: str, issue_number: int, label: str) -> None:
+    """Removes a single label from an issue. A 404 (label already absent --
+    e.g. removed by a concurrent call, or never applied) is treated as
+    success: idempotent in the same spirit as add_labels' own additive
+    idempotency in the other direction."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    resp = httpx.delete(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/labels/{label}",
+        headers=_headers(repo_url),
+        timeout=15,
+    )
+    if resp.status_code != 404:
+        resp.raise_for_status()
+
+
 def add_comment(repo_url: str, issue_number: int, comment: str) -> None:
     """Posts a comment without changing the issue's state."""
     owner_repo = _owner_repo_or_raise(repo_url)

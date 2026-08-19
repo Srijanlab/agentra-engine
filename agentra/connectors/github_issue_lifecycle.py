@@ -21,6 +21,18 @@ _IN_PROGRESS_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
 _SPEC_MARKER = "Spec (agentra):"
 _SPEC_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
+# Human-in-the-loop escalation (GitHub issue #34): resume-correlation data
+# stamped on a needs_human issue, same post/read-most-recent comment pattern
+# as the In-Progress-Branch/Spec markers above. Question is stored on one
+# line (newlines flattened by the caller) so a single-line regex can read it
+# back without needing a closing sentinel.
+_HUMAN_INPUT_MARKER = "Human-Input-Required (agentra):"
+_HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_BRANCH_RE = re.compile(r"^Branch: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_QUESTION_RE = re.compile(r"^Question: (.*)$", re.MULTILINE)
+
 
 def record_in_progress_branch(
     repo_url: str, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None
@@ -127,6 +139,68 @@ def get_spec(repo_url: str, issue_number: int) -> dict | None:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def record_human_input_context(
+    repo_url: str,
+    issue_number: int,
+    *,
+    app: str,
+    run_id: str,
+    question: str,
+    branch: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Stamps the resume-correlation data a HUMAN_INPUT_REQUIRED escalation
+    needs to resume later -- app id, run id, branch, Claude session_id, and
+    the original question -- onto the needs_human issue as a comment. This
+    (not a new database collection) is the single source of truth a resume
+    reads back via get_human_input_context, per the architecture review for
+    GitHub issue #34."""
+    question_line = " ".join(question.split())  # flatten to one line for the regex reader below
+    body = f"{_HUMAN_INPUT_MARKER}\nApp: {app}\nRun-ID: {run_id}\n"
+    if branch:
+        body += f"Branch: {branch}\n"
+    if session_id:
+        body += f"Session-ID: {session_id}\n"
+    body += f"Question: {question_line}"
+    add_comment(repo_url, issue_number, body)
+
+
+def get_human_input_context(repo_url: str, issue_number: int) -> dict | None:
+    """The most recently stamped resume-correlation data for a needs_human
+    issue, or None if it was never stamped (e.g. an issue filed before this
+    existed)."""
+    comments = list_comments(repo_url, issue_number)
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if not body.startswith(_HUMAN_INPUT_MARKER):
+            continue
+        app_m = _HUMAN_INPUT_APP_RE.search(body)
+        run_id_m = _HUMAN_INPUT_RUN_ID_RE.search(body)
+        branch_m = _HUMAN_INPUT_BRANCH_RE.search(body)
+        session_id_m = _HUMAN_INPUT_SESSION_ID_RE.search(body)
+        question_m = _HUMAN_INPUT_QUESTION_RE.search(body)
+        return {
+            "app": app_m.group(1) if app_m else None,
+            "run_id": run_id_m.group(1) if run_id_m else None,
+            "branch": branch_m.group(1) if branch_m else None,
+            "session_id": session_id_m.group(1) if session_id_m else None,
+            "question": question_m.group(1) if question_m else None,
+        }
+    return None
+
+
+def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
+    """Comments the human's answer onto the needs_human issue -- called once
+    a dashboard answer submission (or, in a future part, a GitHub-comment-
+    driven resume) has been accepted. Leaves the issue open (a resumed run
+    can still hit a second HUMAN_INPUT_REQUIRED); memory.py's
+    record_human_answer also strips the need_human label right after this."""
+    body = f"Answered: {answer}"
+    if resumed_run_key:
+        body += f"\n\nResuming as run {resumed_run_key}."
+    add_comment(repo_url, issue_number, body)
 
 
 def close_issue(
