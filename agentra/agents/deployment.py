@@ -660,6 +660,19 @@ def _candidate_image_tag(config: "environments.SelfHostedVMConfig", run_id: str)
     return f"{_local_image_name(config)}:{run_id}"
 
 
+def _image_of(container_name: str) -> str | None:
+    """The image reference (as originally passed to `docker run`, e.g.
+    'agentra:a1b2c3d') backing a running container -- captured before
+    removing that container, since the container name won't resolve it
+    afterward. None if the container doesn't exist / inspect fails
+    (best-effort, same as every other cleanup call in this module)."""
+    inspect = subprocess.run(
+        ["docker", "inspect", container_name, "--format", "{{.Config.Image}}"],
+        capture_output=True, text=True,
+    )
+    return inspect.stdout.strip() if inspect.returncode == 0 and inspect.stdout.strip() else None
+
+
 def _other_color(color: str) -> str:
     return "green" if color == "blue" else "blue"
 
@@ -788,6 +801,7 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
 
     if not await _wait_for_healthy(new_container):
         subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+        subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
         return AgentResult(
             ok=False,
             text=f"{new_container} did not become healthy -- promotion aborted, "
@@ -805,6 +819,7 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
     )
     if reload.returncode != 0:
         subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+        subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
         return AgentResult(
             ok=False,
             text=f"nginx reload to {new_color} failed: {reload.stderr.strip()} -- promotion aborted, "
@@ -813,7 +828,19 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
             cost_usd=0.0, turns=0,
         )
 
+    # The outgoing color's image is never referenced again once its container
+    # is gone -- captured before removal (the container name won't resolve it
+    # afterward) and reclaimed right alongside it. Without this, every
+    # successful promotion leaves one more full image (~GBs) permanently
+    # orphaned: _reclaim_build_disk_space's `docker image prune -f` only
+    # catches *dangling* (untagged) images, and this one still carries its
+    # real tag. Confirmed live: this exact leak filled the VM's disk to 100%
+    # (16G/16G) after a handful of same-day promotions, deadlocking every
+    # subsequent autonomous cycle at pull_latest before real work could start.
+    old_image = _image_of(old_container)
     subprocess.run(["docker", "rm", "-f", old_container], capture_output=True, text=True)
+    if old_image:
+        subprocess.run(["docker", "rmi", old_image], capture_output=True, text=True)
 
     return AgentResult(
         ok=True,

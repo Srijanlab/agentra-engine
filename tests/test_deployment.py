@@ -548,6 +548,8 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_
             return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
         if args[:2] == ["docker", "build"]:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "inspect"] and "{{.Config.Image}}" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="widget-app:oldrun123\n", stderr="")
         if args[:2] == ["docker", "inspect"]:
             return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
         if args[:1] == ["stat"]:
@@ -585,6 +587,13 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_
     remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
     assert ["docker", "rm", "-f", "widget-app-blue"] in remove_calls
 
+    # The outgoing color's image must be reclaimed too, not just its container --
+    # otherwise every successful promotion leaves one more full image (~GBs)
+    # permanently orphaned (confirmed live: this exact leak filled a VM's disk
+    # to 100%, deadlocking every subsequent autonomous cycle).
+    rmi_calls = [c for c in docker_calls if c[:2] == ["docker", "rmi"]]
+    assert ["docker", "rmi", "widget-app:oldrun123"] in rmi_calls
+
 
 def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_becomes_healthy(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
@@ -597,8 +606,10 @@ def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_b
     monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
 
     nginx_calls = []
+    docker_calls = []
 
     def _run(args, **kwargs):
+        docker_calls.append(list(args))
         if args[:3] == ["docker", "exec", "widget-proxy"] and "cat" in args:
             return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
         if "nginx" in " ".join(args):
@@ -617,6 +628,49 @@ def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_b
     assert result.ok is False
     assert "blue" in result.text  # still live, promotion aborted
     assert nginx_calls == []  # never flipped
+
+    # The never-became-healthy candidate's image must not be left behind either --
+    # only its container removal was covered before this.
+    assert ["docker", "rmi", "widget-app:run456"] in docker_calls
+
+
+def test_promote_prod_self_hosted_removes_the_new_image_when_nginx_reload_fails(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    env = _env(prod_branch="prod")
+    config = _self_hosted_config()
+
+    monkeypatch.setattr(git_ops, "pull_latest", lambda *a, **k: None)
+    monkeypatch.setattr(git_ops, "fetch_ref", lambda *a, **k: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda *a, **k: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+
+    docker_calls = []
+
+    def _run(args, **kwargs):
+        docker_calls.append(list(args))
+        if args[:3] == ["docker", "exec", "widget-proxy"] and "cat" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
+        if args[:2] == ["docker", "exec"] and "curl" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")  # healthy
+        if "nginx -s reload" in " ".join(args):
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="reload failed")
+        if args[:1] == ["stat"]:
+            return subprocess.CompletedProcess(args, 0, stdout="999\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="[]" if args[:2] == ["docker", "inspect"] else "", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _run)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.promote_prod_self_hosted(repo, env, "run456"))
+
+    assert result.ok is False
+    assert "blue" in result.text  # still live, promotion aborted
+
+    remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
+    assert ["docker", "rm", "-f", "widget-app-green"] in remove_calls  # the candidate, not the still-live old color
+    assert ["docker", "rmi", "widget-app:run456"] in docker_calls
+    # The old (still-live) color must never be touched on this failure path.
+    assert ["docker", "rm", "-f", "widget-app-blue"] not in remove_calls
 
 
 # -- promote_prod: the only path allowed to touch prod, only via run_agent(allow_prod=True) --
