@@ -151,13 +151,15 @@ class MemoryIssuesMixin:
         question: str,
         branch: str | None = None,
         session_id: str | None = None,
+        tracking_issue: int | None = None,
     ) -> None:
         """Stamps resume-correlation data (app id, run id, branch, session_id,
-        the original question) onto a needs_human issue that record_known_bug
-        just filed/updated -- the same post-and-read-most-recent comment
-        pattern as record_in_progress_branch/record_spec, so the needs_human
-        GitHub issue stays the single source of truth for blocked-run state
-        (per architecture review) rather than a new database collection.
+        the original tracking issue, the original question) onto a
+        needs_human issue that record_known_bug just filed/updated -- the
+        same post-and-read-most-recent comment pattern as
+        record_in_progress_branch/record_spec, so the needs_human GitHub
+        issue stays the single source of truth for blocked-run state (per
+        architecture review) rather than a new database collection.
         Best-effort: a failure here just means a resume has to fall back to
         whatever the run record in the dashboard's own registry still has."""
         repo_url = self._repo_url()
@@ -168,7 +170,7 @@ class MemoryIssuesMixin:
 
             github_issues.record_human_input_context(
                 repo_url, issue_number, app=app, run_id=run_id, branch=branch,
-                session_id=session_id, question=question,
+                session_id=session_id, question=question, tracking_issue=tracking_issue,
             )
         except Exception:
             logger.warning("record_human_input_context: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)

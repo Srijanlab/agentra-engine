@@ -62,6 +62,7 @@ def _escalate_to_human(
     source: str,
     title: str,
     branch: str | None = None,
+    tracking_issue: int | None = None,
 ) -> int | None:
     """Human-in-the-loop escalation (GitHub issue #34), shared by
     implement_feature and discover_opportunities' HUMAN_INPUT_REQUIRED
@@ -71,12 +72,21 @@ def _escalate_to_human(
     part beyond the pre-existing needs_human GitHub issue filing:
 
     1. Stamps resume-correlation data (app, run_id, branch, session_id,
-       question) onto the filed/updated needs_human issue.
+       tracking_issue, question) onto the filed/updated needs_human issue.
     2. Posts an outbound Slack notification if SLACK_BOT_TOKEN/
        SLACK_HUMAN_INPUT_CHANNEL are configured -- silently skipped
        otherwise (see connectors/slack.py), never surfaced as a run
        failure.
     3. Marks the run waiting_for_human immediately (session.mark_waiting_for_human).
+
+    tracking_issue: the ORIGINAL feature/bug issue this escalation is
+    blocking (implement_feature's resolves_id/sub_feature_of), distinct
+    from the needs_human issue number this function returns -- a resume
+    dispatched later (server/routes/human_input.py) reads this back via
+    Memory.get_human_input_context to know which implement_feature call to
+    continue and which tracking issue's spec to weave the human's answer
+    into (see _format_spec's human_answer param). None for
+    discover_opportunities, which has no resume contract in this pass.
 
     Returns the needs_human issue number (or None if GitHub was
     unreachable/unconfigured -- matching every other best-effort write in
@@ -96,7 +106,7 @@ def _escalate_to_human(
     if issue_number is not None:
         session.mem.record_human_input_context(
             issue_number, app=session.app_name, run_id=session.run_id, question=question,
-            branch=branch, session_id=session.session_id,
+            branch=branch, session_id=session.session_id, tracking_issue=tracking_issue,
         )
     from agentra import urls
     from agentra.connectors import slack
@@ -362,7 +372,29 @@ def _tools_for(session: OrchestratorSession) -> list:
                 spec_dict = req.json_data
                 if tracking_issue is not None:
                     session.mem.record_spec(tracking_issue, spec_dict)
-        spec_text = _format_spec(spec_dict) if spec_dict else ""
+        # Human-in-the-loop escalation (GitHub issue #34): if this session was
+        # itself dispatched as a resume from a human's answer AND this
+        # particular implement_feature call is for the tracking issue that
+        # answer belongs to, weave it into the spec text so the Implementation
+        # Agent's resumed turn sees it as part of what it's building (see
+        # _format_spec's human_answer param). Consumed (cleared) immediately
+        # after use so a later implement_feature call this same cycle -- e.g.
+        # a multi-part feature's next part -- doesn't get a stale answer
+        # re-injected into an unrelated spec.
+        human_answer_for_this_call = None
+        if session.human_answer and tracking_issue is not None and tracking_issue == session.human_answer_issue:
+            human_answer_for_this_call = session.human_answer
+            session.human_answer = None
+            session.human_answer_issue = None
+        if spec_dict:
+            spec_text = _format_spec(spec_dict, human_answer=human_answer_for_this_call)
+        elif human_answer_for_this_call:
+            spec_text = (
+                "A human has answered your previous blocking question -- use this to proceed, "
+                "do not ask it again:\n" + human_answer_for_this_call.strip()
+            )
+        else:
+            spec_text = ""
         session.current_spec = spec_text or None
 
         try:
@@ -412,13 +444,22 @@ def _tools_for(session: OrchestratorSession) -> list:
                 diagnosis += f"\n\nQuestion for a human: {question}"
             if options:
                 diagnosis += f"\n\nOptions considered: {options}"
-            session.mem.record_known_bug(
-                session.run_id, "medium", diagnosis,
-                "Requires an explicit human decision before Implementation Agent can proceed -- "
-                "not an implementation failure, not something a different brief/approach fixes.",
+            # Human-in-the-loop escalation (GitHub issue #34): implement_feature
+            # is THE flow with an existing resume contract (feature_branch +
+            # session_id), so route through _escalate_to_human rather than a
+            # bare record_known_bug -- this additionally stamps resume
+            # correlation data (including tracking_issue, so a later resume's
+            # answer gets woven back into THIS issue's spec, see above),
+            # posts the Slack notification, and marks the run waiting_for_human
+            # immediately.
+            _escalate_to_human(
+                session,
+                diagnosis=diagnosis,
+                question=question or reason,
                 source="implementation-agent-human-input-required",
-                needs_human=True,
                 title=f"Human input required: {feature_name}",
+                branch=session.feature_branch,
+                tracking_issue=tracking_issue,
             )
             # Also note it on the tracking issue itself (if this call was
             # resuming/working one) -- the needs_human issue above is a
@@ -433,7 +474,11 @@ def _tools_for(session: OrchestratorSession) -> list:
                 )
             session.note(f"implement_feature: human input required -- {reason[:200]}", ok=None)
             return {
-                "content": [{"type": "text", "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human); moving on to other work this cycle."}],
+                "content": [{
+                    "type": "text",
+                    "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human) and notified "
+                    "via Slack (if configured); this run is now waiting_for_human.",
+                }],
                 "is_error": True,
             }
 

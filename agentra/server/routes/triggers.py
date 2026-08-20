@@ -21,6 +21,7 @@ from agentra import environments, registry
 from agentra.agents.brain import run_autonomous_cycle
 from agentra.memory import Memory
 from agentra.orchestrator import run_prod_debug_cycle, run_promote
+from agentra.server.routes.human_input import dispatch_human_answer
 from agentra.server.state import _active_runs
 from agentra.server.utils import _lock_for, _paused_response, _server_log, _set_run
 
@@ -112,9 +113,21 @@ async def _run_autonomous_background(
             report = await run_autonomous_cycle(
                 repo, objective, env, feature=feature, skip_deploy=skip_deploy, run_id=run_key
             )
+            # Human-in-the-loop escalation (GitHub issue #34): if the cycle
+            # ended because implement_feature/discover_opportunities hit
+            # HUMAN_INPUT_REQUIRED, mark_waiting_for_human (agents/brain/
+            # __init__.py) already wrote status=waiting_for_human through to
+            # the run registry mid-cycle -- this must NOT unconditionally
+            # overwrite it back to "completed" once the cycle returns, or the
+            # run silently vanishes from the dashboard's 'Needs your input'
+            # panel (registry.list_waiting_for_human filters on status) the
+            # moment its own background task finishes. Same status.
+            # waiting_for_human else "completed" branch as
+            # human_input.py's _run_human_resume_background, so both entry
+            # points into run_autonomous_cycle behave identically.
             _set_run(
                 run_key,
-                status="completed",
+                status="waiting_for_human" if report.waiting_for_human else "completed",
                 result={
                     "run_id": report.run_id,
                     "actions": report.actions,
@@ -225,14 +238,95 @@ async def _dispatch_cycle(
     return {"triggered": True, "run_key": run_key}
 
 
+def _reconcile_human_input_for_app(app_name: str) -> None:
+    """Human-in-the-loop escalation (GitHub issue #34): the polling-based
+    half of the GitHub-issue-comment answer channel -- there is no inbound
+    Slack/GitHub webhook (see connectors/slack.py's module docstring and
+    design.md), so a comment posted on a needs_human issue only gets
+    noticed here, on the next /trigger/scheduled tick. Bounded, documented
+    polling interval: compute.tf's agentra-trigger-loop already hits this
+    endpoint every 15 minutes with no new infra (see its own comment) --
+    same cadence GCP's Cloud Scheduler equivalent would use, just without
+    provisioning it. Best-effort per run: one bad issue/lookup must not
+    stop the rest of this app's waiting runs (or the next app in the
+    caller's loop) from being checked.
+
+    Checks both waiting_for_human AND escalated runs (registry.
+    list_waiting_for_human already returns both) -- a run that's aged past
+    the max-wait timeout and gotten auto-escalated must still resume the
+    moment a human replies on its GitHub issue, same as one that hasn't
+    escalated yet. Only excluding non-"waiting_for_human" here would leave
+    an escalated run stuck forever even after being answered, silently
+    contradicting the whole point of escalating it in the first place."""
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        return
+    mem = Memory(repo)
+    for run in registry.list_waiting_for_human():
+        if run.get("app") != app_name or run.get("status") not in ("waiting_for_human", "escalated"):
+            continue
+        issue_number = (run.get("human_input") or {}).get("issue_number")
+        if issue_number is None:
+            continue
+        try:
+            answer = mem.find_unanswered_human_input_comment(issue_number)
+            if not answer:
+                continue
+            dispatch_human_answer(app_name, repo, issue_number, answer, source="github-comment")
+            _server_log(
+                "scheduled",
+                f"app={app_name!r} issue=#{issue_number} -- human answered via a GitHub comment, resuming",
+            )
+        except Exception:
+            logger.warning("_reconcile_human_input_for_app: failed for app=%r issue=#%s", app_name, issue_number, exc_info=True)
+
+
+def _reconcile_human_input_timeouts() -> None:
+    """The other half of GitHub issue #34's max-wait handling: a run must
+    never sit in waiting_for_human forever with no further signal. Global
+    (not per-app), called once per /trigger/scheduled tick -- registry.
+    reconcile_waiting_for_human() already scans every app's runs in one
+    pass. Re-notifies Slack (best-effort, same silent-skip-if-unconfigured
+    behavior as the original notification) so a human sees this got
+    escalated, not just the dashboard's badge changing color."""
+    try:
+        escalated = registry.reconcile_waiting_for_human()
+    except Exception:
+        logger.warning("_reconcile_human_input_timeouts: reconcile_waiting_for_human failed", exc_info=True)
+        return
+    if not escalated:
+        return
+    from agentra import urls
+    from agentra.connectors import slack
+
+    for run in escalated:
+        human_input = run.get("human_input") or {}
+        slack.notify_human_input_required(
+            app=run.get("app") or "",
+            run_id=run.get("run_key") or "",
+            question=human_input.get("question") or "(question unavailable)",
+            issue_url=human_input.get("issue_url"),
+            dashboard_url=urls.dashboard_run_url(run.get("run_key") or "", run.get("app") or ""),
+            branch=human_input.get("branch"),
+            session_id=human_input.get("session_id"),
+            escalated=True,
+        )
+        _server_log("scheduled", f"app={run.get('app')!r} run_key={run.get('run_key')} -- waiting_for_human past max-wait, escalated")
+
+
 @router.post("/trigger/scheduled")
 async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
     if payload.app is None:
         results = {}
         for app_name in registry.list_apps():
+            try:
+                _reconcile_human_input_for_app(app_name)
+            except Exception:
+                logger.warning("trigger_scheduled: human-input reconciliation failed for app=%r", app_name, exc_info=True)
             results[app_name] = await _dispatch_cycle(
                 app_name, "scheduled", None, None, False, enforce_schedule=True
             )
+        _reconcile_human_input_timeouts()
         return {"apps": results}
     return await _dispatch_cycle(
         payload.app, "scheduled", payload.objective, payload.feature, payload.skip_deploy, enforce_schedule=True

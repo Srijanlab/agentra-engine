@@ -31,6 +31,7 @@ _HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
 _HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
 _HUMAN_INPUT_BRANCH_RE = re.compile(r"^Branch: (\S+)$", re.MULTILINE)
 _HUMAN_INPUT_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_TRACKING_ISSUE_RE = re.compile(r"^Tracking-Issue: (\d+)$", re.MULTILINE)
 _HUMAN_INPUT_QUESTION_RE = re.compile(r"^Question: (.*)$", re.MULTILINE)
 
 
@@ -150,12 +151,16 @@ def record_human_input_context(
     question: str,
     branch: str | None = None,
     session_id: str | None = None,
+    tracking_issue: int | None = None,
 ) -> None:
     """Stamps the resume-correlation data a HUMAN_INPUT_REQUIRED escalation
-    needs to resume later -- app id, run id, branch, Claude session_id, and
-    the original question -- onto the needs_human issue as a comment. This
-    (not a new database collection) is the single source of truth a resume
-    reads back via get_human_input_context, per the architecture review for
+    needs to resume later -- app id, run id, branch, Claude session_id, the
+    ORIGINAL tracking issue (implement_feature's resolves_id/sub_feature_of,
+    distinct from this needs_human issue itself -- None for an escalation
+    with no separate tracking issue, e.g. discover_opportunities), and the
+    original question -- onto the needs_human issue as a comment. This (not
+    a new database collection) is the single source of truth a resume reads
+    back via get_human_input_context, per the architecture review for
     GitHub issue #34."""
     question_line = " ".join(question.split())  # flatten to one line for the regex reader below
     body = f"{_HUMAN_INPUT_MARKER}\nApp: {app}\nRun-ID: {run_id}\n"
@@ -163,6 +168,8 @@ def record_human_input_context(
         body += f"Branch: {branch}\n"
     if session_id:
         body += f"Session-ID: {session_id}\n"
+    if tracking_issue is not None:
+        body += f"Tracking-Issue: {tracking_issue}\n"
     body += f"Question: {question_line}"
     add_comment(repo_url, issue_number, body)
 
@@ -180,12 +187,14 @@ def get_human_input_context(repo_url: str, issue_number: int) -> dict | None:
         run_id_m = _HUMAN_INPUT_RUN_ID_RE.search(body)
         branch_m = _HUMAN_INPUT_BRANCH_RE.search(body)
         session_id_m = _HUMAN_INPUT_SESSION_ID_RE.search(body)
+        tracking_issue_m = _HUMAN_INPUT_TRACKING_ISSUE_RE.search(body)
         question_m = _HUMAN_INPUT_QUESTION_RE.search(body)
         return {
             "app": app_m.group(1) if app_m else None,
             "run_id": run_id_m.group(1) if run_id_m else None,
             "branch": branch_m.group(1) if branch_m else None,
             "session_id": session_id_m.group(1) if session_id_m else None,
+            "tracking_issue": int(tracking_issue_m.group(1)) if tracking_issue_m else None,
             "question": question_m.group(1) if question_m else None,
         }
     return None
