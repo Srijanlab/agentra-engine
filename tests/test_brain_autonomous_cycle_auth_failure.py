@@ -123,7 +123,7 @@ def test_autonomous_cycle_does_not_re_notify_slack_for_an_already_reported_login
     # issue; record_failure's own separate _find_similar_open_bug check
     # (used only to gate the Slack notification) sees the same thing.
     monkeypatch.setattr(Memory, "record_known_bug", lambda self, *a, **k: 7)
-    monkeypatch.setattr(Memory, "_find_similar_open_bug", lambda self, diagnosis: "7")
+    monkeypatch.setattr(Memory, "_find_similar_open_bug", lambda self, diagnosis, detail="": "7")
     monkeypatch.setattr(
         slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not re-notify"))
     )

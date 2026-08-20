@@ -157,7 +157,7 @@ def test_run_autonomous_cycle_does_not_self_clear_when_the_same_auth_failure_rec
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [_auth_blocking_bug()])
     monkeypatch.setattr(Memory, "record_known_bug", lambda self, *a, **k: 9)
-    monkeypatch.setattr(Memory, "_find_similar_open_bug", lambda self, diagnosis: "9")
+    monkeypatch.setattr(Memory, "_find_similar_open_bug", lambda self, diagnosis, detail="": "9")
     monkeypatch.setattr(
         Memory, "clear_resolved_auth_bugs",
         lambda self, run_id: (_ for _ in ()).throw(AssertionError("must not attempt to clear -- this run also failed")),

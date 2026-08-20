@@ -185,7 +185,7 @@ def test_record_failure_notifies_slack_with_an_actionable_message_for_a_new_logi
     mem = Memory(tmp_path)
     monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: 42)
     monkeypatch.setattr(mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
-    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis: None)  # genuinely new
+    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis, detail="": None)  # genuinely new
     slack_calls = []
     monkeypatch.setattr(slack, "notify_human_input_required", lambda **k: slack_calls.append(k) or True)
 
@@ -236,7 +236,7 @@ def test_record_failure_does_not_re_notify_slack_once_the_same_login_failure_is_
     mem = Memory(tmp_path)
     known_bug_calls = []
     monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: known_bug_calls.append(k) or 42)
-    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis: "42")  # already open
+    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis, detail="": "42")  # already open
     monkeypatch.setattr(
         slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not re-notify"))
     )

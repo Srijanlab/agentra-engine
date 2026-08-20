@@ -87,14 +87,53 @@ class MemoryIssuesMixin:
                 return candidate.get("external_id")
         return None
 
-    def _find_similar_open_bug(self, diagnosis: str) -> str | None:
+    def _find_similar_open_bug(self, diagnosis: str, detail: str = "") -> str | None:
         """Best-effort duplicate suppression: record_failure() fires on every
         non-transient failure, and an unfixed real bug produces the same
         failure on every retry — without this, each cycle filed its own fresh
         issue for the identical problem. Confirmed live: 4 near-identical
         '403 Write access to repository not granted' bugs (#7-#10) from four
-        consecutive cycles hitting the same broken code path."""
-        return self._find_similar_open(diagnosis, self.known_bugs(), "diagnosis")
+        consecutive cycles hitting the same broken code path.
+
+        GitHub issue #42 regression (resumed): `diagnosis` alone used to be
+        the ONLY thing compared, but it's always the same generic
+        boilerplate title (record_failure's f"{step_name} failed during an
+        autonomous cycle") -- difflib scores two of those as highly
+        "similar" purely off that shared boilerplate suffix, regardless of
+        what actually failed. Confirmed live via a regression test
+        (test_issue42_auth_failure_regression.py): an unrelated
+        run_local_tests TypeError bug got silently merged into the SAME
+        GitHub issue as an understand_codebase Claude Code auth failure --
+        i.e. this dedup was the "close-issue-on-fix logic" that was
+        actually broken, not the auth detection itself. `detail` (the real
+        failure text -- record_known_bug's proposed_fix / record_failure's
+        raw text) is now folded into the comparison so it's content-aware,
+        not just title-aware.
+
+        A Claude Code auth/login failure specifically gets its own
+        deterministic fast path ahead of the fuzzy fallback: it's a single
+        well-known failure CLASS (is_login_required_failure), not
+        free-form text, and the several different message templates that
+        wrap it (agents/brain/__init__.py's top-level cycle-exception text
+        vs agents/base.py's per-tool-call AgentResult.text) don't share
+        enough literal substring overlap for generic difflib similarity to
+        reliably clear the threshold between them -- confirmed by direct
+        computation, ~0.42 ratio, well under
+        _DUPLICATE_BUG_SIMILARITY_THRESHOLD. Matching on the classifier
+        directly means the exact same underlying credential problem still
+        dedupes correctly no matter which of the nine tool call sites (or
+        the top-level orchestrator call) first surfaced it."""
+        bugs = self.known_bugs()
+        if is_login_required_failure(detail):
+            for candidate in bugs:
+                if is_login_required_failure(f"{candidate.get('diagnosis', '')}\n{candidate.get('proposed_fix', '')}"):
+                    return candidate.get("external_id")
+        candidate_text = f"{diagnosis}\n{detail[:300]}"
+        for candidate in bugs:
+            existing = f"{candidate.get('diagnosis', '')}\n{(candidate.get('proposed_fix') or '')[:300]}"
+            if difflib.SequenceMatcher(None, candidate_text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+                return candidate.get("external_id")
+        return None
 
     def record_known_bug(
         self,
@@ -126,7 +165,7 @@ class MemoryIssuesMixin:
         try:
             from agentra.connectors import github_issues
 
-            duplicate_of = self._find_similar_open_bug(diagnosis)
+            duplicate_of = self._find_similar_open_bug(diagnosis, proposed_fix)
             if duplicate_of and duplicate_of.isdigit():
                 github_issues.add_comment(repo_url, int(duplicate_of), f"Still occurring (run {run_id}, source: {source}).\n\n{diagnosis}")
                 if extra_labels:
@@ -328,7 +367,7 @@ class MemoryIssuesMixin:
         unfixable = cannot_be_fixed_by_agentra(text)
         diagnosis = f"{step_name} failed during an autonomous cycle"
         auth_failure = is_login_required_failure(text)
-        already_reported = auth_failure and self._find_similar_open_bug(diagnosis) is not None
+        already_reported = auth_failure and self._find_similar_open_bug(diagnosis, text) is not None
         issue_number = self.record_known_bug(
             run_id, severity, diagnosis, text[:2000],
             source="autonomous-failure", needs_human=unfixable, blocking_agentra=unfixable,
