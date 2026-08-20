@@ -14,6 +14,7 @@ from claude_agent_sdk import tool
 from agentra import change_risk
 from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, implementation, requirements, testing
 from agentra.agents import catalog as agents_catalog
+from agentra.agents.base import AgentResult
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
 from agentra.environments import feature_branch_name
 from agentra.memory.core import _DISCOVERY_LABEL
@@ -109,6 +110,48 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
     if impact or effort:
         body += f"\n\nImpact: {impact or 'unspecified'}, Effort: {effort or 'unspecified'}"
     return session.mem.record_feature_request(body, source="github", title=feature, extra_labels=[_DISCOVERY_LABEL])
+
+
+def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: AgentResult) -> dict | None:
+    """GitHub issue #42: a Claude Code CLI auth/login failure
+    (result.auth_failure, set distinctly by agents/base.py's run_agent) is
+    an infra-level problem -- no retry, no different tool call, no
+    different brief will fix it, only a human running `claude /login`.
+    Checked first, immediately after every single agent-subprocess call in
+    this file (understand_codebase, discover_opportunities,
+    assess_design_impact, implement_feature (incl. its self-heal retry),
+    run_local_tests, deploy_pre_prod, verify_pre_prod, assess_feedback,
+    spawn_custom_agent) -- before that tool's own ok/not-ok handling, so
+    this class of failure is detected the same way everywhere an agent
+    subprocess can be invoked, not just at run_autonomous_cycle's own
+    top-level query() call.
+
+    Files the needs_human/blocking_agentra bug -- which also sends the
+    Slack escalation with a clear, actionable message, see
+    Memory.record_failure/_notify_claude_code_auth_failure -- and ends
+    THIS cycle immediately via hard_stop_reason, bypassing the normal
+    MAX_CONSECUTIVE_TOOL_FAILURES count entirely: a second tool call this
+    same cycle would just hit the identical missing credentials, so
+    waiting for two consecutive failures before stopping would only burn
+    more cost/turns for no benefit ("fails fast without burning further
+    retries/cost"). Since the bug is filed blocking_agentra=True, the
+    *next* cycle's blocking_bugs() pre-flight check refuses to even start
+    until a human clears it -- so this can't perpetually resurface on
+    every cycle either.
+
+    Returns the tool's is_error response dict if this was in fact an auth
+    failure (the caller should return it immediately, before any of its
+    own further processing of `result`), or None otherwise."""
+    if not result.auth_failure:
+        return None
+    session.mem.record_failure(session.run_id, tool_name, result.text)
+    session.hard_stop_reason = (
+        f"Claude Code session is not authenticated on this runner (detected in {tool_name}) -- "
+        "run /login and re-trigger. Filed as a blocking bug and notified via Slack (if "
+        "configured); stop calling tools and end your turn."
+    )
+    session.note(f"{tool_name}: Claude Code auth failure -- escalated, ending this cycle", ok=False)
+    return {"content": [{"type": "text", "text": result.text}], "is_error": True}
 
 
 def _escalate_to_human(
@@ -242,6 +285,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := session.check_hard_stop():
             return stop
         cb = await codebase.run_cached(session.repo, session.mem)
+        if stop := _check_auth_failure(session, "understand_codebase", cb):
+            return stop
         session.cost_usd += cb.cost_usd
         if cb.ok:
             session.cb_summary = cb.text
@@ -313,6 +358,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             _actionable_bugs(session.mem.known_bugs()),
             session.mem.feature_queue(),
         )
+        if stop := _check_auth_failure(session, "discover_opportunities", disc):
+            return stop
         session.cost_usd += disc.cost_usd
         data = disc.json_data or {}
 
@@ -395,6 +442,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         review = await architecture_review.run(session.repo, session.objective, args["feature_brief"], session.cb_summary)
+        if stop := _check_auth_failure(session, "assess_design_impact", review):
+            return stop
         session.cost_usd += review.cost_usd
         session.note(f"assess_design_impact: ok={review.ok}", ok=review.ok, cost_usd=review.cost_usd, turns=review.turns)
         if not review.ok:
@@ -446,6 +495,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.note(f"requirements: reusing existing spec for issue #{tracking_issue}", ok=True)
         else:
             req = await requirements.run(session.repo, session.objective, brief, session.cb_summary)
+            if stop := _check_auth_failure(session, "implement_feature", req):
+                return stop
             session.cost_usd += req.cost_usd
             session.note(f"requirements: ok={req.ok}", ok=req.ok, cost_usd=req.cost_usd, turns=req.turns)
             if req.ok and req.json_data and req.json_data.get("spec"):
@@ -486,6 +537,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("implement_feature")
             session.note(f"implement_feature: raised {exc!r}", ok=False)
             return {"content": [{"type": "text", "text": f"implement_feature raised: {exc}"}], "is_error": True}
+        if stop := _check_auth_failure(session, "implement_feature", impl):
+            return stop
         session.cost_usd += impl.cost_usd
         session.session_id = impl.session_id or session.session_id
         data = impl.json_data or {}
@@ -626,6 +679,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+        if stop := _check_auth_failure(session, "run_local_tests", test):
+            return stop
         session.cost_usd += test.cost_usd
         session.session_id = test.session_id or session.session_id
         data = test.json_data or {}
@@ -646,6 +701,8 @@ def _tools_for(session: OrchestratorSession) -> list:
                 resume=True,
                 session_id=session.session_id,
             )
+            if stop := _check_auth_failure(session, "run_local_tests", fix):
+                return stop
             session.cost_usd += fix.cost_usd
             session.session_id = fix.session_id or session.session_id
             session.note(
@@ -655,6 +712,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             if not fix.ok:
                 break
             test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+            if stop := _check_auth_failure(session, "run_local_tests", test):
+                return stop
             session.cost_usd += test.cost_usd
             session.session_id = test.session_id or session.session_id
             data = test.json_data or {}
@@ -718,6 +777,8 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         if session.change_risk == change_risk.TRIVIAL:
             deploy = await deployment.merge_to_pre_prod_only(session.repo, session.env, session.feature_branch)
+            if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
+                return stop
             session.deploy_attempted = True
             session.cost_usd += deploy.cost_usd
             ok = deploy.ok
@@ -743,6 +804,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         deploy = await strategy(
             session.repo, session.env, session.feature_branch, session.run_id, session.session_id
         )
+        if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
+            return stop
         session.deploy_attempted = True
         session.cost_usd += deploy.cost_usd
         session.session_id = deploy.session_id or session.session_id
@@ -812,6 +875,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         test = await testing.run_pre_prod(
             session.repo, spec_for_verification, session.pre_prod_url, session.run_id, session_id=session.session_id
         )
+        if stop := _check_auth_failure(session, "verify_pre_prod", test):
+            return stop
         session.cost_usd += test.cost_usd
         session.session_id = test.session_id or session.session_id
         data = test.json_data or {}
@@ -845,6 +910,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         feature = session.current_feature or "unknown feature"
         fb = await feedback.run(session.repo, session.objective, feature, session_id=session.session_id)
+        if stop := _check_auth_failure(session, "assess_feedback", fb):
+            return stop
         session.cost_usd += fb.cost_usd
         session.session_id = fb.session_id or session.session_id
         session.note("assess_feedback", ok=fb.ok, cost_usd=fb.cost_usd, turns=fb.turns)
@@ -882,6 +949,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             allowed_tools=requested,
         )
         result = await spawn_generic(session.repo, spec, mem=session.mem, run_id=session.run_id)
+        if stop := _check_auth_failure(session, "spawn_custom_agent", result):
+            return stop
         session.cost_usd += result.cost_usd
         session.note(
             f"spawn_custom_agent[{args['task_name']}]: ok={result.ok}",

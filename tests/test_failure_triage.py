@@ -159,3 +159,80 @@ def test_record_failure_flags_an_unfixable_failure_as_needing_a_human_and_blocki
 
     assert recorded["needs_human"] is True
     assert recorded["blocking_agentra"] is True
+
+
+# -- GitHub issue #42: Slack escalation for Claude Code auth/login failures --
+
+
+def test_record_failure_notifies_slack_with_an_actionable_message_for_a_new_login_failure(tmp_path, monkeypatch):
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: 42)
+    monkeypatch.setattr(mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
+    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis: None)  # genuinely new
+    slack_calls = []
+    monkeypatch.setattr(slack, "notify_human_input_required", lambda **k: slack_calls.append(k) or True)
+
+    mem.record_failure(
+        "run1", "understand_codebase",
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+    )
+
+    assert len(slack_calls) == 1
+    call = slack_calls[0]
+    # The exact actionable message GitHub issue #42 asks for.
+    assert call["question"] == "Claude Code session is not authenticated on this runner -- run /login and re-trigger."
+    assert call["issue_url"] == "https://github.com/acme/app/issues/42"
+    assert call["app"] == tmp_path.name
+    assert call["run_id"] == "run1"
+
+
+def test_record_failure_does_not_notify_slack_for_an_ordinary_unfixable_failure(tmp_path, monkeypatch):
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: 42)
+    monkeypatch.setattr(
+        slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not notify"))
+    )
+
+    mem.record_failure("run1", "implement_feature", "403 Write access to repository not granted")
+
+
+def test_record_failure_does_not_notify_slack_for_a_transient_failure(tmp_path, monkeypatch):
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(
+        slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not notify"))
+    )
+
+    mem.record_failure("run1", "testing", "Reached maximum number of turns (5)")
+
+
+def test_record_failure_does_not_re_notify_slack_once_the_same_login_failure_is_already_reported(tmp_path, monkeypatch):
+    """GitHub issue #42's requirement (4): once escalated and awaiting a
+    human, this must not perpetually resurface as a fresh Slack ping on
+    every occurrence -- only a genuinely new (not-already-open) diagnosis
+    triggers the notification."""
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    known_bug_calls = []
+    monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: known_bug_calls.append(k) or 42)
+    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis: "42")  # already open
+    monkeypatch.setattr(
+        slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not re-notify"))
+    )
+
+    # Must not raise (the Slack mock above throws if it's ever called) --
+    # record_known_bug itself is still called (it does its own comment-on-
+    # duplicate dedup and keeps needs_human/blocking_agentra applied).
+    mem.record_failure(
+        "run2", "understand_codebase",
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+    )
+    assert len(known_bug_calls) == 1
+    assert known_bug_calls[0]["needs_human"] is True
+    assert known_bug_calls[0]["blocking_agentra"] is True

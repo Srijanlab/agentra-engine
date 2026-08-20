@@ -348,21 +348,25 @@ async def run_autonomous_cycle(
             # in · Please run /login (exit code: 1)" -- the orchestrator's
             # own top-level query() call, not a sub-agent tool call (those
             # are already normalized to AgentResult by agents/base.py's
-            # run_agent and never raise up to here). Detected distinctly so
-            # the diagnostic actually says what's wrong instead of a bare
-            # "cycle crashed"; record_failure below still runs either way,
-            # and with is_login_required_failure folded into
-            # cannot_be_fixed_by_agentra (memory/core.py) this always files
-            # as needs_human + blocking_agentra, so check_hard_stop's
-            # blocking_bugs() gate at the top of the *next* cycle refuses to
-            # even start (and therefore never repeats this exact failure)
-            # until a human runs `claude /login` and clears the bug.
+            # run_agent -- see brain/tools.py's _check_auth_failure, which
+            # covers every tool-call site the same way -- and never raise up
+            # to here). Detected distinctly so the diagnostic actually says
+            # what's wrong instead of a bare "cycle crashed"; record_failure
+            # below still runs either way, and with is_login_required_failure
+            # folded into cannot_be_fixed_by_agentra (memory/core.py) this
+            # always files as needs_human + blocking_agentra AND sends the
+            # Slack human-in-the-loop escalation (GitHub issue #34's
+            # connectors/slack.py, wired in by Memory.record_failure itself
+            # -- see its docstring), so check_hard_stop's blocking_bugs()
+            # gate at the top of the *next* cycle refuses to even start (and
+            # therefore never repeats this exact failure) until a human runs
+            # `claude /login` and clears the bug.
             if is_login_required_failure(str(exc)):
                 final_text = (
-                    "Claude Code authentication failure -- the CLI reported it is not usable "
-                    f"on this runner ({exc}). This needs a human to run `claude /login` or "
-                    "otherwise refresh credentials here; filed as a blocking bug so future "
-                    "cycles stop immediately instead of repeating this failure pointlessly."
+                    "Claude Code session is not authenticated -- run /login and re-trigger. "
+                    f"(CLI reported: {exc}). Filed as a blocking bug and notified via Slack (if "
+                    "configured) so future cycles stop immediately instead of repeating this "
+                    "failure pointlessly."
                 )
                 session.note(f"autonomous cycle blocked: Claude Code authentication failure: {exc}", agent="cycle", ok=False)
             else:

@@ -82,6 +82,20 @@ async def run_cycle(
         cb = await codebase.run_cached(repo, mem)
         mem.log(run_id, f"codebase agent: ok={cb.ok} turns={cb.turns} cost=${cb.cost_usd:.4f}")
         if not cb.ok:
+            # GitHub issue #42: this is the earliest agent-subprocess call in the
+            # fixed pipeline -- previously the only step whose failure was never
+            # reported through mem.record_failure at all, so e.g. a Claude Code
+            # auth/login failure here (cb.auth_failure) would silently abort the
+            # cycle with no bug filed and no Slack escalation, then repeat
+            # identically on every future run_cycle call forever. record_failure
+            # both files the needs_human/blocking_agentra bug (auth failures
+            # specifically also get the Slack human-in-the-loop escalation, see
+            # its own docstring) and -- since it's blocking_agentra=True for an
+            # auth failure -- nothing here needs to also gate future cycles: this
+            # function already returns immediately below, matching "fails fast
+            # without burning further retries/cost" the same way every other
+            # failure branch in this pipeline already does.
+            mem.record_failure(run_id, "understand_codebase", cb.text)
             return CycleReport(run_id, feature or "", False, False, False, None, [], "codebase understanding failed; aborting cycle")
 
         opportunities: list[dict] = []

@@ -24,6 +24,7 @@ from agentra.memory.core import (
     _github_closed_bug_to_dict,
     _label_names,
     cannot_be_fixed_by_agentra,
+    is_login_required_failure,
     is_transient_failure,
 )
 
@@ -259,15 +260,59 @@ class MemoryIssuesMixin:
 
     def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
         """The one place a failed agent turn's full output should be reported to.
-        Transient failures are just logged; permanent failures become GitHub Issues."""
+        Transient failures are just logged; permanent failures become GitHub Issues.
+
+        GitHub issue #42: a Claude Code CLI auth/login failure additionally
+        gets an active Slack escalation (the same human-in-the-loop channel
+        GitHub issue #34 built for HUMAN_INPUT_REQUIRED decisions -- see
+        connectors/slack.py) with a clear, actionable message, since a human
+        needs to actually go run `claude /login` before anything else can
+        proceed -- filing the GitHub issue alone is easy to miss. Only sent
+        for a genuinely new occurrence (diagnosis not already matching an
+        open bug -- see _find_similar_open_bug below): once reported, the
+        blocking_agentra label already stops every future cycle at
+        run_autonomous_cycle's blocking_bugs() pre-flight check before it
+        can ever reach this method again for the *same* unresolved failure,
+        so this guards the (bounded, same-cycle) case of more than one tool
+        call hitting the identical failure before that cycle's own hard-stop
+        takes effect."""
         if is_transient_failure(text):
             self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
             return
         unfixable = cannot_be_fixed_by_agentra(text)
-        self.record_known_bug(
-            run_id, severity, f"{step_name} failed during an autonomous cycle", text[:2000],
+        diagnosis = f"{step_name} failed during an autonomous cycle"
+        auth_failure = is_login_required_failure(text)
+        already_reported = auth_failure and self._find_similar_open_bug(diagnosis) is not None
+        issue_number = self.record_known_bug(
+            run_id, severity, diagnosis, text[:2000],
             source="autonomous-failure", needs_human=unfixable, blocking_agentra=unfixable,
         )
+        if auth_failure and not already_reported:
+            self._notify_claude_code_auth_failure(run_id, issue_number)
+
+    def _notify_claude_code_auth_failure(self, run_id: str, issue_number: int | None) -> None:
+        """GitHub issue #42: best-effort outbound Slack notification for a
+        Claude Code CLI auth/login failure, reusing GitHub issue #34's
+        connectors/slack.py -- silently skipped (never raised) if Slack
+        isn't configured for this deployment, same as every other call to
+        notify_human_input_required."""
+        try:
+            from agentra import urls
+            from agentra.connectors import slack
+
+            issue_url = self.issue_html_url(issue_number) if issue_number is not None else None
+            slack.notify_human_input_required(
+                app=self.repo.name,
+                run_id=run_id,
+                question=(
+                    "Claude Code session is not authenticated on this runner -- "
+                    "run /login and re-trigger."
+                ),
+                issue_url=issue_url,
+                dashboard_url=urls.dashboard_run_url(run_id, self.repo.name),
+            )
+        except Exception:
+            logger.warning("_notify_claude_code_auth_failure: failed to notify for run %s", run_id, exc_info=True)
 
     def record_in_progress_branch(
         self, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None
