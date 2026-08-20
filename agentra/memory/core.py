@@ -88,7 +88,16 @@ _UNFIXABLE_BY_AGENTRA_PATTERNS = [
 # `claude /login` (or otherwise provisioning credentials) on the runner does.
 _LOGIN_REQUIRED_PATTERNS = [
     re.compile(r"not logged in", re.IGNORECASE),
-    re.compile(r"please run /login", re.IGNORECASE),
+    # Deliberately not anchored to "please run /login" verbatim -- confirmed
+    # the CLI phrases this instruction inconsistently across variants
+    # ("Please run /login", "Please run `/login`", "run /login to
+    # continue", ...); \s*`? tolerates an optional backtick before the
+    # command and dropping the "please" requirement still keeps this narrow
+    # enough (the literal "/login" token right after "run" is specific to
+    # this exact failure class, not something an ordinary test/tool failure
+    # message would ever contain -- see
+    # test_is_login_required_failure_false_for_an_ordinary_failure).
+    re.compile(r"run\s*`?/login", re.IGNORECASE),
 ]
 
 _GITIGNORE_CONTENT = """\

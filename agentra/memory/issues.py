@@ -258,6 +258,50 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
 
+    def clear_resolved_auth_bugs(self, run_id: str) -> list[str]:
+        """GitHub issue #42 hardening: a Claude Code CLI auth/login-failure
+        blocking bug is unlike every other blocking_agentra bug (e.g. a
+        missing GitHub permission) in one important way -- there's a cheap,
+        unambiguous way to confirm it's actually resolved: just get one
+        real Claude Code CLI turn back with no auth failure. Every other
+        unfixable-by-agentra bug stays blocking until a human explicitly
+        closes/clears the issue on GitHub, because agentra has no reliable
+        way to verify THOSE are fixed on its own; this one it does.
+
+        Without this, once filed, an auth-failure bug stayed open forever
+        (nothing else in this codebase ever called clear_known_bug on it --
+        implement_feature can't "implement a fix" for a human needing to
+        run `claude /login`), so it kept surfacing as the same still-open
+        blocking bug on every future scheduled trigger indefinitely even
+        after a human had already fixed the underlying credentials and
+        simply hadn't also remembered to separately close the GitHub issue
+        by hand -- confirmed to be exactly why GitHub issue #42 itself kept
+        resurfacing despite two prior shipped fixes that only handled
+        detection/escalation, not this closing-the-loop step.
+
+        Callers (run_autonomous_cycle, orchestrator.run_cycle) must only
+        call this after confirming *this exact run* actually got a real,
+        successful Claude Code CLI turn back with no auth failure of its
+        own this run -- see their own call sites for that guard; this
+        method itself does not re-verify anything, it just clears whatever
+        is currently open and auth-classified.
+
+        Returns the external_id (GitHub issue number as str) of each bug
+        cleared, for logging/tests."""
+        cleared: list[str] = []
+        for bug in self.blocking_bugs():
+            if is_login_required_failure(f"{bug.get('diagnosis', '')}\n{bug.get('proposed_fix', '')}"):
+                self.clear_known_bug(
+                    bug["external_id"],
+                    resolution_note=(
+                        f"Auto-resolved by run {run_id}: a subsequent autonomous cycle completed a "
+                        "Claude Code CLI call successfully, confirming re-authentication worked. "
+                        "Closing so this doesn't keep blocking or resurfacing on future cycles."
+                    ),
+                )
+                cleared.append(bug["external_id"])
+        return cleared
+
     def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
         """The one place a failed agent turn's full output should be reported to.
         Transient failures are just logged; permanent failures become GitHub Issues.
@@ -269,13 +313,15 @@ class MemoryIssuesMixin:
         needs to actually go run `claude /login` before anything else can
         proceed -- filing the GitHub issue alone is easy to miss. Only sent
         for a genuinely new occurrence (diagnosis not already matching an
-        open bug -- see _find_similar_open_bug below): once reported, the
-        blocking_agentra label already stops every future cycle at
-        run_autonomous_cycle's blocking_bugs() pre-flight check before it
-        can ever reach this method again for the *same* unresolved failure,
-        so this guards the (bounded, same-cycle) case of more than one tool
-        call hitting the identical failure before that cycle's own hard-stop
-        takes effect."""
+        open bug -- see _find_similar_open_bug below): once reported, this
+        guards against re-notifying for every subsequent occurrence of the
+        *same* unresolved failure -- both the (bounded, same-cycle) case of
+        more than one tool call hitting it before that cycle's own
+        hard-stop takes effect, AND every later cycle's own self-test retry
+        (run_autonomous_cycle no longer hard-blocks pre-flight purely on an
+        open auth-classified blocking bug -- see clear_resolved_auth_bugs
+        below for why one more real attempt is safe/cheap here) hitting it
+        again while a human hasn't actually fixed credentials yet."""
         if is_transient_failure(text):
             self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
             return
