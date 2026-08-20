@@ -43,6 +43,22 @@ def _format_spec(spec: dict) -> str:
     return "\n".join(lines)
 
 
+def _has_active_feature_branches(repo: Path) -> bool:
+    """Check if there are any active dev/ feature branches, indicating work-in-progress."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "branch", "-a", "--format=%(refname:short)"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branches = result.stdout.splitlines()
+        # Check for remotes/origin/dev/* branches (active feature work)
+        return any("dev/" in b for b in branches)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
 def _file_top_opportunity_as_feature_request(session: OrchestratorSession, opportunities: list[dict]) -> dict | None:
     """When the backlog is genuinely empty (no in-progress feature, no
     actionable known bug, no queued feature request -- the same emptiness
@@ -66,6 +82,9 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
     if not opportunities:
         return None
     if session.mem.in_progress_features() or _actionable_bugs(session.mem.known_bugs()) or session.mem.feature_queue():
+        return None
+    # Also check for active feature branches (in-progress work that may not have sub-issues yet)
+    if _has_active_feature_branches(session.repo):
         return None
     top = opportunities[0]
     feature = (top.get("feature") or "").strip() or "New opportunity"

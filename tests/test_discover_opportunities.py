@@ -266,3 +266,18 @@ def test_discover_opportunities_filing_failure_does_not_fail_the_tool_call(tmp_p
     result = asyncio.run(_tool(session, "discover_opportunities").handler({}))
 
     assert result.get("is_error") is not True
+
+
+def test_discover_opportunities_does_not_file_when_active_feature_branches_exist(tmp_path, monkeypatch):
+    """Don't re-file opportunities when there are active dev/ branches (work-in-progress)."""
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+    _stub_backlog(session, monkeypatch)
+    monkeypatch.setattr(brain.discovery, "run", _fake_discovery_run_with_opportunities(_TOP_OPPORTUNITY))
+    
+    # Simulate active feature branches by mocking git output
+    def mock_git_branches(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=["git", "branch", "-a"],
+            returncode=0,
+            stdout="  dev/a365dcfd-human-in-the-loop-

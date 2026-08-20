@@ -190,15 +190,31 @@ def fetch_app_digest_batch(repo_urls: list[str], closed_limit: int = 5) -> dict[
     if not repo_urls:
         return {}
 
-    # All repos must share the same installation token — they do in practice
-    # (they all live under the same GitHub App installation). Use the first
-    # url's token for the single request.
-    first_url = repo_urls[0]
-    try:
-        token = get_installation_token(first_url)
-    except Exception:
-        logger.warning("fetch_app_digest_batch: could not get installation token for %s", first_url)
+    # Group repos by installation token — repos from different GitHub App
+    # installations (different orgs/users) require different tokens and
+    # cannot be batched in a single GraphQL call. Build one batch per
+    # installation, then merge results.
+    from collections import defaultdict
+    token_to_urls: dict[str, list[str]] = defaultdict(list)
+    for url in repo_urls:
+        if owner_repo_from_url(url) is None:
+            continue  # not a github.com URL, skip
+        try:
+            token = get_installation_token(url)
+            token_to_urls[token].append(url)
+        except Exception:
+            logger.warning("fetch_app_digest_batch: could not get installation token for %s, skipping", url)
+
+    if not token_to_urls:
         return {}
+
+    merged: dict[str, dict] = {}
+    for token, urls in token_to_urls.items():
+        merged.update(_fetch_batch_for_token(token, urls, closed_limit))
+    return merged
+
+
+def _fetch_batch_for_token(token: str, repo_urls: list[str], closed_limit: int) -> dict[str, dict]:
 
     # Build one big aliased query.  Each repo contributes four aliased fields.
     fragments: list[str] = []
@@ -245,9 +261,13 @@ def fetch_app_digest_batch(repo_urls: list[str], closed_limit: int = 5) -> dict[
         resp.raise_for_status()
         body = resp.json()
         if body.get("errors"):
-            logger.warning("fetch_app_digest_batch: GraphQL errors: %s", body["errors"])
-            return {}
-        data = body["data"]
+            # GraphQL returns partial results alongside errors — log the
+            # failures but use whatever data did come back instead of
+            # discarding the whole batch. A NOT_FOUND on one repo should
+            # not discard the data for every other repo in the same call.
+            failed = {e.get("path", [None])[0] for e in body["errors"] if e.get("path")}
+            logger.warning("fetch_app_digest_batch: partial GraphQL errors for fields %s", sorted(failed))
+        data = body.get("data") or {}
     except Exception:
         logger.warning("fetch_app_digest_batch: request failed", exc_info=True)
         return {}
