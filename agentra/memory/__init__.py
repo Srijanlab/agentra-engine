@@ -36,6 +36,7 @@ from agentra.memory.core import (
     _ensure_gitignore,
     format_safety_denial_line,
     is_transient_failure,
+    is_login_required_failure,
     cannot_be_fixed_by_agentra,
 )
 from agentra.memory.features import MemoryFeaturesMixin
@@ -152,5 +153,6 @@ __all__ = [
     "Memory",
     "format_safety_denial_line",
     "is_transient_failure",
+    "is_login_required_failure",
     "cannot_be_fixed_by_agentra",
 ]

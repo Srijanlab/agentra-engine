@@ -9,7 +9,7 @@ just logged, since a retry next cycle -- not a backlog entry -- is the fix.
 
 from unittest.mock import MagicMock
 
-from agentra.memory import Memory, cannot_be_fixed_by_agentra, is_transient_failure
+from agentra.memory import Memory, cannot_be_fixed_by_agentra, is_login_required_failure, is_transient_failure
 
 
 def test_is_transient_failure_detects_known_patterns():
@@ -90,6 +90,57 @@ def test_cannot_be_fixed_by_agentra_ignores_a_bare_status_code_in_unrelated_pros
         "the webhook's Basic-auth gate -- unrelated to this feature."
     )
     assert not cannot_be_fixed_by_agentra("HTTP 403 returned by a third-party API the app under test calls")
+
+
+def test_is_login_required_failure_detects_claude_code_auth_failures():
+    # GitHub issue #42: a prior autonomous cycle crashed opaquely on this
+    # exact text -- the CLI's own "no valid session on this runner" failure.
+    assert is_login_required_failure(
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)"
+    )
+    assert is_login_required_failure("Invalid API key · Please run /login")
+    assert is_login_required_failure("OAuth token has expired · Please run /login")
+
+
+def test_is_login_required_failure_false_for_an_ordinary_failure():
+    assert not is_login_required_failure("3 tests failed: test_login, test_logout, test_signup")
+    assert not is_login_required_failure("403 Write access to repository not granted")
+    assert not is_login_required_failure("Reached maximum number of turns (5)")
+
+
+def test_cannot_be_fixed_by_agentra_treats_a_login_failure_as_unfixable():
+    assert cannot_be_fixed_by_agentra(
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)"
+    )
+
+
+def test_is_transient_failure_false_for_a_login_failure():
+    # A login failure must never be treated as "just retry next cycle" --
+    # only record_failure's needs_human/blocking_agentra path handles it.
+    assert not is_transient_failure(
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)"
+    )
+
+
+def test_record_failure_flags_a_login_failure_as_needing_a_human_and_blocking(tmp_path, monkeypatch):
+    mem = Memory(tmp_path)
+    recorded = {}
+
+    def fake_record_known_bug(
+        run_id, severity, diagnosis, proposed_fix, source="prod-monitoring", external_id=None,
+        needs_human=False, blocking_agentra=False,
+    ):
+        recorded.update(needs_human=needs_human, blocking_agentra=blocking_agentra, diagnosis=diagnosis)
+
+    monkeypatch.setattr(mem, "record_known_bug", fake_record_known_bug)
+
+    mem.record_failure(
+        "run1", "autonomous-cycle",
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+    )
+
+    assert recorded["needs_human"] is True
+    assert recorded["blocking_agentra"] is True
 
 
 def test_record_failure_flags_an_unfixable_failure_as_needing_a_human_and_blocking(tmp_path, monkeypatch):

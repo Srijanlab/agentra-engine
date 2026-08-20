@@ -25,6 +25,7 @@ from agentra.agents.brain.prompts import SYSTEM_PROMPT
 from agentra.agents.safety import make_hooks
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
+from agentra.memory.core import is_login_required_failure
 
 logger = logging.getLogger(__name__)
 
@@ -272,8 +273,31 @@ async def run_autonomous_cycle(
                         final_text = message.result or ""
                         session.cost_usd += message.total_cost_usd or 0.0
         except Exception as exc:
-            final_text = f"autonomous cycle raised: {exc}"
-            session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
+            # GitHub issue #42: this is the exact spot a prior cycle crashed
+            # opaquely on "Claude Code returned an error result: Not logged
+            # in · Please run /login (exit code: 1)" -- the orchestrator's
+            # own top-level query() call, not a sub-agent tool call (those
+            # are already normalized to AgentResult by agents/base.py's
+            # run_agent and never raise up to here). Detected distinctly so
+            # the diagnostic actually says what's wrong instead of a bare
+            # "cycle crashed"; record_failure below still runs either way,
+            # and with is_login_required_failure folded into
+            # cannot_be_fixed_by_agentra (memory/core.py) this always files
+            # as needs_human + blocking_agentra, so check_hard_stop's
+            # blocking_bugs() gate at the top of the *next* cycle refuses to
+            # even start (and therefore never repeats this exact failure)
+            # until a human runs `claude /login` and clears the bug.
+            if is_login_required_failure(str(exc)):
+                final_text = (
+                    "Claude Code authentication failure -- the CLI reported it is not usable "
+                    f"on this runner ({exc}). This needs a human to run `claude /login` or "
+                    "otherwise refresh credentials here; filed as a blocking bug so future "
+                    "cycles stop immediately instead of repeating this failure pointlessly."
+                )
+                session.note(f"autonomous cycle blocked: Claude Code authentication failure: {exc}", agent="cycle", ok=False)
+            else:
+                final_text = f"autonomous cycle raised: {exc}"
+                session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
             mem.record_failure(run_id, "autonomous-cycle", final_text)
 
     if session.stagnation_detected:
