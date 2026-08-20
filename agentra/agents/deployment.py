@@ -594,6 +594,18 @@ async def deploy_pre_prod_self_hosted(
         [
             "docker", "run", "-d", "--name", container_name,
             "--network", config.preprod_network,
+            # GitHub issue #45: publish 8080 to a Docker-assigned free host
+            # port (bare "-p 8080", no host-side port given) -- see
+            # _host_reachable_preview_url's docstring for why preview_url is
+            # built from this instead of container_name's Docker-embedded-DNS
+            # name. Auto-assigned rather than hashed/derived from run_id so
+            # concurrent runs can never collide on a host port -- the OS/
+            # Docker's own ephemeral-port allocator already solves that
+            # uniqueness problem, no need for agentra to reinvent it. Freed
+            # automatically the moment this container is removed (teardown_
+            # self_hosted_preprod / cleanup_stale_preprod's existing `docker
+            # rm -f`) -- no separate port bookkeeping needed.
+            "-p", "8080",
             "--memory=1g", "--cpus=1",
             "-v", f"{claude_home}:/home/agentuser/.claude:ro",
             *env_args,
@@ -607,7 +619,15 @@ async def deploy_pre_prod_self_hosted(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
-    preview_url = f"http://{container_name}:8080"
+    preview_url = _host_reachable_preview_url(config, container_name)
+    if preview_url is None:
+        return AgentResult(
+            ok=False,
+            text=f"{container_name} started but its published port and/or {config.app_network!r} gateway "
+            "address could not be determined -- no reachable preview_url to hand to verify_pre_prod.",
+            json_data={"status": "failed", "preview_url": None},
+            cost_usd=0.0, turns=0,
+        )
     healthy = await _wait_for_healthy(container_name)
 
     if not healthy:
@@ -625,6 +645,66 @@ async def deploy_pre_prod_self_hosted(
         json_data={"status": "deployed", "preview_url": preview_url, "notes": f"internal-only, image {image_tag!r}"},
         cost_usd=0.0, turns=0,
     )
+
+
+def _host_reachable_preview_url(config: "environments.SelfHostedVMConfig", container_name: str) -> str | None:
+    """GitHub issue #45: preview_url used to be built as
+    f"http://{container_name}:8080" -- a Docker embedded-DNS name that only
+    resolves for containers actually joined to config.preprod_network. But
+    only config.anchor_container (nginx) is ever connected to that network
+    (see the `docker network connect` call above, in
+    deploy_pre_prod_self_hosted) -- the process that actually verifies this
+    URL (testing.run_pre_prod's Playwright screenshot + HTTP checks) is
+    spawned as a Claude Agent SDK subprocess of the very "agentra" app
+    container this function itself runs inside (see this module's own
+    docstring: no run_agent call here because this needs the bind-mounted
+    docker.sock the calling container has), which per compute.tf is
+    attached to config.app_network, never config.preprod_network -- so the
+    hostname could never resolve there. Confirmed via curl/getent/python
+    socket resolution and a browser ERR_NAME_NOT_RESOLVED.
+
+    Fixed by publishing the container's port 8080 to a Docker-assigned free
+    host port (the bare `-p 8080` docker-run arg above) and addressing it
+    through config.app_network's own gateway IP instead of a container
+    name: that gateway is a real interface of the HOST's own network stack
+    (every Docker bridge network's gateway is), so any container attached
+    to config.app_network -- which the verifying process's own container
+    always is, by construction, since that's the network the persistent
+    "agentra" app container itself runs on -- can reach it, and Docker's
+    published-port DNAT rules bind on every host-side interface including
+    that one. Deliberately does NOT touch compute.tf's own container
+    network wiring (agentra-app-net/agentra-proxy attachment) -- that's
+    shared with the production blue/green promotion anchor and every
+    self_hosted_vm repo, out of scope and too risky for this fix; this only
+    reads config.app_network's already-existing gateway, never modifies who
+    is attached to it.
+
+    Returns None if either the port-publish or the gateway lookup fails --
+    callers must treat that as a deploy failure, never silently fall back
+    to the unreachable-by-design container-name URL this issue was filed
+    over."""
+    port = subprocess.run(
+        ["docker", "port", container_name, "8080/tcp"], capture_output=True, text=True,
+    )
+    if port.returncode != 0 or not port.stdout.strip():
+        return None
+    # "docker port" prints one "<host-ip>:<host-port>" line per bound host
+    # address (0.0.0.0:NNNNN and/or [::]:NNNNN for the default "publish on
+    # every interface" bare `-p 8080`) -- same port number on every line,
+    # so just taking the first is fine; host port is whatever follows the
+    # last ':'.
+    host_port = port.stdout.strip().splitlines()[0].rsplit(":", 1)[-1].strip()
+    if not host_port.isdigit():
+        return None
+
+    gateway = subprocess.run(
+        ["docker", "network", "inspect", config.app_network, "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+        capture_output=True, text=True,
+    )
+    host_address = gateway.stdout.strip() if gateway.returncode == 0 else ""
+    if not host_address:
+        return None
+    return f"http://{host_address}:{host_port}"
 
 
 async def _wait_for_healthy(container_name: str) -> bool:
