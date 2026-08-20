@@ -68,6 +68,11 @@ def _tool(session, name):
 
 def _patch_registry(monkeypatch):
     monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
+    # session.mark_waiting_for_human (human-in-the-loop escalation, GitHub
+    # issue #34) writes the run's status through to the registry immediately
+    # -- keep tests hermetic (no real writes under AGENTRA_HOME) the same way
+    # record_agent_step is patched above.
+    monkeypatch.setattr(registry, "record_run", lambda *a, **k: None)
 
 
 def _fake_impl_result(**overrides) -> AgentResult:

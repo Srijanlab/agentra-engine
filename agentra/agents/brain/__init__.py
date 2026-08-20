@@ -11,6 +11,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,10 +72,62 @@ class OrchestratorSession:
     hard_stop_reason: str | None = None
     recent_tool_calls: list[tuple[str, bool]] = field(default_factory=list)
     stagnation_detected: bool = False
+    # Human-in-the-loop escalation (GitHub issue #34). Set by implement_feature
+    # or discover_opportunities the moment either returns HUMAN_INPUT_REQUIRED
+    # -- distinct from hard_stop_reason's generic "stop calling tools" (which
+    # this also sets, to end the cycle immediately rather than let the brain
+    # burn budget on other backlog items with no direction) because the
+    # *run's* terminal status needs to become "waiting_for_human", not
+    # "completed"/"failed" (see run_autonomous_cycle's return and
+    # server/routes/triggers.py's _run_autonomous_background).
+    waiting_for_human: bool = False
+    human_input: dict | None = None
+    # Set (only) when this session is itself a resume dispatched from a
+    # human's answer (server/routes/human_input.py) -- human_answer_issue is
+    # the tracking issue that answer belongs to, so implement_feature only
+    # weaves it into _format_spec's spec_text for the matching resolves_id/
+    # sub_feature_of call, not any other implement_feature call the brain
+    # might also make this same session.
+    human_answer: str | None = None
+    human_answer_issue: int | None = None
 
     @property
     def app_name(self) -> str:
         return self.repo.name
+
+    def mark_waiting_for_human(
+        self, *, issue_number: int | None, issue_url: str | None, question: str, branch: str | None = None
+    ) -> None:
+        """Called by implement_feature/discover_opportunities right after
+        filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED
+        result. Writes the waiting_for_human status through to the run
+        registry immediately (not just at cycle end) so the dashboard/run
+        status API reflects it the moment this fires, per GitHub issue #34's
+        acceptance criteria -- not only once the whole cycle eventually winds
+        down. Also sets hard_stop_reason so the brain stops calling tools and
+        ends its turn this same cycle, since continuing to work other
+        backlog items would burn budget without knowing whether/when the
+        human will answer, and would blur which session/branch a later
+        resume should continue."""
+        self.waiting_for_human = True
+        self.human_input = {
+            "issue_number": issue_number,
+            "issue_url": issue_url,
+            "question": question,
+            "branch": branch,
+            "session_id": self.session_id,
+            "app": self.app_name,
+            "waiting_since": time.time(),
+        }
+        self.hard_stop_reason = (
+            "Waiting on a human to answer a blocking question "
+            f"(GitHub issue #{issue_number}" + (f", {issue_url}" if issue_url else "") + "). "
+            "Stop calling tools -- summarize what's blocked and end your turn; this run will "
+            "resume automatically once the human answers."
+        )
+        from agentra import registry
+
+        registry.record_run(self.run_id, status="waiting_for_human", human_input=self.human_input)
 
     def note(
         self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None
@@ -155,6 +208,12 @@ class AutonomousCycleReport:
     final_message: str
     cost_usd: float
     feature: str | None = None
+    # Human-in-the-loop escalation (GitHub issue #34): set when this cycle
+    # ended because implement_feature/discover_opportunities hit
+    # HUMAN_INPUT_REQUIRED -- server/routes/triggers.py uses this to set the
+    # run's terminal status to "waiting_for_human" instead of "completed".
+    waiting_for_human: bool = False
+    human_input: dict | None = None
 
 
 async def run_autonomous_cycle(
@@ -166,7 +225,16 @@ async def run_autonomous_cycle(
     skip_deploy: bool = False,
     max_turns: int = 40,
     run_id: str | None = None,
+    human_answer: str | None = None,
+    human_answer_issue: int | None = None,
 ) -> AutonomousCycleReport:
+    """human_answer/human_answer_issue: set only when this call is itself a
+    resume dispatched from a human's HUMAN_INPUT_REQUIRED answer (dashboard
+    submission or a GitHub issue comment -- see
+    server/routes/human_input.py). Threaded onto the session so
+    implement_feature's tools.py handler can weave the answer into
+    _format_spec/spec_text for the matching implement_feature call, instead
+    of the resumed session continuing with no new information."""
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
@@ -178,6 +246,8 @@ async def run_autonomous_cycle(
         run_id=run_id,
         analytics_summary=analytics_summary,
         skip_deploy=skip_deploy,
+        human_answer=human_answer,
+        human_answer_issue=human_answer_issue,
     )
     # Pre-seed from any existing cached scan so the model doesn't have to spend
     # a call on understand_codebase just to satisfy the "cb_summary is not None"
@@ -306,6 +376,10 @@ async def run_autonomous_cycle(
         )
         final_text = f"{final_text}\n\n{stagnation_note}" if final_text else stagnation_note
         session.note("stagnation breaker: cycle terminated early, no progress", agent="cycle", ok=False)
+    elif session.waiting_for_human:
+        pause_note = f"Cycle paused, waiting on a human answer. {session.hard_stop_reason}"
+        final_text = f"{final_text}\n\n{pause_note}" if final_text else pause_note
+        session.note("human-in-the-loop: cycle paused, waiting_for_human", agent="cycle", ok=None)
 
     persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
     if persist_error:
@@ -320,4 +394,6 @@ async def run_autonomous_cycle(
         final_message=final_text,
         cost_usd=session.cost_usd,
         feature=session.current_feature,
+        waiting_for_human=session.waiting_for_human,
+        human_input=session.human_input,
     )
