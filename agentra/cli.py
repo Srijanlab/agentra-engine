@@ -16,10 +16,7 @@ def _read_analytics(path: Path | None) -> str:
 
 
 def _resolve_objective(repo: Path, cli_value: str | None) -> str:
-    """--objective always wins if given; otherwise fall back to the persistent
-    setting (`agentra objective set`, or an objective_change request absorbed by
-    `agentra dispatch`) so a scheduled/unattended run doesn't need one passed
-    in every time."""
+    """--objective always wins if given; otherwise fall back to the persistent..."""
     if cli_value:
         return cli_value
     stored = Memory(repo).get_objective()

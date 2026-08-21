@@ -1,12 +1,4 @@
-"""Analytics Feedback Agent (vision.md 5.9).
-
-Real DAU/retention/funnel measurement needs a live analytics provider
-(Firebase/PostHog/Mixpanel) wired with credentials, which is project-specific
-and out of scope for the generic MVP. Until that adapter exists, this agent
-does the part that's still valuable without one: verify the shipped feature
-is actually instrumented (so impact *can* be measured later), and record
-expected success metrics against it.
-"""
+"""Analytics Feedback Agent."""
 
 from pathlib import Path
 

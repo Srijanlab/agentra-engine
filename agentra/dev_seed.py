@@ -1,15 +1,4 @@
-"""Seeds realistic local fixture data so `agentra dev` shows a fully
-populated dashboard without any real GitHub App or Firestore credentials --
-the local-testing capability that was missing: previously the only way to
-see the dashboard filled in was hand-rolled Playwright route mocks that
-never touched a real browser session.
-
-Only ever writes under AGENTRA_HOME (dev.sh points that at a scratch
-directory, never the real ~/.agentra), and only matters when
-AGENTRA_DEV_MODE=1 is set -- see server.py's github connector bypass for
-the other half of dev mode (fakes an "installed" GitHub App so the
-dashboard's ConnectGate doesn't block on a real credential).
-"""
+"""Seeds realistic local fixture data so `agentra dev` shows a fully populated dashboard without any real GitHub App or Firestore credentials -- the local-testing capability that was missing: previously the only way to see the dashboard filled in was hand-rolled Playwright route mocks that never touched a real browser session."""
 
 from __future__ import annotations
 
@@ -59,14 +48,7 @@ _FEATURE_QUEUE = {
 
 
 def _git_init_with_remote(repo: Path, remote_url: str | None) -> None:
-    """known_bugs/feature_queue/objective/environments are GitHub-only now
-    (memory.py/environments.py derive the target via `git remote get-url
-    origin` on this checkout, no local file fallback) -- without a real
-    git repo + remote here, every fixture write below would silently no-op
-    and the dev dashboard would show nothing seeded at all. No network
-    operation: `git remote add` just records the URL, it doesn't need the
-    remote to actually be reachable, so this works with the SSH-style URL
-    (ContentAutomationPlatform's fixture) too."""
+    """known_bugs/feature_queue/objective/environments are GitHub-only now (memory.py/environments.py derive the target via `git remote get-url origin` on this checkout, no local file fallback) -- without a real git repo + remote here, every fixture write below would silently no-op and the dev dashboard would show nothing seeded at all."""
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "agentra-dev"], cwd=repo, check=True, capture_output=True)
@@ -84,12 +66,6 @@ def seed(force: bool = False) -> None:
         return
 
     # No real GitHub App credentials in dev mode -- fake the backend so the
-    # GitHub-only known_bugs/feature_queue/objective/environments storage
-    # (see memory.py's module docstring) has somewhere to actually land,
-    # instead of every seed write below silently no-op'ing. Same
-    # persist_path server.py's own DEV_MODE startup uses -- dev.sh runs
-    # this seed script and `agentra serve` as separate processes, so the
-    # fake backend's state has to survive on disk between them.
     github_fake.install(persist_path=registry.AGENTRA_HOME / "dev_github_fake.json")
 
     dev_repos_root = registry.AGENTRA_HOME / "dev_repos"
@@ -115,8 +91,6 @@ def seed(force: bool = False) -> None:
 
     now = time.time()
     # Two runs for agentra under the same loop (same objective, unchanged
-    # across both) -- what makes the Loops view worth showing instead of a
-    # single-run demo: a real "end to end, across cycles" story.
     registry.record_run(
         "seed0001",
         app="agentra",

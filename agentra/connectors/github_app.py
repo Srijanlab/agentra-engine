@@ -1,20 +1,4 @@
-"""GitHub App-based repo access.
-
-Mints short-lived (1h) installation access tokens on demand instead of
-relying on one static, manually-scoped PAT. The original TASK-014
-GITHUB_TOKEN was a fine-grained PAT scoped to a handful of repos at
-creation time -- confirmed live, registering ContentAutomationPlatform
-through the dashboard (TASK-016) 403'd outright because that org was never
-in its scope. A GitHub App scales to any number of orgs/repos the App gets
-installed on, without hand-editing a token's repo list every time.
-
-Two GCP-sourced env vars configure this: GITHUB_APP_ID (numeric) and
-GITHUB_APP_PRIVATE_KEY (PEM, from the App's settings page -> "Generate a
-private key"). Absent either, every function here raises
-GitHubAppNotConfigured -- git_ops.py catches that and falls back to the
-static GITHUB_TOKEN/GIT_ASKPASS path, so a deployment without the App
-configured keeps working exactly as it did before this module existed.
-"""
+"""GitHub App-based repo access."""
 
 from __future__ import annotations
 
@@ -29,7 +13,6 @@ import jwt
 GITHUB_API = "https://api.github.com"
 
 # installations rarely change; a cache miss just re-fetches from the API,
-# so staleness here is cheap to recover from, not a correctness risk.
 _installation_id_cache: dict[str, int] = {}
 _token_cache: dict[int, tuple[str, float]] = {}
 _slug_cache: str | None = None
@@ -77,10 +60,7 @@ def _github_get(path: str) -> httpx.Response:
 
 
 def owner_repo_from_url(repo_url: str) -> str | None:
-    """'https://github.com/OWNER/REPO.git' -> 'OWNER/REPO'; None for
-    anything not a github.com HTTPS URL (SSH URLs, other hosts) -- those
-    fall straight back to the static-token path in git_ops.py, since the
-    App can't help with them regardless of whether it's configured."""
+    """'https://github.com/OWNER/REPO.git' -> 'OWNER/REPO'; None for..."""
     m = re.match(r"^https://github\.com/([^/]+)/([^/]+?)(\.git)?/?$", repo_url)
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
@@ -98,10 +78,7 @@ def _get_installation_id(owner_repo: str) -> int:
 
 
 def _mint_token_for_installation(installation_id: int) -> str:
-    """Shared by get_installation_token (per-repo) and list_repos
-    (per-installation) -- both ultimately need the same 1h access token for
-    a given installation, minted fresh or reused from cache if still valid
-    for at least another 2 minutes."""
+    """Shared by get_installation_token (per-repo) and list_repos..."""
     cached = _token_cache.get(installation_id)
     if cached and cached[1] - time.time() > 120:
         return cached[0]
@@ -115,17 +92,13 @@ def _mint_token_for_installation(installation_id: int) -> str:
     data = resp.json()
     token = data["token"]
     # expires_at is UTC ("...Z") -- calendar.timegm, not time.mktime, which
-    # would silently reinterpret it in the local timezone.
     expires_at = calendar.timegm(time.strptime(data["expires_at"], "%Y-%m-%dT%H:%M:%SZ"))
     _token_cache[installation_id] = (token, expires_at)
     return token
 
 
 def get_installation_token(repo_url: str) -> str:
-    """The one entry point git_ops.py needs: an installation access token
-    good for git operations against `repo_url`. Raises
-    GitHubAppNotConfigured if the App isn't set up, or GitHubAppError if
-    it's configured but not installed on this particular repo."""
+    """The one entry point git_ops.py needs: an installation access token good for git operations against `repo_url`."""
     owner_repo = owner_repo_from_url(repo_url)
     if owner_repo is None:
         raise GitHubAppError(f"not a github.com HTTPS URL: {repo_url!r}")
@@ -153,9 +126,7 @@ def list_installations() -> list[dict]:
 
 
 def list_repos() -> list[dict]:
-    """Every repo reachable across every installation of the App -- for the
-    dashboard's "Register App" repo picker, so registering a repo is a
-    click instead of finding and pasting its clone URL by hand."""
+    """Every repo reachable across every installation of the App -- for the..."""
     repos: list[dict] = []
     for inst in _raw_installations():
         token = _mint_token_for_installation(inst["id"])
@@ -180,16 +151,7 @@ def list_repos() -> list[dict]:
 
 
 def install_url() -> str | None:
-    """Public 'install this App' page -- the dashboard links here so
-    connecting a new org/account is a click from agentra's own UI instead
-    of hunting through GitHub's App settings pages. Only works for
-    accounts other than the App's own owner if the App's "Where can this
-    GitHub App be installed?" setting is "Any account" -- still "Only on
-    this account" leaves this link functional only for the owner's own
-    orgs, a GitHub-side setting this code can't change for you. None if
-    the App isn't configured at all, or the slug lookup fails (e.g. a bad
-    key) -- not worth raising over, the rest of the status payload still
-    reports the real problem."""
+    """Public 'install this App' page -- the dashboard links here so connecting a new org/account is a click from agentra's own UI instead of hunting through GitHub's App settings pages."""
     global _slug_cache
     if _slug_cache is not None:
         return f"https://github.com/apps/{_slug_cache}/installations/new"

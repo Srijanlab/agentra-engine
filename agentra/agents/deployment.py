@@ -1,30 +1,4 @@
-"""Deployment Agent (vision.md 5.8), split across the environment pipeline.
-
-deploy_pre_prod() is what every regular cycle calls: push to the pre-prod
-branch, deploy the isolated Firebase pre-prod project + a Vercel preview,
-smoke test. It never touches production.
-
-deploy_pre_prod_self_hosted() is the equivalent for agentra's own repo
-(EnvironmentConfig.self_hosted_vm), which has neither Vercel nor Firebase --
-it builds and runs a sibling orchestrator container on the same VM instead,
-reachable only over an internal Docker network. See its own docstring.
-
-promote_prod() is the one place in the whole system that's allowed to touch
-production, and only when called with allow_prod=True by a caller that has
-already checked EnvironmentConfig.auto_remediate_prod (see
-agents/prod_debug.py) or by a human running `agentra promote`.
-
-The git merge+push in both is done here in plain Python, not left as prose
-in the agent's system prompt -- same rationale as implementation.py's
-deterministic checkout/commit: an LLM given "merge X into Y and push" as an
-instruction is a plausible place for the exact same kind of silent
-non-compliance observed there, and a skipped/wrong merge here is worse (it
-would mean pre-prod or, in promote's case, PRODUCTION never actually gets
-the change, while the agent still goes on to "deploy" whatever was already
-checked out). The LLM agent is left with only the parts that genuinely need
-its judgment: interpreting `vercel`/`firebase` CLI output, capturing preview
-URLs, running smoke tests.
-"""
+"""Deployment Agent, split across the environment pipeline."""
 
 import asyncio
 import json
@@ -75,10 +49,6 @@ End your response with a fenced ```json block shaped like:
 """
 
 # Used instead of PRE_PROD_SYSTEM_PROMPT when EnvironmentConfig.ci_cd_on_push is True --
-# this app's own CI/CD (GitHub Actions, Vercel's git integration, etc.) already deploys on
-# push to pre_prod_branch, which the merge above just triggered. Running `vercel deploy`/
-# `firebase deploy` here too would be redundant at best and a racing/conflicting second
-# deploy at worst -- so this agent only verifies, never deploys directly.
 PRE_PROD_CI_CD_SYSTEM_PROMPT = """You are the Deployment Agent, verifying the PRE-PROD \
 deploy for this app. You must never touch production.
 
@@ -146,7 +116,6 @@ End your response with a fenced ```json block shaped like:
 """
 
 # Used instead of PROD_SYSTEM_PROMPT when EnvironmentConfig.ci_cd_on_push is True -- same
-# rationale as PRE_PROD_CI_CD_SYSTEM_PROMPT above, applied to the prod promotion path.
 PROD_CI_CD_SYSTEM_PROMPT = """You are the Deployment Agent, verifying a PRODUCTION \
 promotion. This call has been explicitly authorized — either by a human running \
 `agentra promote`, or by the Production Debugging Agent's opted-in auto-remediate path \
@@ -175,40 +144,18 @@ End your response with a fenced ```json block shaped like:
 
 
 def _sync_branch_to_remote(repo: Path, branch: str) -> None:
-    """Make local `branch` exist and exactly match origin/`branch`. This
-    used to be its own hand-rolled fetch+checkout+reset (byte-for-byte the
-    same shape as git_ops.pull_latest) with a plain, un-authed `_run` --
-    meaning the fetch would 403 on any repo only reachable via the GitHub
-    App connector, same bug class as the two pushes above. Delegates to
-    the one already-fixed implementation instead of carrying a second,
-    driftable copy of it."""
+    """Make local `branch` exist and exactly match origin/`branch`."""
     from agentra.agents.git_ops import pull_latest
 
     pull_latest(repo, branch)
 
 
 # Paths under here are Memory's own regenerated notes (understand_codebase's
-# architecture summary, per-run decision/feature/metric write-ups) -- nobody
-# hand-edits these, each branch just independently overwrites them on its
-# own cycles, so a content conflict here reflects two branches re-describing
-# the same repo slightly differently, never an actual code disagreement that
-# needs a human's judgment. Confirmed live: a real promote blocked on
-# exactly this (conflict in .agentra/memory/architecture/codebase.md, two
-# unrelated code files in the same merge auto-merged fine) -- safe to always
-# take source_ref's copy here since it's the freshest regeneration, same
-# choice a human resolving it by hand would make.
 _AUTO_RESOLVE_OURS_PREFIX = ".agentra/memory/"
 
 
 def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | None:
-    """Merge source_ref into target_branch (already synced to its remote tip) and push.
-    Returns an error message on failure (merge left aborted, nothing pushed), None on success.
-
-    The push goes through git_ops.push_branch, not a raw `_run`, for the
-    same GitHub-App-then-static-token auth fallback reason as
-    persist_audit_trail above -- a raw push here would 403 on any repo
-    only reachable via the App connector.
-    """
+    """Merge source_ref into target_branch (already synced to its remote tip) and push."""
     from agentra.agents.git_ops import GitOpError, push_branch
 
     merge = subprocess.run(
@@ -235,15 +182,8 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
                     return f"Push of {target_branch!r} failed: {exc}"
                 return None
             # Auto-resolve itself failed unexpectedly -- fall through to the
-            # normal abort-and-report path rather than leaving a half-resolved
-            # merge in place.
         subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True, text=True)
         # git writes the actually-useful diagnostic ("CONFLICT (content):
-        # Merge conflict in ...", "Automatic merge failed...") to STDOUT,
-        # not stderr -- confirmed live: a real failed promote reported this
-        # error with stderr present-but-empty, so the human saw "failed,
-        # aborted: " and nothing else. stderr kept too since some failure
-        # modes (e.g. an unrelated-histories error) do write there instead.
         detail = "\n".join(part for part in (merge.stdout.strip(), merge.stderr.strip()) if part)
         return f"Merge of {source_ref!r} into {target_branch!r} failed, aborted: {detail}"
     try:
@@ -254,47 +194,7 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
 
 
 def persist_audit_trail(repo: Path, branch: str) -> str | None:
-    """Commit and push any dirty .agentra/ bookkeeping (released.json, memory/*,
-    feedback_sync_state.json, codebase_spec_commit.json) onto `branch`.
-    shipped/known_bugs/feature_queue live on GitHub Issues now (see memory.py),
-    not in this directory at all.
-
-    Without this, Memory.write() calls only ever land in the working copy --
-    nothing ever committed them, so a fresh checkout (the next scheduled CI run)
-    starts with an empty memory/ every time.
-
-    run_autonomous_cycle calls this unconditionally at the end of EVERY cycle,
-    not just ones that reached deploy_pre_prod -- so, unlike the docstring this
-    replaced claimed, HEAD is NOT reliably already on `branch` here. Confirmed
-    live: a cycle that hit its cost cap right after implement_feature (still on
-    the feature branch, deploy_pre_prod never reached) failed outright with
-    "src refspec beta does not match any" -- on a checkout fresh since the last
-    redeploy (REPOS_ROOT is re-cloned single-branch from the app's registered
-    branch), `branch` may not even exist locally yet, let alone be checked out.
-
-    Fixed by decoupling "capture the dirty .agentra/ state" from "which branch
-    is it going onto": commit the dirty paths onto whatever's currently checked
-    out first (an orphaned, harmless commit if that's a feature branch nothing
-    else ever merges), record that commit's sha, THEN sync `branch` to its
-    remote tip (git_ops.pull_latest -- creates it locally if it doesn't exist),
-    overlay just the .agentra/ tree from the captured sha onto that now-current
-    `branch` (a plain `git checkout <sha> -- .agentra/`, not a merge/cherry-pick
-    -- always takes the freshest regeneration, same "ours"-wins reasoning
-    _merge_and_push's _AUTO_RESOLVE_OURS_PREFIX already applies to a real merge
-    conflict here applied directly instead), and commit+push that. The
-    intermediate sha stays reachable by its own hash through all of this even
-    when `branch` turns out to already be the checked-out branch (pull_latest's
-    hard reset only moves branch pointers, never garbage-collects an object
-    still referenced by name within the same process).
-
-    Delegates to git_ops.pull_latest/commit_and_push for the actual git
-    plumbing rather than hand-rolling it, so this benefits from the same
-    GitHub-App-then-static-token auth fallback clone_repo/push_branch already
-    have -- otherwise this would 403 on any repo only reachable via the App
-    connector, same bug TASK-016's registration hit before that fallback
-    existed. Returns an error message on failure, None on success or if
-    nothing was dirty.
-    """
+    """Commit and push any dirty .agentra/ bookkeeping (released.json, memory/*, feedback_sync_state.json, codebase_spec_commit.json) onto `branch`."""
     from agentra.agents.git_ops import GitOpError, commit_and_push, pull_latest
 
     status = subprocess.run(
@@ -339,15 +239,7 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
 
 
 async def merge_to_pre_prod_only(repo: Path, env: EnvironmentConfig, feature_branch: str) -> AgentResult:
-    """Lands feature_branch on pre_prod_branch without spinning up any deploy
-    or live verification -- the path agents/brain/tools.py's deploy_pre_prod
-    tool takes when change_risk.classify_change() says TRIVIAL (a test fix,
-    docs edit, rename, or a couple-line bug fix). A full pre-prod deploy +
-    Testing Agent turn costs real docker resources and an LLM turn actually
-    driving a browser; for a change this small, a passing local test suite is
-    already as much confidence as that heavier path would add. Strategy-
-    agnostic (git-only) since every deploy_strategy merges to the same
-    pre_prod_branch regardless of how it then deploys."""
+    """Lands feature_branch on pre_prod_branch without spinning up any deploy or live verification -- the path agents/brain/tools.py's deploy_pre_prod tool takes when change_risk.classify_change() says TRIVIAL (a test fix, docs edit, rename, or a couple-line bug fix)."""
     _sync_branch_to_remote(repo, env.pre_prod_branch)
     error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
     if error:
@@ -408,10 +300,7 @@ _NOT_CONFIGURED_TEXT = (
 
 
 def _local_image_name(config: "environments.SelfHostedVMConfig") -> str:
-    """Short, local-only name derived from the registry image path (e.g.
-    'agentra' from '.../agentra-prod/agentra/agentra') -- used to name
-    sibling/candidate containers and images distinctly from the registry tag
-    itself, which always stays config.image_repo:staging."""
+    """Short, local-only name derived from the registry image path (e.g."""
     return config.image_repo.rstrip("/").rsplit("/", 1)[-1]
 
 
@@ -427,20 +316,7 @@ _STALE_PREPROD_MAX_AGE_HOURS = 2.0
 
 
 def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hours: float = _STALE_PREPROD_MAX_AGE_HOURS) -> list[str]:
-    """Sweeps any deploy_pre_prod_self_hosted sibling container/image left
-    behind by a run that crashed, hit its cost cap, or was killed before
-    verify_pre_prod's own single-shot teardown_self_hosted_preprod ran --
-    that teardown only fires on the happy path (see its own docstring), so
-    nothing else ever reclaims a leaked sibling otherwise. A real pre-prod
-    deploy + verify + teardown cycle takes minutes; anything still alive
-    past max_age_hours is orphaned, not mid-flight.
-
-    Runs at the start of every deploy_pre_prod_self_hosted call (a handful
-    of cheap docker list/inspect calls) rather than needing a separate cron
-    entry or scheduling infra of its own -- self-healing on next use.
-    Best-effort throughout: a removal failure just leaves that one resource
-    for the next sweep to retry, never fails the caller's actual deploy.
-    Returns the names of everything it removed, purely for logging."""
+    """Sweeps any deploy_pre_prod_self_hosted sibling container/image left behind by a run that crashed, hit its cost cap, or was killed before verify_pre_prod's own single-shot teardown_self_hosted_preprod ran -- that teardown only fires on the happy path (see its own docstring), so nothing else ever reclaims a leaked sibling otherwise."""
     prefix = f"{_local_image_name(config)}-preprod-"
     removed: list[str] = []
 
@@ -457,8 +333,6 @@ def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hou
             continue
         try:
             # Docker's .Created is RFC3339 with nanosecond precision (e.g.
-            # "...123456789Z") -- datetime.fromisoformat only accepts up to
-            # microseconds, so truncate before the trailing Z.
             raw = created.stdout.strip().rstrip("Z")
             if "." in raw:
                 whole, frac = raw.split(".", 1)
@@ -488,41 +362,13 @@ def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hou
 
 
 def _own_container_id() -> str | None:
-    """The container ID Docker gave *this* process's own container, read
-    from HOSTNAME -- Docker sets a container's hostname to its own short ID
-    by default, and nothing in compute.tf's `docker run` for agentra-blue/
-    agentra-green passes --hostname to override that. None if HOSTNAME isn't
-    set at all (e.g. running outside a container, as under pytest/local
-    dev) -- callers must treat that as "can't determine, don't guess"."""
+    """The container ID Docker gave *this* process's own container, read from HOSTNAME -- Docker sets a container's hostname to its own short ID by default, and nothing in compute.tf's `docker run` for agentra-blue/ agentra-green passes --hostname to override that."""
     hostname = os.environ.get("HOSTNAME", "").strip()
     return hostname or None
 
 
 def _own_container_name() -> str | None:
-    """Resolves this process's own container's Docker --name (e.g.
-    'agentra-blue' or 'agentra-green') by asking the host daemon (reachable
-    over the bind-mounted docker.sock) to inspect the container ID from
-    _own_container_id.
-
-    This must be figured out dynamically at call time, never hardcoded or
-    read from static config: blue/green promotion (promote_prod_self_hosted)
-    flips which color is actually running this very process on every
-    promotion, and the previous bug here was exactly that kind of static
-    assumption -- deploy_pre_prod_self_hosted used to Docker-network-connect
-    config.anchor_container (the nginx reverse-proxy) to preprod_network,
-    but the orchestrator process that runs verify_pre_prod's Testing Agent
-    turn (and any curl/getent/python socket call issued from inside it)
-    lives in the blue/green *app* container, not nginx -- so it was never on
-    preprod_network at all and could never resolve the pre-prod sibling's
-    Docker DNS name, regardless of which color was active. Connecting
-    whichever container this code is actually running in, found fresh on
-    every call, fixes that for either color without needing to know which
-    one is live.
-
-    Returns None if the ID can't be determined or `docker inspect` fails
-    (e.g. running outside Docker entirely) -- callers must treat that as a
-    hard failure, not silently skip the network join and report success
-    anyway."""
+    """Resolves this process's own container's Docker --name (e.g."""
     container_id = _own_container_id()
     if not container_id:
         return None
@@ -536,30 +382,12 @@ def _own_container_name() -> str | None:
 
 
 def _docker_build_env() -> dict:
-    """Env for every `docker build` subprocess call in this module --
-    explicitly enables BuildKit (DOCKER_BUILDKIT=1) rather than relying on
-    whatever the legacy default happens to be on the build host: the legacy
-    builder is deprecated and, unlike BuildKit, doesn't skip/cache unchanged
-    layers as effectively, which matters directly on a disk-constrained
-    long-lived host. Merges into (rather than replaces) the current
-    environment so PATH/HOME/etc the docker CLI itself needs stay intact."""
+    """Env for every `docker build` subprocess call in this module -- explicitly enables BuildKit (DOCKER_BUILDKIT=1) rather than relying on whatever the legacy default happens to be on the build host: the legacy builder is deprecated and, unlike BuildKit, doesn't skip/cache unchanged layers as effectively, which matters directly on a disk-constrained long-lived host."""
     return {**os.environ, "DOCKER_BUILDKIT": "1"}
 
 
 def _reclaim_build_disk_space() -> None:
-    """Best-effort disk reclaim, run immediately before every `docker build`
-    call in this module -- same non-fatal, swallow-everything pattern as
-    cleanup_stale_preprod above, just aimed at generic build-cache/dangling-
-    image bloat rather than leaked preprod siblings specifically. On the
-    long-lived self-hosted build host, dangling layers and build cache from
-    earlier runs accumulate across every deploy unless something reclaims
-    them, which is the actual root cause of "no space left on device" build
-    failures. `docker builder prune -f` / `docker image prune -f` only ever
-    remove cache/images that aren't backing anything currently in use, so
-    this never touches a live container's image out from under it. A prune
-    failure (e.g. docker not reachable) just leaves that space unclaimed for
-    this build to potentially fail on -- never blocks the deploy attempt
-    itself."""
+    """Best-effort disk reclaim, run immediately before every `docker build` call in this module -- same non-fatal, swallow-everything pattern as cleanup_stale_preprod above, just aimed at generic build-cache/dangling- image bloat rather than leaked preprod siblings specifically."""
     subprocess.run(["docker", "builder", "prune", "-f"], capture_output=True, text=True)
     subprocess.run(["docker", "image", "prune", "-f"], capture_output=True, text=True)
 
@@ -567,32 +395,7 @@ def _reclaim_build_disk_space() -> None:
 async def deploy_pre_prod_self_hosted(
     repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str
 ) -> AgentResult:
-    """Pre-prod deploy for the "self_hosted_vm" deploy_strategy -- a generic
-    capability for any repo that runs on its own Docker-based VM rather than
-    Vercel/Firebase, not agentra-specific code. Every identifier (network
-    names, the anchor container to connect to, the image repo path) comes
-    from environments.load_self_hosted_vm_config(repo), that repo's own
-    committed .agentra/memory/architecture/deployment.md -- never hardcoded
-    here. Builds and runs a second, isolated instance of the app alongside
-    the running prod one, on the same VM, reachable only over an internal
-    Docker network -- never the public internet.
-
-    Deliberately no run_agent/LLM call anywhere in this function: spinning up
-    a sibling container requires /var/run/docker.sock access (mounted into
-    the calling container only for this purpose), and that capability must
-    stay fixed, deterministic plumbing an agent turn can never freely
-    improvise over -- same reasoning as _merge_and_push/persist_audit_trail's
-    git operations, just a higher-stakes one (host-level Docker control, not
-    just this repo's own git history).
-
-    Returns the same AgentResult/json_data shape (status/preview_url/notes)
-    as the generic deploy_pre_prod, so every downstream consumer (tools.py's
-    deploy_pre_prod wrapper, verify_pre_prod, HUMAN_INPUT_REQUIRED handling)
-    works completely unmodified regardless of which strategy produced it.
-    Call teardown_self_hosted_preprod(repo, run_id) once the report this
-    enables has been produced -- this function does not tear down after
-    itself, since the caller still needs the container alive to verify it.
-    """
+    """Pre-prod deploy for the "self_hosted_vm" deploy_strategy -- a generic capability for any repo that runs on its own Docker-based VM rather than Vercel/Firebase, not agentra-specific code."""
     from agentra import environments
 
     config = environments.load_self_hosted_vm_config(repo)
@@ -609,10 +412,6 @@ async def deploy_pre_prod_self_hosted(
     container_name = _preprod_container_name(config, run_id)
     image_tag = _preprod_image_tag(config, run_id)
     # A real HOST path, not this container's own -- see
-    # SelfHostedVMConfig.data_mount's docstring for why: docker commands
-    # issued here run against the host's daemon over the bind-mounted
-    # socket, so -v source paths are resolved by the host, never by this
-    # container's own filesystem.
     claude_home = f"{config.data_mount}/claude"
 
     _reclaim_build_disk_space()
@@ -627,13 +426,6 @@ async def deploy_pre_prod_self_hosted(
         )
 
     # This process's OWN container -- not config.anchor_container (nginx) --
-    # must be on preprod_network: the Testing Agent turn verify_pre_prod
-    # spawns, and every curl/getent/python-socket call it issues, runs
-    # inside whichever blue/green app container is running *this very
-    # Python process*, never inside nginx. Determined dynamically on every
-    # call (see _own_container_name) since blue/green promotion moves which
-    # color that is. Idempotent: both no-op harmlessly (network already
-    # exists / container already attached) on every call after the first.
     subprocess.run(["docker", "network", "create", config.preprod_network], capture_output=True, text=True)
     own_container = _own_container_name()
     if own_container is None:
@@ -663,16 +455,6 @@ async def deploy_pre_prod_self_hosted(
             "docker", "run", "-d", "--name", container_name,
             "--network", config.preprod_network,
             # GitHub issue #45: publish 8080 to a Docker-assigned free host
-            # port (bare "-p 8080", no host-side port given) -- see
-            # _host_reachable_preview_url's docstring for why preview_url is
-            # built from this instead of container_name's Docker-embedded-DNS
-            # name. Auto-assigned rather than hashed/derived from run_id so
-            # concurrent runs can never collide on a host port -- the OS/
-            # Docker's own ephemeral-port allocator already solves that
-            # uniqueness problem, no need for agentra to reinvent it. Freed
-            # automatically the moment this container is removed (teardown_
-            # self_hosted_preprod / cleanup_stale_preprod's existing `docker
-            # rm -f`) -- no separate port bookkeeping needed.
             "-p", "8080",
             "--memory=1g", "--cpus=1",
             "-v", f"{claude_home}:/home/agentuser/.claude:ro",
@@ -708,14 +490,6 @@ async def deploy_pre_prod_self_hosted(
         )
 
     # _wait_for_healthy only proves the sibling's own process is up (it
-    # curls itself via `docker exec`) -- it never exercises the network path
-    # verify_pre_prod's Testing Agent turn will actually use. Genuinely curl
-    # preview_url from THIS process (the orchestrator itself), over whatever
-    # real network path exists to it, before ever reporting "deployed": this
-    # is exactly the check that was missing before, which is why a broken
-    # network join (previously: only nginx on preprod_network, never the app
-    # container) used to report status=deployed and fail opaquely one step
-    # later in verify_pre_prod instead of failing clearly here.
     reachable, reach_detail = await _wait_for_reachable_from_orchestrator(preview_url)
     if not reachable:
         return AgentResult(
@@ -739,51 +513,13 @@ async def deploy_pre_prod_self_hosted(
 
 
 def _host_reachable_preview_url(config: "environments.SelfHostedVMConfig", container_name: str) -> str | None:
-    """GitHub issue #45: preview_url used to be built as
-    f"http://{container_name}:8080" -- a Docker embedded-DNS name that only
-    resolves for containers actually joined to config.preprod_network. But
-    only config.anchor_container (nginx) is ever connected to that network
-    (see the `docker network connect` call above, in
-    deploy_pre_prod_self_hosted) -- the process that actually verifies this
-    URL (testing.run_pre_prod's Playwright screenshot + HTTP checks) is
-    spawned as a Claude Agent SDK subprocess of the very "agentra" app
-    container this function itself runs inside (see this module's own
-    docstring: no run_agent call here because this needs the bind-mounted
-    docker.sock the calling container has), which per compute.tf is
-    attached to config.app_network, never config.preprod_network -- so the
-    hostname could never resolve there. Confirmed via curl/getent/python
-    socket resolution and a browser ERR_NAME_NOT_RESOLVED.
-
-    Fixed by publishing the container's port 8080 to a Docker-assigned free
-    host port (the bare `-p 8080` docker-run arg above) and addressing it
-    through config.app_network's own gateway IP instead of a container
-    name: that gateway is a real interface of the HOST's own network stack
-    (every Docker bridge network's gateway is), so any container attached
-    to config.app_network -- which the verifying process's own container
-    always is, by construction, since that's the network the persistent
-    "agentra" app container itself runs on -- can reach it, and Docker's
-    published-port DNAT rules bind on every host-side interface including
-    that one. Deliberately does NOT touch compute.tf's own container
-    network wiring (agentra-app-net/agentra-proxy attachment) -- that's
-    shared with the production blue/green promotion anchor and every
-    self_hosted_vm repo, out of scope and too risky for this fix; this only
-    reads config.app_network's already-existing gateway, never modifies who
-    is attached to it.
-
-    Returns None if either the port-publish or the gateway lookup fails --
-    callers must treat that as a deploy failure, never silently fall back
-    to the unreachable-by-design container-name URL this issue was filed
-    over."""
+    """GitHub issue #45: preview_url used to be built as f"http://{container_name}:8080" -- a Docker embedded-DNS name that only resolves for containers actually joined to config.preprod_network."""
     port = subprocess.run(
         ["docker", "port", container_name, "8080/tcp"], capture_output=True, text=True,
     )
     if port.returncode != 0 or not port.stdout.strip():
         return None
     # "docker port" prints one "<host-ip>:<host-port>" line per bound host
-    # address (0.0.0.0:NNNNN and/or [::]:NNNNN for the default "publish on
-    # every interface" bare `-p 8080`) -- same port number on every line,
-    # so just taking the first is fine; host port is whatever follows the
-    # last ':'.
     host_port = port.stdout.strip().splitlines()[0].rsplit(":", 1)[-1].strip()
     if not host_port.isdigit():
         return None
@@ -811,15 +547,7 @@ async def _wait_for_healthy(container_name: str) -> bool:
 
 
 async def _wait_for_reachable_from_orchestrator(preview_url: str) -> tuple[bool, str]:
-    """Curls preview_url directly from THIS process -- no `docker exec` into
-    the sibling -- the same network path (this process's own container's
-    view of preprod_network) verify_pre_prod's Testing Agent turn will use.
-    Distinct from, and strictly more meaningful than, _wait_for_healthy:
-    that only proves the sibling's own curl-against-itself succeeds, which
-    stays green even when nothing else on the host can resolve its name at
-    all (exactly the bug this function exists to catch). Returns
-    (reachable, diagnostic); diagnostic is the last curl error seen, or
-    "reachable" on success."""
+    """Curls preview_url directly from THIS process -- no `docker exec` into the sibling -- the same network path (this process's own container's view of preprod_network) verify_pre_prod's Testing Agent turn will use."""
     last_error = "no attempt made"
     for _ in range(_HEALTH_CHECK_ATTEMPTS):
         check = subprocess.run(
@@ -834,11 +562,7 @@ async def _wait_for_reachable_from_orchestrator(preview_url: str) -> tuple[bool,
 
 
 def teardown_self_hosted_preprod(repo: Path, run_id: str) -> None:
-    """Best-effort cleanup of a deploy_pre_prod_self_hosted sibling -- single-shot,
-    ephemeral lifecycle, so nothing accumulates across features tested over time.
-    Swallows failures: a leftover container/image is a minor disk/resource cost,
-    not worth failing the run over. No-ops quietly if this repo has no
-    self-hosted-VM config at all (nothing to tear down)."""
+    """Best-effort cleanup of a deploy_pre_prod_self_hosted sibling -- single-shot, ephemeral lifecycle, so nothing accumulates across features tested over time."""
     from agentra import environments
 
     config = environments.load_self_hosted_vm_config(repo)
@@ -855,11 +579,7 @@ def _candidate_image_tag(config: "environments.SelfHostedVMConfig", run_id: str)
 
 
 def _image_of(container_name: str) -> str | None:
-    """The image reference (as originally passed to `docker run`, e.g.
-    'agentra:a1b2c3d') backing a running container -- captured before
-    removing that container, since the container name won't resolve it
-    afterward. None if the container doesn't exist / inspect fails
-    (best-effort, same as every other cleanup call in this module)."""
+    """The image reference (as originally passed to `docker run`, e.g."""
     inspect = subprocess.run(
         ["docker", "inspect", container_name, "--format", "{{.Config.Image}}"],
         capture_output=True, text=True,
@@ -872,12 +592,7 @@ def _other_color(color: str) -> str:
 
 
 def _nginx_conf(backend_container: str) -> str:
-    """Full config.anchor_container nginx conf, proxying to backend_container
-    (a docker DNS name on config.app_network) on port 8080. Regenerated and
-    piped in whole on every promotion (see promote_prod_self_hosted) rather
-    than templated/patched in place -- simplest thing that's still trivially
-    correct, and this is the exact same content compute.tf's startup-script
-    writes for the VM's very first boot (before any promotion has run)."""
+    """Full config.anchor_container nginx conf, proxying to backend_container (a docker DNS name on config.app_network) on port 8080."""
     return f"""server {{
     listen 8080;
     location / {{
@@ -893,23 +608,7 @@ def _nginx_conf(backend_container: str) -> str:
 
 
 async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: str) -> AgentResult:
-    """Production promotion for the "self_hosted_vm" deploy_strategy --
-    nginx-fronted blue/green instead of the in-place container replacement
-    the manual VM redeploy process (docs/deployment.md) still uses. Builds
-    the new candidate image, runs it as the inactive color alongside the
-    currently-live one, health-checks it, flips config.anchor_container's
-    (nginx) active upstream to it, then tears down the now-inactive old
-    color -- zero-downtime, no window where neither color is serving.
-
-    Never called from the autonomous tool loop -- only from orchestrator.py's
-    run_promote, itself only reachable via the explicit `agentra promote`
-    CLI command or the dashboard's Promote button. Same human-approval gate
-    every other app's production promotion already goes through; this
-    function adds no gating of its own because it doesn't need to.
-
-    Deliberately no run_agent/LLM call, same reasoning as
-    deploy_pre_prod_self_hosted -- fixed, deterministic docker/nginx
-    plumbing only."""
+    """Production promotion for the "self_hosted_vm" deploy_strategy -- nginx-fronted blue/green instead of the in-place container replacement the manual VM redeploy process (docs/deployment.md) still uses."""
     from agentra import environments
 
     config = environments.load_self_hosted_vm_config(repo)
@@ -950,10 +649,6 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
         )
 
     # Inherit the currently-live container's actual environment (secrets
-    # included) rather than re-fetching from Secret Manager here -- this
-    # function runs as plain Python inside a container, not the bash
-    # startup-script's gcs()-via-throwaway-container trick, and the running
-    # container already has everything compute.tf baked in at last boot.
     old_container = f"{base_name}-{current_color}"
     inspect = subprocess.run(
         ["docker", "inspect", old_container, "--format", "{{json .Config.Env}}"],
@@ -1023,14 +718,6 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
         )
 
     # The outgoing color's image is never referenced again once its container
-    # is gone -- captured before removal (the container name won't resolve it
-    # afterward) and reclaimed right alongside it. Without this, every
-    # successful promotion leaves one more full image (~GBs) permanently
-    # orphaned: _reclaim_build_disk_space's `docker image prune -f` only
-    # catches *dangling* (untagged) images, and this one still carries its
-    # real tag. Confirmed live: this exact leak filled the VM's disk to 100%
-    # (16G/16G) after a handful of same-day promotions, deadlocking every
-    # subsequent autonomous cycle at pull_latest before real work could start.
     old_image = _image_of(old_container)
     subprocess.run(["docker", "rm", "-f", old_container], capture_output=True, text=True)
     if old_image:
@@ -1050,8 +737,6 @@ async def promote_prod(repo: Path, env: EnvironmentConfig, session_id: str | Non
     _sync_branch_to_remote(repo, env.prod_branch)
     try:
         # fetch_ref, not pull_latest: we need to stay on prod_branch (just
-        # synced above) with pre_prod_branch merely fetched as a merge
-        # source -- pull_latest would check out pre_prod_branch instead.
         fetch_ref(repo, env.pre_prod_branch)
     except GitOpError as exc:
         return AgentResult(ok=False, text=str(exc), json_data=None, cost_usd=0.0, turns=0)
@@ -1086,14 +771,6 @@ async def promote_prod(repo: Path, env: EnvironmentConfig, session_id: str | Non
 
 
 # ── Strategy registries: EnvironmentConfig.deploy_strategy -> implementation ──
-#
-# The single source of truth for "what deployment mechanisms exist" -- adding
-# a third strategy later means adding one function + one registry entry here,
-# not touching the dispatch call sites (agents/brain/tools.py's deploy_pre_prod
-# tool, orchestrator.py's run_promote). Adapter closures exist only to give
-# every strategy a uniform call signature despite deploy_pre_prod/promote_prod
-# and their self_hosted_vm counterparts taking different native parameters
-# (session_id vs run_id) -- the underlying functions above are unchanged.
 
 
 async def _deploy_pre_prod_vercel_firebase(

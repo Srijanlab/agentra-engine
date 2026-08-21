@@ -1,25 +1,4 @@
-"""Requirements Agent — runs before Implementation Agent, inside
-implement_feature (agents/brain.py), not as a separate tool the Orchestrator
-has to remember to call in order: same "deterministic sequencing in Python,
-not left to the model" reasoning as implementation.py's own checkout/commit
-handling.
-
-Turns a raw, possibly loose feature/bug brief into a finalized spec:
-Implementation Agent builds to it instead of the raw brief, and its
-acceptance_criteria are what Testing Agent's pre-prod pass (agents/testing.py)
-verifies the live deployment against -- deliberately WITHOUT codebase access
-there (see testing.py's own docstring), so criteria must describe observable,
-externally-verifiable behavior ("GET /apps returns 200 with a JSON list of
-registered apps"), never implementation details ("the list_apps function
-should..." -- something only readable from source, not exercisable from
-outside).
-
-The spec is persisted as a comment on the feature/bug's own tracking issue
-(github_issues.record_spec/get_spec, same pattern as
-record_in_progress_branch) so a resumed cycle (brain.py's resume_branch path)
-reuses the existing spec instead of regenerating -- and paying for -- one
-from scratch.
-"""
+"""Requirements Agent — runs before Implementation Agent, inside implement_feature (agents/brain.py), not as a separate tool the Orchestrator has to remember to call in order: same "deterministic sequencing in Python, not left to the model" reasoning as implementation.py's own checkout/commit handling."""
 
 from pathlib import Path
 

@@ -1,10 +1,4 @@
-"""Issue lifecycle write operations: in-progress branch tracking, spec storage,
-commit linking, and shipped/closed status transitions.
-
-Kept separate from github_issues.py's CRUD layer so that layer stays
-read-heavy and this one owns every mutation that changes an issue's state
-beyond its initial creation.
-"""
+"""Issue lifecycle write operations: in-progress branch tracking, spec storage, commit linking, and shipped/closed status transitions."""
 
 from __future__ import annotations
 
@@ -22,10 +16,6 @@ _SPEC_MARKER = "Spec (agentra):"
 _SPEC_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
 # Human-in-the-loop escalation (GitHub issue #34): resume-correlation data
-# stamped on a needs_human issue, same post/read-most-recent comment pattern
-# as the In-Progress-Branch/Spec markers above. Question is stored on one
-# line (newlines flattened by the caller) so a single-line regex can read it
-# back without needing a closing sentinel.
 _HUMAN_INPUT_MARKER = "Human-Input-Required (agentra):"
 _HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
 _HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
@@ -38,21 +28,7 @@ _HUMAN_INPUT_QUESTION_RE = re.compile(r"^Question: (.*)$", re.MULTILINE)
 def record_in_progress_branch(
     repo_url: str, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None
 ) -> None:
-    """Marks branch (and run_id for traceability) as where an interrupted
-    implement_feature call's work lives. Posted as a plain comment so
-    get_in_progress_branch can read the most recent one back without ever
-    touching the issue body, avoiding conflicts with record_shipped's own
-    body_suffix stamping on the same issue.
-
-    Without this, an interrupted cycle's code changes exist only on the
-    VM's local disk — gone the moment REPOS_ROOT gets re-cloned on
-    redeploy. Confirmed live: GitHub issue #13's fix was lost exactly
-    this way when run_local_tests failed and the cycle never reached
-    deploy_pre_prod.
-
-    session_id: the Claude session this issue's build is using, so a later
-    resumed cycle (get_in_progress_session_id) continues the same
-    conversation instead of cold-starting a new one for this issue."""
+    """Marks branch (and run_id for traceability) as where an interrupted implement_feature call's work lives."""
     body = f"In-Progress-Branch: {branch}"
     if run_id:
         body += f"\nRun-ID: {run_id}"
@@ -88,10 +64,7 @@ def get_in_progress_run_id(repo_url: str, issue_number: int) -> str | None:
 
 
 def get_in_progress_session_id(repo_url: str, issue_number: int) -> str | None:
-    """The Claude session_id alongside the most recent in-progress-branch
-    marker, or None. Same read pattern as get_in_progress_run_id -- a marker
-    recorded before this field existed (or a turn that never produced a
-    session_id) simply has no Session-ID line."""
+    """The Claude session_id alongside the most recent in-progress-branch marker, or None."""
     comments = list_comments(repo_url, issue_number)
     for comment in reversed(comments):
         body = comment.get("body") or ""
@@ -103,30 +76,18 @@ def get_in_progress_session_id(repo_url: str, issue_number: int) -> str | None:
 
 
 def record_commit(repo_url: str, issue_number: int, commit_sha: str) -> None:
-    """Links commit_sha on the tracking issue as a plain comment. GitHub
-    auto-links a bare 40-char sha to its commit in the same repo.
-
-    A tracking issue's work can span more than one commit (multi-part
-    features, resumed calls, self-heal fix-ups) — record_shipped's body
-    stamp only captures the last one, so this is the only place the full
-    commit history for an issue is visible."""
+    """Links commit_sha on the tracking issue as a plain comment."""
     add_comment(repo_url, issue_number, f"Commit: {commit_sha}")
 
 
 def record_spec(repo_url: str, issue_number: int, spec: dict) -> None:
-    """Persists Requirements Agent's finalized spec as a comment. Uses the
-    same post/read-most-recent pattern as record_in_progress_branch so a
-    resumed cycle can reuse the spec without regenerating it, and Testing
-    Agent's pre-prod pass has real acceptance_criteria to verify against
-    without codebase access."""
+    """Persists Requirements Agent's finalized spec as a comment."""
     body = f"{_SPEC_MARKER}\n\n```json\n{json.dumps(spec, indent=2)}\n```"
     add_comment(repo_url, issue_number, body)
 
 
 def get_spec(repo_url: str, issue_number: int) -> dict | None:
-    """Most recently recorded spec, or None. A corrupt stored comment is
-    treated the same as 'no spec yet' rather than raising, so it can't
-    block a new spec from being generated."""
+    """Most recently recorded spec, or None."""
     comments = list_comments(repo_url, issue_number)
     for comment in reversed(comments):
         body = comment.get("body") or ""
@@ -153,15 +114,7 @@ def record_human_input_context(
     session_id: str | None = None,
     tracking_issue: int | None = None,
 ) -> None:
-    """Stamps the resume-correlation data a HUMAN_INPUT_REQUIRED escalation
-    needs to resume later -- app id, run id, branch, Claude session_id, the
-    ORIGINAL tracking issue (implement_feature's resolves_id/sub_feature_of,
-    distinct from this needs_human issue itself -- None for an escalation
-    with no separate tracking issue, e.g. discover_opportunities), and the
-    original question -- onto the needs_human issue as a comment. This (not
-    a new database collection) is the single source of truth a resume reads
-    back via get_human_input_context, per the architecture review for
-    GitHub issue #34."""
+    """Stamps the resume-correlation data a HUMAN_INPUT_REQUIRED escalation needs to resume later -- app id, run id, branch, Claude session_id, the ORIGINAL tracking issue (implement_feature's resolves_id/sub_feature_of, distinct from this needs_human issue itself -- None for an escalation with no separate tracking issue, e.g."""
     question_line = " ".join(question.split())  # flatten to one line for the regex reader below
     body = f"{_HUMAN_INPUT_MARKER}\nApp: {app}\nRun-ID: {run_id}\n"
     if branch:
@@ -175,9 +128,7 @@ def record_human_input_context(
 
 
 def get_human_input_context(repo_url: str, issue_number: int) -> dict | None:
-    """The most recently stamped resume-correlation data for a needs_human
-    issue, or None if it was never stamped (e.g. an issue filed before this
-    existed)."""
+    """The most recently stamped resume-correlation data for a needs_human issue, or None if it was never stamped (e.g."""
     comments = list_comments(repo_url, issue_number)
     for comment in reversed(comments):
         body = comment.get("body") or ""
@@ -201,8 +152,6 @@ def get_human_input_context(repo_url: str, issue_number: int) -> dict | None:
 
 
 # Every marker this module posts as a plain comment, in one place, so
-# find_unanswered_human_input_comment (below) can recognize "one of ours"
-# and skip it rather than mistaking it for a human's reply.
 _INTERNAL_COMMENT_PREFIXES = (
     "In-Progress-Branch:",
     _SPEC_MARKER,
@@ -213,20 +162,7 @@ _INTERNAL_COMMENT_PREFIXES = (
 
 
 def find_unanswered_human_input_comment(repo_url: str, issue_number: int) -> str | None:
-    """Polling-based half of the GitHub-issue-comment answer channel -- no
-    inbound webhook (see connectors/slack.py's module docstring and
-    design.md for why Slack-reply-driven resume is deferred to its own
-    security review). Scans comments oldest-first for the first one posted
-    after the most recent Human-Input-Required marker that isn't itself one
-    of this module's own structured marker comments -- that is treated as
-    the human's answer. Returns None if the issue has no Human-Input-Required
-    marker yet, or nothing has been posted since it.
-
-    Best-effort and coarse: this can't tell a genuine answer from an
-    unrelated human comment on the same issue. Acceptable for a v1 --
-    record_human_answer removes the needs_human label the moment one is
-    found, so a stray comment can trigger at most one unwanted resume
-    attempt, not a silent infinite loop."""
+    """Polling-based half of the GitHub-issue-comment answer channel -- no inbound webhook (see connectors/slack.py's module docstring and design.md for why Slack-reply-driven resume is deferred to its own security review)."""
     comments = list_comments(repo_url, issue_number)
     marker_seen = False
     for comment in comments:  # oldest-first: the marker must come before its answer
@@ -245,12 +181,7 @@ def find_unanswered_human_input_comment(repo_url: str, issue_number: int) -> str
 
 
 def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
-    """Comments the human's answer onto the needs_human issue -- called once
-    a dashboard answer submission (or a GitHub-comment-driven resume via
-    find_unanswered_human_input_comment) has been accepted. Leaves the issue
-    open (a resumed run can still hit a second HUMAN_INPUT_REQUIRED);
-    memory.py's record_human_answer also strips the need_human label right
-    after this."""
+    """Comments the human's answer onto the needs_human issue -- called once a dashboard answer submission (or a GitHub-comment-driven resume via find_unanswered_human_input_comment) has been accepted."""
     body = f"Answered: {answer}"
     if resumed_run_key:
         body += f"\n\nResuming as run {resumed_run_key}."
@@ -260,11 +191,7 @@ def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_r
 def close_issue(
     repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
 ) -> None:
-    """Optionally posts comment then closes. body_suffix, if given, is
-    appended to the issue body before closing — unlike a comment, the body
-    is returned inline by the issues-list endpoint, so memory.py's
-    shipped_features() can read structured fields (run_id, commit_sha)
-    from a closed issue with the same list call, no per-issue follow-up."""
+    """Optionally posts comment then closes."""
     import httpx
     from agentra.connectors.github_issues import _headers, _owner_repo_or_raise
     from agentra.connectors.github_app import GITHUB_API
@@ -295,12 +222,7 @@ def close_issue(
 
 
 def mark_shipped(repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None) -> None:
-    """Like close_issue but leaves the issue OPEN and stamps 'status:shipped'.
-    A shipped feature stays open through the 'Ready to Review' stage; only
-    actual production promotion closes it (memory.py's mark_status_done,
-    called from server.py's _record_production_release). This keeps an
-    issue's open/closed state 1:1 with the dashboard's Ready to Review /
-    Release to Production split."""
+    """Like close_issue but leaves the issue OPEN and stamps 'status:shipped'."""
     import httpx
     from agentra.connectors.github_issues import _headers, _owner_repo_or_raise
     from agentra.connectors.github_app import GITHUB_API

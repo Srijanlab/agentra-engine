@@ -1,22 +1,4 @@
-"""Per-agent capability metadata for the dashboard's Agent card -- what
-each agent can actually do, which tools it's granted, and what permission
-tier each tool carries. Read by GET /agents/metadata (server.py) and
-AgentsPanel.tsx's card, replacing a per-agent "recent activity" feed with a
-durable profile that doesn't depend on any run having happened yet.
-
-Kept as one hand-maintained table rather than derived from each agent
-module's allowed_tools at import time: allowed_tools describes capability,
-not intent, and the skills prose here is what actually makes a card
-readable -- that doesn't exist as structured data anywhere else. When an
-agent's system prompt or allowed_tools changes, update its entry here too.
-
-Every agent below runs with permission_mode="bypassPermissions" (agents/
-base.py) -- there is no interactive "approve this tool call" step. The
-"permission" tier on each tool describes what class of action it grants,
-not an approval gate; the actual safety boundary is the Docker sandbox
-each agent runs inside plus agents/safety.py's PreToolUse hook, which
-blocks destructive Bash/Write/Edit patterns regardless of this table.
-"""
+"""Per-agent capability metadata for the dashboard's Agent card -- what each agent can actually do, which tools it's granted, and what permission tier each tool carries."""
 
 from typing import TypedDict
 
@@ -48,9 +30,7 @@ def _tools(*names: str) -> list[ToolPermission]:
 
 
 def _delegated(*names: str) -> list[ToolPermission]:
-    """The orchestrator's own tool surface -- not raw Claude tools, but
-    named actions that each delegate to one specialized agent's full run
-    (agents/brain.py's @tool-decorated functions)."""
+    """The orchestrator's own tool surface -- not raw Claude tools, but..."""
     return [{"name": n, "permission": "delegate"} for n in names]
 
 

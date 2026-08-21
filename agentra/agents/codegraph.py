@@ -1,32 +1,4 @@
-"""Local code-graph step (graphify), run against whatever app repo this
-cycle is pointed at -- not agentra's own source. Deterministic Python, not
-an LLM instruction (same reasoning as implementation.py's checkout/commit: a
-mechanical step that must actually happen belongs in plain code, not prose
-an agent might skip).
-
-Two entry points, split so a read never pays for a rebuild:
-- load_or_build(repo): reuse the existing graph as-is if one is already
-  present; only builds fresh the first time, when there's nothing to reuse
-  yet. Called wherever the codebase summary is assembled (codebase.py).
-- refresh(repo): incrementally re-extracts and re-clusters after a run that
-  may have changed code. Called once, at the end of Implementation Agent's
-  run (agents/implementation.py) -- not on every read -- so the graph is
-  current for the *next* cycle's reads without re-clustering on every single
-  read in between.
-
-Local only, by design: `graphify extract --code-only` parses with tree-sitter
-alone (no docs/PDF/image LLM extraction, no API key, nothing leaves the
-machine) and `cluster-only --no-label` skips the LLM community-naming pass
-too -- the whole thing stays AST-only and fully offline, since it runs
-unattended against arbitrary target repos inside a VM with no reason to
-spend API budget or trust an outbound call.
-
-graphify-out/ is excluded via .git/info/exclude (not the target repo's own
-.gitignore) so it never shows up as a diff in the app being worked on and
-never rides along in implementation.py's `git add -A` safety-net commit --
-this is agentra's own working data about the repo, not something that
-belongs in the target app's history.
-"""
+"""Local code-graph step (graphify), run against whatever app repo this cycle is pointed at -- not agentra's own source."""
 
 import subprocess
 from pathlib import Path
@@ -35,11 +7,6 @@ _EXCLUDE_LINE = "graphify-out/"
 _GRAPHIFY_TIMEOUT = 600
 
 # The subset of graphify-mcp's tools that are pure local reads against the
-# already-built graph.json -- excludes list_prs/get_pr_impact/triage_prs,
-# which hit the GitHub API (not local, not relevant to assessing a brief
-# that hasn't been implemented yet). Server name below ("graphify") is the
-# key callers use in mcp_servers={} and the mcp__<server>__<tool> prefix
-# Claude Code applies to every tool name.
 MCP_SERVER_NAME = "graphify"
 READ_ONLY_MCP_TOOLS = [
     f"mcp__{MCP_SERVER_NAME}__query_graph",
@@ -102,12 +69,7 @@ def _cluster_and_summarize(repo: Path, graph_json: Path) -> str:
 
 
 def load_or_build(repo: Path) -> str:
-    """Reuse the existing graph if one is already present -- just read and
-    summarize it, no rebuild, no re-cluster. Only builds fresh (extract +
-    cluster) the first time, when graphify-out/graph.json doesn't exist yet.
-    Best-effort: returns "" on any failure (missing `graphify` binary,
-    timeout, malformed repo) rather than raising -- this is context
-    enrichment, not something a cycle should abort over."""
+    """Reuse the existing graph if one is already present -- just read and summarize it, no rebuild, no re-cluster."""
     graph_json = repo / "graphify-out" / "graph.json"
     if graph_json.exists():
         return _summarize(graph_json, repo / "graphify-out" / "GRAPH_REPORT.md")
@@ -124,15 +86,7 @@ def load_or_build(repo: Path) -> str:
 
 
 def mcp_config(repo: Path) -> dict[str, dict]:
-    """The mcp_servers={} entry that gives a caller live, scoped graph
-    queries (see READ_ONLY_MCP_TOOLS) without opening full Bash -- for
-    agents like Architecture Review that are deliberately kept read-only.
-    Empty dict if no graph has been built yet for `repo` (load_or_build
-    builds one lazily on the *next* call that reads the codebase summary;
-    this function itself never builds anything, just points at what's
-    already there). A stdio server, spawned fresh per agent turn by the
-    Claude Agent SDK -- same lifecycle as every other tool call, no
-    standing process to manage."""
+    """The mcp_servers={} entry that gives a caller live, scoped graph queries (see READ_ONLY_MCP_TOOLS) without opening full Bash -- for agents like Architecture Review that are deliberately kept read-only."""
     graph_json = repo / "graphify-out" / "graph.json"
     if not graph_json.exists():
         return {}
@@ -140,11 +94,7 @@ def mcp_config(repo: Path) -> dict[str, dict]:
 
 
 def refresh(repo: Path) -> None:
-    """Incrementally update the graph (AST re-extraction only, no LLM, no
-    network) after a run that may have changed code. Best-effort and silent
-    -- called deterministically at the end of implementation.py's run(), not
-    something a cycle should ever fail over. No-ops if no graph has been
-    built yet; the next load_or_build call builds one fresh instead."""
+    """Incrementally update the graph (AST re-extraction only, no LLM, no network) after a run that may have changed code."""
     graph_json = repo / "graphify-out" / "graph.json"
     if not graph_json.exists():
         return

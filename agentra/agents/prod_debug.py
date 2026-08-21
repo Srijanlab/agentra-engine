@@ -1,12 +1,4 @@
-"""Production Debugging Agent (vision.md — post-launch monitoring).
-
-Runs on demand (`agentra debug-prod`) after a launch or when something looks
-wrong. Always read-only against production: it inspects logs and the
-codebase to find root cause, and proposes a fix — it never deploys anything
-itself. Whether that proposed fix gets built and shipped automatically is a
-decision the orchestrator makes based on the app's
-EnvironmentConfig.auto_remediate_prod flag, not this agent.
-"""
+"""Production Debugging Agent (vision.md — post-launch monitoring)."""
 
 from pathlib import Path
 

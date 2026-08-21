@@ -1,12 +1,4 @@
-"""connectors/github_project_mutations.py — write operations for GitHub Projects v2.
-
-Separated from github_projects.py's read layer so mutations are isolated:
-add_item_to_feature_project is the one public write path callers use
-(memory.py's record_shipped path). Internal helpers (_create_project,
-_create_status_field, _find_status_field, _issue_node_id, _existing_feature_project,
-ensure_feature_project) live in github_projects.py since they serve both read
-and write paths.
-"""
+"""connectors/github_project_mutations.py — write operations for GitHub Projects v2."""
 
 from __future__ import annotations
 
@@ -28,17 +20,7 @@ def add_item_to_feature_project(
     issue_number: int | None = None,
     status: str = "Todo",
 ) -> None:
-    """Adds/moves an item onto feature_issue_number's Project (provisioning
-    it first via ensure_feature_project if needed) and sets its Status.
-
-    issue_number defaults to feature_issue_number itself; pass a different
-    one to add/move one of its sub-issues instead. addProjectV2ItemById is
-    idempotent on content (adding an already-added issue returns the
-    existing item), so this is also how an item's card moves to a new
-    status without needing to track item ids anywhere.
-
-    Best-effort like everything else in github_projects.py: never raises,
-    so a Project sync failure never affects the Issue itself."""
+    """Adds/moves an item onto feature_issue_number's Project (provisioning it first via ensure_feature_project if needed) and sets its Status."""
     target_issue_number = feature_issue_number if issue_number is None else issue_number
     try:
         project = ensure_feature_project(repo_url, feature_issue_number, title)

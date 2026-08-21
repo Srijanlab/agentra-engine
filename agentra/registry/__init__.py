@@ -1,8 +1,4 @@
-"""agentra.registry — multi-app registry and durable inbox.
-
-Provides a custom ModuleType to delegate attribute lookups and modifications
-to registry/core.py. This keeps monkeypatching in unit tests working correctly.
-"""
+"""agentra.registry — multi-app registry and durable inbox."""
 
 from __future__ import annotations
 

@@ -1,8 +1,4 @@
-"""Codebase Understanding Agent (vision.md 5.2).
-
-Read-only scan of the target repo: framework, architecture, existing
-features. Output feeds every downstream agent, so it never touches Write/Edit/Bash.
-"""
+"""Codebase Understanding Agent."""
 
 import subprocess
 from dataclasses import replace
@@ -69,32 +65,7 @@ def _current_head_sha(repo: Path) -> str | None:
 
 
 async def run_cached(repo: Path, mem: Memory) -> AgentResult:
-    """Like run(), but skips the (real, multi-turn) LLM scan whenever a
-    cached summary already exists at all -- only runs a real scan the
-    first time, when architecture/codebase.md doesn't exist yet.
-
-    Previously this compared HEAD against the SHA the cache was generated
-    at, and only reused the cache on an exact match. That never actually
-    fired in practice: every cycle's own persist_audit_trail commits
-    .agentra/ bookkeeping (shipped.json, decisions, work_updates, and
-    codebase.md/design.md themselves) onto the same branch this scans, so
-    HEAD moves on every single cycle regardless of whether the real source
-    tree changed -- confirmed live via VM run logs, understand_codebase
-    paying for a full real scan on every cycle. Reported as "orchestrator
-    firing codebase agent every time even though codebase.md available"
-    (GitHub issue #20), whose own proposed fix is exactly this: call the
-    real scan only if the file is missing. Every call site that used to do
-    `cb = await codebase.run(repo); mem.write(...)` should call this
-    instead -- the mem.write() on a fresh generation happens here too, so
-    callers don't need to duplicate that.
-
-    Also folds in a code-graph excerpt for `repo` on every call, cache hit or
-    not (see agents/codegraph.py): reuses the existing graph as-is if one is
-    already built, since keeping it *current* is refresh()'s job -- called
-    once at the end of Implementation Agent's run, not on every read here.
-    The excerpt is appended to the *returned* text only, never persisted
-    into architecture/codebase.md itself, so the cached summary file stays
-    just the LLM's own scan and the graph context is always read fresh."""
+    """Like run(), but skips the (real, multi-turn) LLM scan whenever a cached summary already exists at all -- only runs a real scan the first time, when architecture/codebase.md doesn't exist yet."""
     cached_text = mem.read("architecture", "codebase")
     if cached_text:
         result = AgentResult(
@@ -111,10 +82,6 @@ async def run_cached(repo: Path, mem: Memory) -> AgentResult:
             design_notes = (result.json_data or {}).get("design_notes")
             if design_notes:
                 # architecture/design.md: a live, agent-maintained snapshot of
-                # actual design decisions/patterns found in the code -- like
-                # codebase.md, overwritten fresh each real scan, not an
-                # accumulating log (see memory.py's append_documentation for
-                # the deliberately different, changelog-style file).
                 mem.write("architecture", "design", design_notes)
             new_head = _current_head_sha(repo)
             if new_head is not None:

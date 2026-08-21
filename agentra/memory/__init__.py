@@ -1,28 +1,4 @@
-"""agentra.memory — persistent memory store scoped to the target repo.
-
-The five memory categories originally planned in vision.md section 9
-(architecture, decisions, features, metrics, failures) were audited:
-decisions/features/metrics had zero readers (pure duplication of
-documentation.md's changelog and git commit history); failures/*.md was
-replaced by record_failure()'s triage policy (permanent failure → GitHub
-Issue, transient → just logged). Only architecture/ remains, as live-maintained
-steering files (codebase.md, design.md, testing-notes.md, documentation.md).
-
-Known bugs, feature queue, shipped features, and objective all live directly
-in GitHub Issues/Variables — no local .agentra/*.json mirror. _repo_url()
-requires a github.com remote; there is deliberately no local-file fallback if
-GitHub is unreachable, a known availability tradeoff.
-
-Per-run logs, standup channel messages, and agent chat history moved to
-chat_store.py (server-side, AGENTRA_HOME) — they were never a fit for a
-customer's own git history.
-
-Submodule responsibilities:
-  core.py     — label constants, regex patterns, converter helpers
-  issues.py   — MemoryIssuesMixin (bugs, failures, lifecycle tracking)
-  features.py — MemoryFeaturesMixin (feature queue, shipped, released)
-  settings.py — MemorySettingsMixin (objective, sync state, logs, docs)
-"""
+"""agentra.memory — persistent memory store scoped to the target repo."""
 
 from __future__ import annotations
 
@@ -47,9 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
-    """Repo-scoped memory. All GitHub-backed methods require a github.com
-    HTTPS remote on `repo`; all filesystem-backed methods only need `repo`
-    to exist locally."""
+    """Repo-scoped memory."""
 
     def __init__(self, repo: Path) -> None:
         self.repo = repo
@@ -69,10 +43,6 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
             raise ValueError(f"unknown memory category: {category}")
         path = self.memory_root / category / f"{name}.md"
         # The category directory can vanish between __init__ and this call —
-        # implementation.py's _checkout_feature_branch does `git clean -fd .agentra/`
-        # then `git checkout -B <feature_branch>`, and git doesn't track empty
-        # directories, so a category with no committed file (e.g. a repo's first-ever
-        # feature under memory/features/) simply doesn't come back after that checkout.
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         return path
@@ -91,11 +61,7 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
         return path
 
     def _log_to_firestore(self, run_id: str, timestamp: str, content: str) -> None:
-        """Per-run logs were the one data type with no durable copy anywhere —
-        .agentra/logs/ is gitignored (verbose, not audit-trail material) and
-        REPOS_ROOT is VM-local-only, so a run's log was permanently gone the
-        moment its VM rebuilt. Best-effort and silently skipped if Firestore
-        isn't configured, same as every other Firestore mirror in this codebase."""
+        """Per-run logs were the one data type with no durable copy anywhere — .agentra/logs/ is gitignored (verbose, not audit-trail material) and REPOS_ROOT is VM-local-only, so a run's log was permanently gone the moment its VM rebuilt."""
         try:
             from agentra import registry
             from google.cloud import firestore as gcf
@@ -105,14 +71,12 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
                 return
             new_line = f"[{timestamp}] {content}"
             # Check document size before writing to avoid exceeding Firestore's
-            # 1MB limit. Get current doc, estimate new size, truncate if needed.
             try:
                 doc_ref = db.collection("run_logs").document(run_id)
                 current = doc_ref.get()
                 if current.exists:
                     lines = current.get("lines") or []
                     # Rough estimate: assume avg line ~100 bytes; if total lines
-                    # would exceed 900KB (leaving 100KB buffer), keep only last 500
                     if len(lines) > 500:
                         lines = lines[-500:]
                     lines.append(new_line)
@@ -131,11 +95,7 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
             logger.warning("log: failed to mirror run %s log line to Firestore", run_id, exc_info=True)
 
     def record_safety_denial(self, run_id: str, tool_name: str, pattern: str, detail: str) -> Path:
-        """Durable audit trail for agents/safety.py's guarded_pre_tool_use:
-        every blocked tool call gets a '[safety]'-tagged line in the run's log.
-        In practice the hook calls format_safety_denial_line through the ambient
-        run logger (base.py's run_log_scope) rather than this method — see
-        agents/safety.py. This method exists for callers that hold a Memory instance."""
+        """Durable audit trail for agents/safety.py's guarded_pre_tool_use: every blocked tool call gets a '[safety]'-tagged line in the run's log."""
         return self.log(run_id, format_safety_denial_line(tool_name, pattern, detail))
 
     def _repo_url(self) -> str | None:

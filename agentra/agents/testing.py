@@ -1,33 +1,4 @@
-"""Testing Agent (vision.md 5.7) — two distinct modes, not one.
-
-run_local() verifies the code itself: lint, typecheck, unit/integration
-tests, against the working directory. This is independent of Implementation
-Agent's own self-test loop (agents/implementation.py) so a broken "it works
-on my machine" self-report can still be caught — but it never touches a
-live, deployed instance, so it cannot catch problems that only exist once
-the app is actually running somewhere (build failures, missing production
-env vars, runtime misconfiguration, a route that 500s only when deployed).
-
-run_pre_prod() is the other half: independently verify the LIVE deployed
-pre-prod URL after deploy_pre_prod succeeds. Deliberately not a re-run of
-run_local()'s job — it assumes the code already passed local testing, and
-focuses on what only shows up once the artifact is actually deployed and
-serving traffic. It also captures a full-page screenshot of {preview_url}
-deterministically (agents/screenshot.py, not left to the LLM to script
-itself) to .agentra/test_artifacts/{run_id}/screenshot.png, for a human
-reviewing the run to see the actual live page rather than only reading the
-agent's prose report of it.
-
-run_pre_prod is deliberately black-box: it's given the feature's spec
-(agents/requirements.py's acceptance_criteria, not a codebase summary) and
-no Read/Glob/Grep on the repo at all -- only Bash, for curl-ing the live URL
-or running an already-configured e2e suite against it. Used to also receive
-codebase_summary and full filesystem access, which defeated the point: an
-agent that can just read the source to "verify" a feature is no longer
-independently checking the deployed artifact actually behaves correctly,
-it's re-reading code that might look right and still not work once
-deployed -- exactly the class of bug this pass exists to catch.
-"""
+"""Testing Agent — two distinct modes, not one."""
 
 import datetime as dt
 import json
@@ -171,9 +142,6 @@ Run the full local test/QA pass now, following your system prompt."""
     )
     if mem is not None and result.ok and result.json_data:
         # architecture/testing-notes.md: a live, agent-maintained snapshot
-        # of what test infra actually exists right now -- overwritten
-        # fresh each run, same freshness semantics as codebase.md, not an
-        # accumulating log.
         data = result.json_data
         lines = [
             f"Lint: {data.get('lint_status', 'unknown')}",
@@ -190,27 +158,12 @@ def screenshot_path(repo: Path, run_id: str) -> Path:
 
 
 def report_path(repo: Path, run_id: str) -> Path:
-    """The structured (JSON) test-report artifact for a run's live pre-prod
-    verification -- same test_artifacts/{run_id}/ directory as
-    screenshot_path and the human-readable report.md _write_report already
-    produces below, so a human reviewing a run's promotion has the
-    itemized per-criterion breakdown, the prose summary, and the
-    screenshot all in one place. Same durability tier as both: VM-local
-    only (test_artifacts/ is gitignored), lost on the next redeploy --
-    server.py's /runs/{run_key}/test-report route 404s the same way the
-    screenshot route does when this file never got written (e.g. this run
-    never ran live pre-prod verification at all)."""
+    """The structured (JSON) test-report artifact for a run's live pre-prod verification -- same test_artifacts/{run_id}/ directory as screenshot_path and the human-readable report.md _write_report already produces below, so a human reviewing a run's promotion has the itemized per-criterion breakdown, the prose summary, and the screenshot all in one place."""
     return repo / ".agentra" / "test_artifacts" / run_id / "report.json"
 
 
 def _persist_structured_report(repo: Path, run_id: str, data: dict, *, screenshot_captured: bool) -> None:
-    """Persists run_pre_prod's structured JSON verdict (status, per-criterion
-    test_cases, incidental findings, notes) for server.py's
-    /runs/{run_key}/test-report endpoint -- the dashboard's Review Promotion
-    panel reads this, distinct from _write_report's prose report.md below.
-    Written whenever the agent returned any parsed JSON at all, even a
-    failed run -- a human reviewing a failed pre-prod verification still
-    wants the itemized breakdown of what failed, not just a bare "fail"."""
+    """Persists run_pre_prod's structured JSON verdict (status, per-criterion test_cases, incidental findings, notes) for server.py's /runs/{run_key}/test-report endpoint -- the dashboard's Review Promotion panel reads this, distinct from _write_report's prose report.md below."""
     path = report_path(repo, run_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -228,14 +181,7 @@ def _persist_structured_report(repo: Path, run_id: str, data: dict, *, screensho
 
 
 def _write_report(repo: Path, run_id: str, spec: str, preview_url: str, result: AgentResult) -> None:
-    """Durable test report packet for a human to review, synthesizing the
-    verification verdict rather than just dumping raw JSON -- same directory
-    as the screenshot captured above. Every pre-prod verification gets one,
-    not just agentra-fixing-agentra's self-hosted path (EnvironmentConfig.
-    self_hosted_vm) -- that path just happens to have no public preview URL
-    to otherwise point a reviewer at, but the artifact is generically useful.
-    Best-effort: a failure to write this must never fail the verification
-    call itself."""
+    """Durable test report packet for a human to review, synthesizing the verification verdict rather than just dumping raw JSON -- same directory as the screenshot captured above."""
     data = result.json_data or {}
     lines = [
         f"# Pre-prod verification report — run {run_id}",
@@ -278,10 +224,7 @@ def _write_report(repo: Path, run_id: str, spec: str, preview_url: str, result: 
 async def run_pre_prod(
     repo: Path, spec: str, preview_url: str, run_id: str, session_id: str | None = None
 ) -> AgentResult:
-    """`spec` is the feature's requirements/acceptance criteria (agents/
-    requirements.py, formatted by the caller -- see brain.py's
-    verify_pre_prod), NOT a codebase summary -- this pass is deliberately
-    black-box, see this module's own docstring for why."""
+    """`spec` is the feature's requirements/acceptance criteria (agents/..."""
     from agentra.agents import screenshot
 
     ok, detail = await screenshot.capture(preview_url, screenshot_path(repo, run_id))

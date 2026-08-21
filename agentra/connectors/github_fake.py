@@ -1,9 +1,4 @@
-"""In-memory fake for github_issues/github_variables -- used by dev_seed.py
-(AGENTRA_DEV_MODE has no real GitHub App credentials, but known_bugs/
-feature_queue/objective/environments are GitHub-only now, with no local
-file fallback) and by tests that need a real create -> list -> mark-shipped/
-close round-trip without a live GitHub API call.
-"""
+"""In-memory fake for github_issues/github_variables -- used by dev_seed.py..."""
 
 from __future__ import annotations
 
@@ -15,29 +10,13 @@ from pathlib import Path
 
 
 def _repo_https_url(repo_url: str) -> str:
-    """Best-effort 'https://github.com/owner/repo' for building fake
-    html_url/issue links in dev mode -- handles both HTTPS and git@ SSH
-    forms. Falls back to the raw repo_url (still a usable, if odd-looking,
-    link) for anything that doesn't match either shape."""
+    """Best-effort 'https://github.com/owner/repo' for building fake html_url/issue links in dev mode -- handles both HTTPS and git@ SSH forms."""
     m = re.match(r"^(?:https://github\.com/|git@github\.com:)([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
     return f"https://github.com/{m.group(1)}/{m.group(2)}" if m else repo_url
 
 
 class FakeGitHubBackend:
-    """Namespaced by repo_url -- a real GitHub API is one repo per call,
-    and dev_seed.py seeds multiple fixture apps against one shared
-    instance of this backend, so un-namespaced storage would leak one
-    app's issues/variables into another's (confirmed live: agentra's
-    fixture picked up "cap"'s objective and bug count before this).
-
-    Optionally persists to `persist_path` as plain JSON -- dev.sh's
-    documented workflow seeds fixture data in one short-lived process
-    (`python3 -c "from agentra.dev_seed import seed; seed()"`) and then
-    starts `agentra serve` as a separate process; an in-memory-only fake
-    can't survive that process boundary, so dev mode needs this written
-    to disk under AGENTRA_HOME specifically (never under a target repo's
-    own .agentra/ -- that's the real "no local file" boundary this fake
-    doesn't cross)."""
+    """Namespaced by repo_url -- a real GitHub API is one repo per call, and dev_seed.py seeds multiple fixture apps against one shared instance of this backend, so un-namespaced storage would leak one app's issues/variables into another's (confirmed live: agentra's fixture picked up "cap"'s objective and bug count before this)."""
 
     def __init__(self, persist_path: Path | None = None) -> None:
         self.issues: dict[str, dict[int, dict]] = defaultdict(dict)
@@ -178,12 +157,6 @@ class FakeGitHubBackend:
         return None
 
     # Human-in-the-loop escalation (GitHub issue #34) -- same marker/regex
-    # shapes as github_issue_lifecycle.py's real implementation, reimplemented
-    # here (rather than relying on it) for the same reason every other method
-    # in this class is: github_issue_lifecycle.py binds add_comment/
-    # list_comments as local names at import time, so patching
-    # github_issues.add_comment later (this class's own methods, via
-    # install() below) would never reach it.
     _HUMAN_INPUT_MARKER = "Human-Input-Required (agentra):"
     _HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
     _HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
@@ -192,9 +165,6 @@ class FakeGitHubBackend:
     _HUMAN_INPUT_TRACKING_ISSUE_RE = re.compile(r"^Tracking-Issue: (\d+)$", re.MULTILINE)
     _HUMAN_INPUT_QUESTION_RE = re.compile(r"^Question: (.*)$", re.MULTILINE)
     # "Spec (agentra):" duplicated as a literal (not _SPEC_MARKER) -- that
-    # class attribute is defined later in this same class body, below
-    # record_commit, and isn't available yet at this point during class
-    # construction.
     _INTERNAL_COMMENT_PREFIXES = ("In-Progress-Branch:", "Spec (agentra):", "Commit:", _HUMAN_INPUT_MARKER, "Answered:")
 
     def record_human_input_context(
@@ -338,19 +308,7 @@ class FakeGitHubBackend:
 
 
 def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_path: Path | None = None) -> FakeGitHubBackend:
-    """Patches the github_issues/github_variables modules in place with
-    `backend`'s methods -- callers (memory.py, environments.py) always go
-    through the module object at call time (`from agentra.connectors
-    import github_issues; github_issues.create_issue(...)`), never bind a
-    function reference at import time, so reassigning these attributes
-    here is enough for every existing call site to pick it up.
-
-    Pass `monkeypatch` (a pytest fixture) from tests so the patch reverts
-    after the test -- dev_seed.py calls this with no monkeypatch, since
-    its process never has real GitHub credentials anyway and the patch is
-    meant to live for the whole `agentra dev` process. Without this, a
-    test-only direct assignment would permanently mutate these modules
-    for every test file that runs afterward in the same pytest process."""
+    """Patches the github_issues/github_variables modules in place with `backend`'s methods -- callers (memory.py, environments.py) always go through the module object at call time (`from agentra.connectors import github_issues; github_issues.create_issue(...)`), never bind a function reference at import time, so reassigning these attributes here is enough for every existing call site to pick it up."""
     from agentra.connectors import github_issues, github_variables
 
     backend = backend or FakeGitHubBackend(persist_path=persist_path)

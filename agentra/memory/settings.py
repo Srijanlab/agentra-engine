@@ -1,8 +1,4 @@
-"""memory/settings.py — MemorySettingsMixin.
-
-Covers objective get/set (GitHub Variables), feedback sync state,
-codebase spec cache, standup log reading, and documentation changelog append.
-"""
+"""memory/settings.py — MemorySettingsMixin."""
 
 from __future__ import annotations
 
@@ -15,9 +11,7 @@ from agentra.memory.core import _OBJECTIVE_VARIABLE
 
 
 class MemorySettingsMixin:
-    """Mixin for Memory: objective, feedback sync state, codebase spec commit,
-    recent log lines, and documentation changelog. Assumes self._repo_url()
-    is defined on the base class."""
+    """Mixin for Memory: objective, feedback sync state, codebase spec commit, recent log lines, and documentation changelog."""
 
     def get_objective(self) -> str | None:
         repo_url = self._repo_url()
@@ -57,10 +51,7 @@ class MemorySettingsMixin:
         self.feedback_sync_state_path.write_text(json.dumps({"last_synced_at": last_synced_at}, indent=2))
 
     def codebase_spec_commit(self) -> str | None:
-        """The commit SHA the last architecture/codebase.md scan was generated at.
-        Implementation Agent is the only agent that commits source changes, so an
-        unchanged HEAD since this SHA means the cached scan is still accurate —
-        see agents/codebase.py's run_cached()."""
+        """The commit SHA the last architecture/codebase.md scan was generated at."""
         if not self.codebase_spec_commit_path.exists():
             return None
         import json
@@ -73,10 +64,7 @@ class MemorySettingsMixin:
         self.codebase_spec_commit_path.write_text(json.dumps({"commit_sha": commit_sha}, indent=2))
 
     def recent_log_lines(self, since: dt.datetime) -> list[str]:
-        """Every timestamped line across all run logs at or after `since`,
-        oldest first. Run logs are the only append-only, per-event record in
-        .agentra/ itself — known_bugs()/feature_queue() are current snapshots
-        of GitHub's open issues, with no history of *when* an entry was added."""
+        """Every timestamped line across all run logs at or after `since`, oldest first."""
         lines: list[str] = []
         if not self.log_root.is_dir():
             return lines
@@ -95,11 +83,7 @@ class MemorySettingsMixin:
         return lines
 
     def append_documentation(self, entry: str) -> None:
-        """Appends one dated line to architecture/documentation.md's running
-        changelog instead of overwriting the whole file — the top of
-        documentation.md is a static architecture description (human-edited
-        via the dashboard), the changelog lives below it so recording a
-        shipped feature never clobbers that description."""
+        """Appends one dated line to architecture/documentation.md's running..."""
         existing = self.read("architecture", "documentation") or ""
         marker = "## Changelog"
         if marker not in existing:

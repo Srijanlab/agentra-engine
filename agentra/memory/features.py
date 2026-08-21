@@ -1,8 +1,4 @@
-"""memory/features.py — MemoryFeaturesMixin.
-
-Covers the feature backlog lifecycle: queue, in-progress, shipped, released,
-and the record_shipped branching logic (simple single-call, multi-part, sub-issue).
-"""
+"""memory/features.py — MemoryFeaturesMixin."""
 
 from __future__ import annotations
 
@@ -24,9 +20,7 @@ from agentra.memory.core import (
 
 
 class MemoryFeaturesMixin:
-    """Mixin for Memory: feature queue, shipped/released records, and the full
-    record_shipped branching logic. Assumes self._repo_url() and self._find_similar_open()
-    are defined on the base class (the latter comes from MemoryIssuesMixin)."""
+    """Mixin for Memory: feature queue, shipped/released records, and the full record_shipped branching logic."""
 
     def feature_queue(self) -> list[dict]:
         """Open 'feature'-labeled issues not yet shipped — excludes ones
@@ -46,11 +40,7 @@ class MemoryFeaturesMixin:
             return []
 
     def in_progress_features(self) -> list[dict]:
-        """Open 'feature'-labeled issues that already have at least one
-        COMPLETED sub-issue — meaning real work has started, not just that
-        sub-issues exist (a feature can be broken into planned sub-issues
-        with zero of them completed). Confirmed live: issue #2 sat with two
-        open, unstarted sub-issues and still got surfaced here ahead of real bugs."""
+        """Open 'feature'-labeled issues that already have at least one COMPLETED sub-issue — meaning real work has started, not just that sub-issues exist (a feature can be broken into planned sub-issues with zero of them completed)."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("in_progress_features: %s has no github.com remote -- no in-progress features are visible", self.repo)
@@ -75,10 +65,7 @@ class MemoryFeaturesMixin:
             return []
 
     def shipped_features(self) -> list[dict]:
-        """Each entry: {feature, commit_sha, run_id, session_id, ts, updated_at, external_id, status_done}.
-        A shipped feature is open+status:shipped (Ready to Review) or
-        closed (Release to Production; status_done=True). Parsed back from
-        the body stamp record_shipped writes — no local shipped.json."""
+        """Each entry: {feature, commit_sha, run_id, session_id, ts, updated_at, external_id, status_done}."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("shipped_features: %s has no github.com remote -- shipped history is unreadable", self.repo)
@@ -107,41 +94,7 @@ class MemoryFeaturesMixin:
         session_id: str | None = None,
         known_bug_issue: str | None = None,
     ) -> dict | None:
-        """Records a shipped feature as an open 'feature'-labeled issue stamped
-        'status:shipped' — the same ledger feature_queue() and shipped_features()
-        read, so pending/shipped/released is just an issue's own state/labels.
-
-        known_bug_issue: set when this call resolves a known bug (not a
-        feature_queue item) whose caller is ALSO calling clear_known_bug() on
-        the same issue number right after this returns -- that call already
-        stamps status:shipped and posts its own resolution comment on the bug
-        issue itself, so this just reuses that number as board_issue_number
-        without posting a second, redundant "Shipped as ..." comment (unlike
-        resolves_id below, which does post one, since nothing else does for
-        the feature_queue case). Without this, a known-bug fix had no way to
-        tell record_shipped which issue it belongs to, so the fallback path's
-        similarity check (comparing the shipped feature's generated title
-        against each open bug's original diagnosis text) had to guess --
-        confirmed live to miss and create an orphaned duplicate (issue #33,
-        which should have matched #21).
-
-        Three paths:
-        - sub_feature_of set: continues a multi-part feature (existing parent).
-          Creates+closes a sub-issue for this part; marks the parent shipped
-          when more_parts_expected=False.
-        - sub_feature_of unset, more_parts_expected=True: starts a new multi-part
-          feature. resolves_id becomes the parent (or a fresh parent is created).
-        - Neither: simple single-call feature. resolves_id (if set) is marked
-          shipped directly; otherwise runs a similarity check against open bugs/
-          features to avoid creating a duplicate orphan issue (confirmed live —
-          three times, issues #13/#16, #1/#19, #6/#15 — implement_feature didn't
-          always pass resolves_id).
-
-        session_id: the Claude session that built this feature, stamped as
-        Shipped-Session-ID so a later promote can resume it instead of
-        starting a disconnected fresh session.
-
-        Returns {issue_number, board_issue_number} on success, None on failure."""
+        """Records a shipped feature as an open 'feature'-labeled issue stamped 'status:shipped' — the same ledger feature_queue() and shipped_features() read, so pending/shipped/released is just an issue's own state/labels."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_shipped: %s has no github.com remote -- shipped feature %r was NOT recorded anywhere", self.repo, feature)
@@ -188,20 +141,11 @@ class MemoryFeaturesMixin:
 
             elif known_bug_issue and known_bug_issue.isdigit():
                 # No mark_shipped/comment here -- the caller's own clear_known_bug()
-                # call on this same issue number handles that (status:shipped label +
-                # its own resolution comment). This branch exists purely so the known
-                # issue number is used directly instead of falling through to the
-                # fuzzy-match safety net below, which is what actually created #33.
                 issue_number = int(known_bug_issue)
                 board_issue_number = issue_number
 
             else:
                 # Safety net: implement_feature's caller is supposed to pass resolves_id
-                # when this call resolves a known bug or feature-queue item, but confirmed
-                # live it doesn't always. A known-bug fix NEVER reaches the resolves_id
-                # path (brain.py only forwards it for resolves_origin=="feature_queue").
-                # Without this check, the original backlog entry stays open forever while
-                # an orphaned fresh issue carries the shipped record.
                 duplicate_of = self._find_similar_open(feature, self.known_bugs(), "diagnosis") or self._find_similar_open(feature, self.feature_queue(), "description")
                 if duplicate_of and duplicate_of.isdigit():
                     issue_number = int(duplicate_of)
@@ -219,10 +163,7 @@ class MemoryFeaturesMixin:
         return {"issue_number": issue_number, "board_issue_number": board_issue_number}
 
     def released_features(self) -> list[dict]:
-        """Each entry: {feature, commit_sha, ts, release_run_id} — the production
-        release ledger. Intentionally separate from shipped_features(): shipped
-        means 'implemented and in pre-prod'; released means 'made it to prod'.
-        Older released.json files that only contain a plain list[str] are normalized."""
+        """Each entry: {feature, commit_sha, ts, release_run_id} — the production release ledger."""
         if not self.released_path.exists():
             return []
         raw = json.loads(self.released_path.read_text())
@@ -261,19 +202,7 @@ class MemoryFeaturesMixin:
         title: str | None = None,
         extra_labels: list[str] | None = None,
     ) -> dict | None:
-        """`title` (from the dashboard's form) becomes the issue's actual title;
-        `description` is recorded as a 'Description: ...' body line (same
-        pattern as record_known_bug's title param).
-
-        extra_labels is additive on top of the standard [_FEATURE_LABEL,
-        _AGENTRA_LABEL] pair (e.g. discover_opportunities passes
-        [core._DISCOVERY_LABEL] -- see that constant's docstring in
-        memory/core.py) -- never _BUG_LABEL; a feature request always goes
-        through this path, never record_known_bug's.
-
-        Returns {"number": int, "html_url": str} for the created issue, or
-        None if it could not be recorded anywhere (no repo_url, or the
-        GitHub API call failed)."""
+        """`title` (from the dashboard's form) becomes the issue's actual title; `description` is recorded as a 'Description: ...' body line (same pattern as record_known_bug's title param)."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_feature_request: %s has no github.com remote -- feature %r was NOT recorded anywhere", self.repo, description)

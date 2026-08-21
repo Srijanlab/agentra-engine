@@ -26,12 +26,6 @@ STALE_PROCESSING_SECONDS = 10 * 60
 REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 
 # Human-in-the-loop escalation (GitHub issue #34): how long a run may sit in
-# "waiting_for_human" before reconcile_waiting_for_human() auto-escalates it
-# (re-notifies Slack and flips its status to "escalated") rather than leaving
-# it silently stuck forever. Configurable per deployment since "how long is
-# too long to wait on a human" is itself a judgment call, not something this
-# codebase should hardcode -- default is generous (24h) since escalating too
-# eagerly just spams the same channel with duplicate asks.
 HUMAN_INPUT_MAX_WAIT_SECONDS = float(os.environ.get("AGENTRA_HUMAN_INPUT_MAX_WAIT_HOURS", "24")) * 3600
 
 
@@ -106,12 +100,6 @@ def remove_app(name: str) -> bool:
 
 def _remote_head_sha(repo_url: str, branch: str) -> str | None:
     # git_ops.remote_head_sha, not a bare `git ls-remote` -- this used to run
-    # unauthenticated here, bypassing the GitHub App installation-token path
-    # every other git operation in this codebase goes through (same failure
-    # class implementation.py's _checkout_feature_branch hit and fixed for
-    # its own calls). Since get_app_repo runs on nearly every dashboard/API
-    # request, the unauthenticated version 403'd continuously against any
-    # repo only the App token covers, flooding the logs on every poll.
     from agentra.agents.git_ops import remote_head_sha
 
     sha = remote_head_sha(repo_url, branch)
@@ -141,14 +129,6 @@ def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
         logger.info("get_app_repo: %s is not a git checkout, skipping remote resync", repo)
         return
     # get_app_repo runs on nearly every dashboard/API request -- without this,
-    # each one paid for a live `git ls-remote` network round trip just to find
-    # out (almost always) that nothing had changed since the last request a
-    # few seconds ago. A 30s per-repo throttle keeps staleness detection
-    # effectively real-time for anything that matters (a human working in the
-    # repo, another agent's push) while cutting the actual git traffic by
-    # roughly the polling-interval-to-throttle-interval ratio -- confirmed
-    # live this was a major contributor to how much of every cycle/request
-    # was spent on git plumbing rather than real work.
     key = str(repo)
     now = time.monotonic()
     last_checked = _last_sync_check.get(key)

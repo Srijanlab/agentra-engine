@@ -58,11 +58,7 @@ def loop_id_for(objective: str) -> str:
 
 
 def list_loops(app: str | None = None) -> list[dict]:
-    """Group runs by loop_id and return loop summaries, newest loop first.
-
-    Each loop's `runs` list is ordered newest first (by started_at, descending),
-    matching the ordering used by list_runs() and the loop-to-loop sort below.
-    """
+    """Group runs by loop_id and return loop summaries, newest loop first."""
     runs = [r for r in list_runs(limit=1000) if (app is None or r.get("app") == app) and r.get("loop_id")]
     steps = list_agent_steps(app=app, limit=2000)
     steps_by_run_key: dict[str, list[dict]] = {}
@@ -137,31 +133,12 @@ def reconcile_stale_runs() -> list[str]:
 
 
 def list_waiting_for_human(limit: int = 200) -> list[dict]:
-    """Runs currently parked in the 'waiting_for_human' state -- backs the
-    dashboard's 'Needs your input' panel. Deliberately excludes 'escalated'
-    (past its max-wait timeout, see reconcile_waiting_for_human) so the
-    panel's own polling loop (see reconcile_waiting_for_human's docstring)
-    is the only thing that has to reason about that distinction; the panel
-    itself still shows escalated runs, just with a distinct badge -- see
-    server/routes/human_input.py."""
+    """Runs currently parked in the 'waiting_for_human' state -- backs the dashboard's 'Needs your input' panel."""
     return [r for r in list_runs(limit=limit) if r.get("status") in ("waiting_for_human", "escalated")]
 
 
 def reconcile_waiting_for_human() -> list[dict]:
-    """Human-in-the-loop escalation (GitHub issue #34): a run sitting in
-    'waiting_for_human' must never silently stay there forever with no
-    further signal -- past core.HUMAN_INPUT_MAX_WAIT_SECONDS since it
-    started waiting, flip it to the distinguishable 'escalated' state so a
-    human looking at the dashboard (or a re-sent Slack message, dispatched
-    by the caller using the human_input context this returns) can tell
-    "still within normal wait" from "this has been sitting here too long."
-
-    Pure state transition only, no outbound calls (GitHub/Slack) -- keeps
-    registry/ dependency-free of connectors/, same layering as the rest of
-    this module. Callers (server/routes/human_input.py) re-notify using the
-    human_input dict on each returned record. Returns the list of run
-    records that were just escalated this call, so a caller doesn't have to
-    re-scan to find out what changed."""
+    """Human-in-the-loop escalation (GitHub issue #34): a run sitting in 'waiting_for_human' must never silently stay there forever with no further signal -- past core.HUMAN_INPUT_MAX_WAIT_SECONDS since it started waiting, flip it to the distinguishable 'escalated' state so a human looking at the dashboard (or a re-sent Slack message, dispatched by the caller using the human_input context this returns) can tell "still within normal wait" from "this has been sitting here too long."  Pure state transition only, no outbound calls (GitHub/Slack) -- keeps registry/ dependency-free of connectors/, same layering as the rest of this module."""
     now = time.time()
     escalated: list[dict] = []
     for run in list_runs(limit=500):

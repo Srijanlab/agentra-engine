@@ -141,17 +141,7 @@ async def get_run_screenshot(run_key: str) -> FileResponse:
 
 @app.get("/runs/{run_key}/test-report")
 async def get_run_test_report(run_key: str) -> dict:
-    """Structured, itemized test-case results from the Testing Agent's live
-    pre-prod verification (agents/testing.py's run_pre_prod) -- the data
-    behind the dashboard's 'Review promotion' panel, so a human sees each
-    acceptance criterion's pass/fail (plus the reachability check) before
-    clicking Promote, not just a single aggregate verdict.
-
-    Same 404-if-absent pattern as /runs/{run_key}/screenshot: most runs
-    never ran live pre-prod verification at all (source='promote', or an
-    app with no live preview URL configured), so a 404 here is the common
-    case, not a real error -- the dashboard falls back to today's plain
-    promotion messaging rather than blocking promotion on it."""
+    """Structured, itemized test-case results from the Testing Agent's live pre-prod verification (agents/testing.py's run_pre_prod) -- the data behind the dashboard's 'Review promotion' panel, so a human sees each acceptance criterion's pass/fail (plus the reachability check) before clicking Promote, not just a single aggregate verdict."""
     run = _active_runs.get(run_key) or registry.get_run(run_key)
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run_key")

@@ -1,13 +1,4 @@
-"""GitHub Actions repository Variables -- plain-text config, unlike
-Secrets (which are write-only and can't be read back), authenticated via
-the same installation-token minting github_app.py already does for git
-operations and github_issues.py's backlog sync.
-
-Used as the authoritative store for environments.yaml/objective.yaml
-config when the target repo has a github.com remote and the App has the
-"Variables" repository permission, falling back to the local YAML mirror
-otherwise -- same hybrid pattern as connectors/github_issues.py.
-"""
+"""GitHub Actions repository Variables -- plain-text config, unlike Secrets (which are write-only and can't be read back), authenticated via the same installation-token minting github_app.py already does for git operations and github_issues.py's backlog sync."""
 
 from __future__ import annotations
 
@@ -34,10 +25,7 @@ def _headers(repo_url: str) -> dict[str, str]:
 
 
 def list_variables(repo_url: str) -> dict[str, str]:
-    """Every repo-level Actions variable, name -> value, in one paginated
-    sweep -- callers that need several named variables (environments.py's
-    ~11 AGENTRA_* fields) should call this once and look up locally rather
-    than making one HTTP round-trip per variable."""
+    """Every repo-level Actions variable, name -> value, in one paginated..."""
     owner_repo = _owner_repo_or_raise(repo_url)
     headers = _headers(repo_url)
     variables: dict[str, str] = {}
@@ -60,9 +48,7 @@ def list_variables(repo_url: str) -> dict[str, str]:
 
 
 def set_variable(repo_url: str, name: str, value: str) -> None:
-    """Creates the variable if it doesn't exist yet, updates it otherwise
-    -- GitHub's API has no upsert endpoint, so this tries PATCH (update)
-    first and falls back to POST (create) on a 404."""
+    """Creates the variable if it doesn't exist yet, updates it otherwise..."""
     owner_repo = _owner_repo_or_raise(repo_url)
     headers = _headers(repo_url)
     resp = httpx.patch(

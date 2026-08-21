@@ -35,14 +35,7 @@ def _actionable_bugs(bugs: list[dict]) -> list[dict]:
 
 
 def _format_spec(spec: dict, human_answer: str | None = None) -> str:
-    """Requirements Agent's JSON spec formatted as readable text.
-
-    human_answer: human-in-the-loop escalation (GitHub issue #34) -- when
-    resuming an implement_feature call that previously hit
-    HUMAN_INPUT_REQUIRED, the human's answer to the blocking question gets
-    woven directly into this spec text (not just the outer cycle prompt),
-    so the Implementation Agent's resumed turn sees it as part of what it's
-    building, not as a detached side note it might not read."""
+    """Requirements Agent's JSON spec formatted as readable text."""
     lines = [f"Spec: {spec.get('spec', '')}"]
     criteria = spec.get("acceptance_criteria") or []
     if criteria:
@@ -73,25 +66,7 @@ def _has_active_feature_branches(repo: Path) -> bool:
 
 
 def _file_top_opportunity_as_feature_request(session: OrchestratorSession, opportunities: list[dict]) -> dict | None:
-    """When the backlog is genuinely empty (no in-progress feature, no
-    actionable known bug, no queued feature request -- the same emptiness
-    that already makes discover_opportunities the documented last resort in
-    check_backlog's own tool description), durably files the single
-    top-ranked opportunity as a real GitHub feature-request issue (issue
-    #23) so it shows up in check_backlog's feature queue on a future cycle
-    like any other GitHub-sourced feature request.
-
-    Deliberately goes through record_feature_request (feature/agentra/
-    discovery labels) -- never record_known_bug/needs_human. An opportunity
-    is not a bug and must never carry the bug label or trigger a human
-    escalation. Re-checks emptiness live here rather than trusting the
-    caller already confirmed it earlier this turn (state can change
-    between calls), and only ever files opportunities[0] -- one issue per
-    empty-backlog occurrence, regardless of how many were ranked.
-
-    Returns the created issue's {"number", "html_url"} (per
-    Memory.record_feature_request), or None if the backlog wasn't actually
-    empty, there was nothing to file, or filing failed."""
+    """When the backlog is genuinely empty (no in-progress feature, no actionable known bug, no queued feature request -- the same emptiness that already makes discover_opportunities the documented last resort in check_backlog's own tool description), durably files the single top-ranked opportunity as a real GitHub feature-request issue (issue #23) so it shows up in check_backlog's feature queue on a future cycle like any other GitHub-sourced feature request."""
     if not opportunities:
         return None
     if session.mem.in_progress_features() or _actionable_bugs(session.mem.known_bugs()) or session.mem.feature_queue():
@@ -113,39 +88,7 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
 
 
 def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: AgentResult) -> dict | None:
-    """GitHub issue #42: a Claude Code CLI auth/login failure
-    (result.auth_failure, set distinctly by agents/base.py's run_agent) is
-    an infra-level problem -- no retry, no different tool call, no
-    different brief will fix it, only a human running `claude /login`.
-    Checked first, immediately after every single agent-subprocess call in
-    this file (understand_codebase, discover_opportunities,
-    assess_design_impact, implement_feature (incl. its self-heal retry),
-    run_local_tests, deploy_pre_prod, verify_pre_prod, assess_feedback,
-    spawn_custom_agent) -- before that tool's own ok/not-ok handling, so
-    this class of failure is detected the same way everywhere an agent
-    subprocess can be invoked, not just at run_autonomous_cycle's own
-    top-level query() call.
-
-    Files the needs_human/blocking_agentra bug -- which also sends the
-    Slack escalation with a clear, actionable message, see
-    Memory.record_failure/_notify_claude_code_auth_failure -- and ends
-    THIS cycle immediately via hard_stop_reason, bypassing the normal
-    MAX_CONSECUTIVE_TOOL_FAILURES count entirely: a second tool call this
-    same cycle would just hit the identical missing credentials, so
-    waiting for two consecutive failures before stopping would only burn
-    more cost/turns for no benefit ("fails fast without burning further
-    retries/cost"). Since the bug is filed blocking_agentra=True, a *future*
-    cycle only gets one more cheap, zero-retry attempt before hitting this
-    exact same short-circuit again (run_autonomous_cycle's blocking_bugs()
-    pre-flight check no longer hard-stops purely on an open auth-classified
-    bug -- see clear_resolved_auth_bugs) -- so this can't perpetually
-    resurface as fresh Slack noise/duplicate issues either way. Also sets
-    session.auth_failure_this_cycle=True so that same self-clearing logic
-    knows *this* run is not proof of a working re-authentication.
-
-    Returns the tool's is_error response dict if this was in fact an auth
-    failure (the caller should return it immediately, before any of its
-    own further processing of `result`), or None otherwise."""
+    """GitHub issue #42: a Claude Code CLI auth/login failure (result.auth_failure, set distinctly by agents/base.py's run_agent) is an infra-level problem -- no retry, no different tool call, no different brief will fix it, only a human running `claude /login`."""
     if not result.auth_failure:
         return None
     session.auth_failure_this_cycle = True
@@ -169,36 +112,7 @@ def _escalate_to_human(
     branch: str | None = None,
     tracking_issue: int | None = None,
 ) -> int | None:
-    """Human-in-the-loop escalation (GitHub issue #34), shared by
-    implement_feature and discover_opportunities' HUMAN_INPUT_REQUIRED
-    branches (deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly
-    out of scope for this -- see deploy_pre_prod's own handling, left
-    untouched). Does everything the architecture review scoped for this
-    part beyond the pre-existing needs_human GitHub issue filing:
-
-    1. Stamps resume-correlation data (app, run_id, branch, session_id,
-       tracking_issue, question) onto the filed/updated needs_human issue.
-    2. Posts an outbound Slack notification if SLACK_BOT_TOKEN/
-       SLACK_HUMAN_INPUT_CHANNEL are configured -- silently skipped
-       otherwise (see connectors/slack.py), never surfaced as a run
-       failure.
-    3. Marks the run waiting_for_human immediately (session.mark_waiting_for_human).
-
-    tracking_issue: the ORIGINAL feature/bug issue this escalation is
-    blocking (implement_feature's resolves_id/sub_feature_of), distinct
-    from the needs_human issue number this function returns -- a resume
-    dispatched later (server/routes/human_input.py) reads this back via
-    Memory.get_human_input_context to know which implement_feature call to
-    continue and which tracking issue's spec to weave the human's answer
-    into (see _format_spec's human_answer param). None for
-    discover_opportunities, which has no resume contract in this pass.
-
-    Returns the needs_human issue number (or None if GitHub was
-    unreachable/unconfigured -- matching every other best-effort write in
-    memory.py), so implement_feature can also stamp record_in_progress_branch/
-    record_spec on it to make the escalation issue itself resumable when
-    there's no separate tracking issue (a self-initiated idea with no
-    resolves_id/sub_feature_of)."""
+    """Human-in-the-loop escalation (GitHub issue #34), shared by implement_feature and discover_opportunities' HUMAN_INPUT_REQUIRED branches (deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this -- see deploy_pre_prod's own handling, left untouched)."""
     issue_number = session.mem.record_known_bug(
         session.run_id, "medium", diagnosis,
         "Requires an explicit human decision -- not an implementation/discovery failure, "
@@ -378,11 +292,6 @@ def _tools_for(session: OrchestratorSession) -> list:
             if options:
                 diagnosis += f"\n\nOptions considered: {options}"
             # No resume contract for discover_opportunities (out of scope for this
-            # part, per the architecture review -- resuming discovery with an
-            # answer is a separate future feature): _escalate_to_human still files
-            # the needs_human issue, notifies Slack, and marks this run
-            # waiting_for_human, but passes branch=None since there is no
-            # branch/session for a human's answer to resume onto here.
             _escalate_to_human(
                 session,
                 diagnosis=diagnosis,
@@ -413,12 +322,6 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.record_success("discover_opportunities")
 
         # Backlog-empty auto-filing (issue #23): discover_opportunities is
-        # only ever reached as a last resort once check_backlog has nothing
-        # left -- when that's genuinely true, durably file the single
-        # top-ranked opportunity as a real GitHub feature-request issue
-        # (never a bug/needs_human escalation) so it survives past this
-        # run and flows into check_backlog's queue like any other
-        # GitHub-sourced feature request next cycle.
         filed = _file_top_opportunity_as_feature_request(session, opportunities)
         text = json.dumps(opportunities, indent=2)
         if filed:
@@ -509,14 +412,6 @@ def _tools_for(session: OrchestratorSession) -> list:
                 if tracking_issue is not None:
                     session.mem.record_spec(tracking_issue, spec_dict)
         # Human-in-the-loop escalation (GitHub issue #34): if this session was
-        # itself dispatched as a resume from a human's answer AND this
-        # particular implement_feature call is for the tracking issue that
-        # answer belongs to, weave it into the spec text so the Implementation
-        # Agent's resumed turn sees it as part of what it's building (see
-        # _format_spec's human_answer param). Consumed (cleared) immediately
-        # after use so a later implement_feature call this same cycle -- e.g.
-        # a multi-part feature's next part -- doesn't get a stale answer
-        # re-injected into an unrelated spec.
         human_answer_for_this_call = None
         if session.human_answer and tracking_issue is not None and tracking_issue == session.human_answer_issue:
             human_answer_for_this_call = session.human_answer
@@ -583,13 +478,6 @@ def _tools_for(session: OrchestratorSession) -> list:
             if options:
                 diagnosis += f"\n\nOptions considered: {options}"
             # Human-in-the-loop escalation (GitHub issue #34): implement_feature
-            # is THE flow with an existing resume contract (feature_branch +
-            # session_id), so route through _escalate_to_human rather than a
-            # bare record_known_bug -- this additionally stamps resume
-            # correlation data (including tracking_issue, so a later resume's
-            # answer gets woven back into THIS issue's spec, see above),
-            # posts the Slack notification, and marks the run waiting_for_human
-            # immediately.
             _escalate_to_human(
                 session,
                 diagnosis=diagnosis,
@@ -600,11 +488,6 @@ def _tools_for(session: OrchestratorSession) -> list:
                 tracking_issue=tracking_issue,
             )
             # Also note it on the tracking issue itself (if this call was
-            # resuming/working one) -- the needs_human issue above is a
-            # separate, dedicated item (dashboard/labels treat needs_human
-            # specially), but a human looking at THIS issue should still see
-            # that it's stalled and why, not just silently stop accumulating
-            # progress comments with no explanation.
             if tracking_issue is not None:
                 session.mem.record_failure_on_issue(
                     tracking_issue, session.run_id, "implementation",
@@ -790,9 +673,6 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.pre_prod_url = None
             session.deployed_to_pre_prod = ok
             # A passing local test suite is the whole point of the TRIVIAL
-            # classification -- there is no live instance to verify, so treat
-            # this as already verified rather than leaving pre_prod_verified
-            # false and making the LLM think verify_pre_prod still applies.
             session.pre_prod_verified = ok
             session.note(f"deploy_pre_prod: trivial change, merged only: ok={ok}", ok=ok, cost_usd=deploy.cost_usd)
             if not ok:
@@ -897,8 +777,6 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_success("verify_pre_prod")
         if session.env.deploy_strategy == "self_hosted_vm":
             # Single-shot, ephemeral sibling -- tear it down once its report is
-            # produced (pass or fail) so it doesn't accumulate across features
-            # tested over time.
             deployment.teardown_self_hosted_preprod(session.repo, session.run_id)
         return {
             "content": [{"type": "text", "text": f"Live verification {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],

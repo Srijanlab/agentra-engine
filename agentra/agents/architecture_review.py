@@ -1,15 +1,4 @@
-"""Architecture Review Agent (vision.md 5.5) -- called conditionally by the
-Orchestrator, before Implementation Agent, only when a feature brief looks
-architecturally significant (a schema change, a new API surface, a
-cross-cutting refactor spanning more than one layer). Not called on every
-implement_feature -- same "last resort"-style conditionality as
-discover_opportunities being called only once the backlog is empty.
-
-Strictly advisory and read-only: assesses blast radius and risk, never
-proposes specific code, never edits anything, and has no authority to block
-implementation or escalate to a human -- the Orchestrator reads its
-assessment and decides what to do with it.
-"""
+"""Architecture Review Agent -- called conditionally by the Orchestrator, before Implementation Agent, only when a feature brief looks architecturally significant (a schema change, a new API surface, a cross-cutting refactor spanning more than one layer)."""
 
 from pathlib import Path
 
@@ -64,9 +53,6 @@ Feature brief to assess: {feature_brief}
 
 Assess architectural blast radius and risk now, following your system prompt."""
     # mcp_config is {} when no graph has been built for `repo` yet (best-effort,
-    # see codegraph.py) -- allowed_tools then stays exactly Read/Glob/Grep, same
-    # as before this existed, rather than granting mcp__graphify__* tool names
-    # with no server behind them.
     mcp_servers = codegraph.mcp_config(repo)
     allowed_tools = ["Read", "Glob", "Grep"] + (codegraph.READ_ONLY_MCP_TOOLS if mcp_servers else [])
     return await run_agent(

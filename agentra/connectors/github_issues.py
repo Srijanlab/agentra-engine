@@ -1,19 +1,4 @@
-"""GitHub Issues REST API, authenticated via the installation token
-from github_app.py — no new credential plumbing, just a new use of
-the token git_ops.py already mints for pushes.
-
-GitHub Issues is the sole backlog store (memory.py's known_bugs()/
-feature_queue()/shipped_features() — no local .agentra/*.json mirror).
-A shipped feature stays OPEN, stamped "status:shipped" (mark_shipped in
-github_issue_lifecycle.py) — only actual production promotion closes it
-(memory.py's mark_status_done). So an issue's open/closed state maps
-1:1 onto the dashboard's Ready to Review (open, status:shipped) vs
-Release to Production (closed) split.
-
-Lifecycle write operations (close_issue, mark_shipped, record_in_progress_branch,
-record_spec, etc.) live in github_issue_lifecycle.py to keep this module
-read-heavy. Re-exported here for backward-compatible imports.
-"""
+"""GitHub Issues REST API, authenticated via the installation token from github_app.py — no new credential plumbing, just a new use of the token git_ops.py already mints for pushes."""
 
 from __future__ import annotations
 
@@ -41,11 +26,7 @@ def _owner_repo_or_raise(repo_url: str) -> str:
 
 
 def issue_html_url(repo_url: str, issue_number: int) -> str | None:
-    """The browsable https://github.com/OWNER/REPO/issues/N URL for an
-    issue, or None if repo_url isn't a github.com HTTPS remote. No API call
-    needed -- GitHub issue URLs are deterministic from owner/repo/number.
-    Used to build the GitHub-issue link in a HUMAN_INPUT_REQUIRED Slack
-    notification and in the dashboard's 'Needs your input' panel."""
+    """The browsable https://github.com/OWNER/REPO/issues/N URL for an issue, or None if repo_url isn't a github.com HTTPS remote."""
     owner_repo = owner_repo_from_url(repo_url)
     if owner_repo is None:
         return None
@@ -58,9 +39,7 @@ def _headers(repo_url: str) -> dict[str, str]:
 
 
 def _graphql(repo_url: str, query: str, variables: dict) -> dict:
-    """GitHub's REST API has no sub-issue endpoint — addSubIssue and
-    subIssuesSummary only exist in GraphQL v4. Every other function stays
-    REST; this is the shared escape hatch."""
+    """GitHub's REST API has no sub-issue endpoint — addSubIssue and subIssuesSummary only exist in GraphQL v4."""
     token = get_installation_token(repo_url)
     resp = httpx.post(
         f"{GITHUB_API}/graphql",
@@ -88,11 +67,7 @@ def get_issue(repo_url: str, issue_number: int) -> dict | None:
 
 
 def create_issue(repo_url: str, title: str, body: str, labels: list[str] | None = None) -> dict:
-    """Returns the created issue's JSON (number, html_url, etc.).
-
-    Label names that don't already exist on the target repo are silently
-    dropped by GitHub's API rather than erroring — ensure_labels() at
-    app registration prevents this in practice."""
+    """Returns the created issue's JSON (number, html_url, etc.)."""
     owner_repo = _owner_repo_or_raise(repo_url)
     resp = httpx.post(
         f"{GITHUB_API}/repos/{owner_repo}/issues",
@@ -146,12 +121,7 @@ def list_closed_issues(repo_url: str, labels: list[str] | None = None, limit: in
 def create_sub_issue(
     repo_url: str, parent_issue_number: int, title: str, body: str, labels: list[str] | None = None
 ) -> dict:
-    """Creates a new issue and links it as a GitHub-native sub-issue of
-    parent_issue_number (GraphQL addSubIssue). GitHub then tracks a real
-    sub-issues progress count on the parent.
-
-    The link is best-effort: the sub-issue itself is always created and
-    returned even if linking it under the parent fails."""
+    """Creates a new issue and links it as a GitHub-native sub-issue of parent_issue_number (GraphQL addSubIssue)."""
     sub_issue = create_issue(repo_url, title, body, labels=labels)
     try:
         owner_repo = _owner_repo_or_raise(repo_url)
@@ -180,32 +150,11 @@ def create_sub_issue(
 
 
 def fetch_app_digest_batch(repo_urls: list[str], closed_limit: int = 5) -> dict[str, dict]:
-    """Single GraphQL call fetching open bugs, open features, and most-recent
-    closed issues for every repo in repo_urls simultaneously.
-
-    Returns a dict keyed by repo_url:
-      {
-        "open_bugs":     [{"number", "title", "body", "html_url", "labels"}, ...],
-        "open_features": [{"number", "title", "body", "html_url", "labels"}, ...],
-        "closed_features": [...],   # newest closed_limit items, feature-labeled
-        "closed_bugs":   [...],     # newest closed_limit items, bug-labeled
-      }
-
-    Falls back to an empty dict for any repo that has no github.com remote or
-    whose token can't be fetched.  If the whole batch call fails the caller
-    should degrade gracefully rather than explode.
-
-    Alias naming: GraphQL field aliases can't contain slashes or dots, so each
-    repo is addressed by a stable index (r0, r1, …) and the result is mapped
-    back to repo_urls by position.
-    """
+    """Single GraphQL call fetching open bugs, open features, and most-recent closed issues for every repo in repo_urls simultaneously."""
     if not repo_urls:
         return {}
 
     # Group repos by installation token — repos from different GitHub App
-    # installations (different orgs/users) require different tokens and
-    # cannot be batched in a single GraphQL call. Build one batch per
-    # installation, then merge results.
     from collections import defaultdict
     token_to_urls: dict[str, list[str]] = defaultdict(list)
     for url in repo_urls:
@@ -274,9 +223,6 @@ def _fetch_batch_for_token(token: str, repo_urls: list[str], closed_limit: int) 
         body = resp.json()
         if body.get("errors"):
             # GraphQL returns partial results alongside errors — log the
-            # failures but use whatever data did come back instead of
-            # discarding the whole batch. A NOT_FOUND on one repo should
-            # not discard the data for every other repo in the same call.
             failed = {e.get("path", [None])[0] for e in body["errors"] if e.get("path")}
             logger.warning("fetch_app_digest_batch: partial GraphQL errors for fields %s", sorted(failed))
         data = body.get("data") or {}
@@ -313,9 +259,7 @@ def _fetch_batch_for_token(token: str, repo_urls: list[str], closed_limit: int) 
 
 
 def list_in_progress_features(repo_url: str, labels: list[str] | None = None) -> list[dict]:
-    """Open issues that already have at least one sub-issue. Each entry
-    carries sub_issues_total/sub_issues_completed from GitHub's own
-    subIssuesSummary. Excludes issues labeled 'status:shipped'."""
+    """Open issues that already have at least one sub-issue."""
     owner, name = _owner_repo_or_raise(repo_url).split("/", 1)
     data = _graphql(
         repo_url,
@@ -367,10 +311,7 @@ _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
 
 
 def ensure_labels(repo_url: str) -> None:
-    """Creates whichever of _LABEL_DEFINITIONS don't already exist on the
-    target repo. Idempotent, called once at app registration. Best-effort:
-    a failure (e.g. App lacks repo admin permission) just falls back to
-    today's behavior, not a registration failure."""
+    """Creates whichever of _LABEL_DEFINITIONS don't already exist on the target repo."""
     owner_repo = _owner_repo_or_raise(repo_url)
     headers = _headers(repo_url)
     resp = httpx.get(f"{GITHUB_API}/repos/{owner_repo}/labels", headers=headers, params={"per_page": 100}, timeout=15)
@@ -402,10 +343,7 @@ def add_labels(repo_url: str, issue_number: int, labels: list[str]) -> None:
 
 
 def remove_label(repo_url: str, issue_number: int, label: str) -> None:
-    """Removes a single label from an issue. A 404 (label already absent --
-    e.g. removed by a concurrent call, or never applied) is treated as
-    success: idempotent in the same spirit as add_labels' own additive
-    idempotency in the other direction."""
+    """Removes a single label from an issue."""
     owner_repo = _owner_repo_or_raise(repo_url)
     resp = httpx.delete(
         f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/labels/{label}",

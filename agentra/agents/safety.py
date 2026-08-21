@@ -1,43 +1,4 @@
-"""Safety gate shared by every agent that gets Bash/Write/Edit access.
-
-Implements the "Forbidden Actions" list from vision.md section 8: no
-production deploys, no destructive data operations, no secrets/billing edits,
-no irreversible operations. This is a blunt regex net, not a sandbox — it
-exists to catch an agent following bad instructions, not a malicious one.
-
-LAYERED SAFETY MODEL
---------------------
-Primary boundary  — Docker container (see CONTAINER.md): the Claude CLI
-    subprocess can only reach the bind-mounted target repo and explicitly
-    provided env vars; host filesystem, SSH keys, and other secrets are
-    invisible to the container entirely.
-
-Secondary boundary — this module: even inside a container, the regex
-    patterns below block the most dangerous bash commands and file edits
-    (destructive ops, secrets, production deploys) as a defence-in-depth
-    measure.
-
-Production access is normally blocked outright. The *only* exception is the
-Production Debugging Agent's opt-in auto-remediate path (orchestrator.py),
-which passes allow_prod=True for the single promote-to-prod call it makes —
-and only for apps that set auto_remediate_prod: true in their environment
-config. Every other agent, and every other call, keeps prod blocked.
-
-IMPLEMENTATION NOTE — can_use_tool vs. a PreToolUse hook
----------------------------------------------------------
-This used to be a `can_use_tool` callback. That was silently never invoked:
-every agent call uses permission_mode="bypassPermissions" (base.py), and the
-SDK auto-approves every tool call under that mode *before* can_use_tool is
-ever consulted — confirmed via claude_agent_sdk's own
-CanUseToolShadowedWarning, which fires exactly in this configuration and
-says so explicitly ("can_use_tool will not be invoked... use a PreToolUse
-hook instead"). The whole regex gate below was dead code in every real run
-this entire session; a callback-level unit test that calls the function
-directly can't catch this, since it never exercises the SDK's actual
-tool-dispatch path -- only a live query() integration test can (see
-tests/test_safety_integration.py). Rebuilt on `hooks={"PreToolUse": [...]}`,
-which the SDK does invoke under bypassPermissions.
-"""
+"""Safety gate shared by every agent that gets Bash/Write/Edit access."""
 
 import re
 
@@ -46,13 +7,6 @@ from claude_agent_sdk import HookMatcher
 from agentra.memory import format_safety_denial_line
 
 # These are matched with re.search against the full Bash `command` string, which
-# can be an arbitrary shell one-liner (e.g. `cmd1 && cmd2`, `cmd1; cmd2`). Do NOT
-# anchor any of these to end-of-string (`$`) unless the trailing content is
-# deliberately part of what's being matched (e.g. `(?:\s|$)` below, which allows
-# either a following token or true end-of-string) -- a bare trailing `$` lets a
-# destructive command slip through the moment it's chained with something
-# harmless after it, e.g. `psql -c "DELETE FROM users" && echo done`. See
-# tests/test_safety_hook.py for the regression coverage.
 FORBIDDEN_BASH_PATTERNS = [
     r"rm\s+-rf\s+/(?:\s|$)",
     r"git\s+push\s+[^\n]*--force",
@@ -65,7 +19,6 @@ FORBIDDEN_BASH_PATTERNS = [
 ]
 
 # Only enforced when allow_prod=False (the default for every agent call).
-# Same no-end-anchor rule as FORBIDDEN_BASH_PATTERNS above applies here.
 PROD_ONLY_BASH_PATTERNS = [
     r"--prod\b",
     r"vercel\s+[^\n]*--prod",
@@ -81,18 +34,7 @@ FORBIDDEN_EDIT_PATH_PATTERNS = [
 
 
 def _record_denial(tool_name: str, pattern: str, detail: str) -> None:
-    """Write a durable audit-trail line for a blocked tool call via the
-    ambient run logger that base.py's run_log_scope sets (the same
-    ContextVar run_agent's own message logging reads from) -- so a denial
-    leaves a trace in the run's log instead of just the deny decision going
-    back to the SDK with zero record anywhere else.
-
-    Imports base.py lazily: base.py imports make_hooks from this module at
-    module scope, so this module importing base.py at module scope too would
-    be circular (base.py hasn't finished defining current_run_logger yet at
-    the point it imports this file). By the time this function actually
-    runs, both modules are fully imported, so the lazy import just works.
-    """
+    """Write a durable audit-trail line for a blocked tool call via the ambient run logger that base.py's run_log_scope sets (the same ContextVar run_agent's own message logging reads from) -- so a denial leaves a trace in the run's log instead of just the deny decision going back to the SDK with zero record anywhere else."""
     from agentra.agents.base import current_run_logger
 
     logger = current_run_logger()

@@ -1,4 +1,4 @@
-"""Impact-vs-effort ranking for Product Discovery Agent output (vision.md 5.6)."""
+"""Impact-vs-effort ranking for Product Discovery Agent output."""
 
 from typing import Any
 

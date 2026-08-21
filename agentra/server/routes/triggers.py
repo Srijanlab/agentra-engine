@@ -114,17 +114,6 @@ async def _run_autonomous_background(
                 repo, objective, env, feature=feature, skip_deploy=skip_deploy, run_id=run_key
             )
             # Human-in-the-loop escalation (GitHub issue #34): if the cycle
-            # ended because implement_feature/discover_opportunities hit
-            # HUMAN_INPUT_REQUIRED, mark_waiting_for_human (agents/brain/
-            # __init__.py) already wrote status=waiting_for_human through to
-            # the run registry mid-cycle -- this must NOT unconditionally
-            # overwrite it back to "completed" once the cycle returns, or the
-            # run silently vanishes from the dashboard's 'Needs your input'
-            # panel (registry.list_waiting_for_human filters on status) the
-            # moment its own background task finishes. Same status.
-            # waiting_for_human else "completed" branch as
-            # human_input.py's _run_human_resume_background, so both entry
-            # points into run_autonomous_cycle behave identically.
             _set_run(
                 run_key,
                 status="waiting_for_human" if report.waiting_for_human else "completed",
@@ -239,25 +228,7 @@ async def _dispatch_cycle(
 
 
 def _reconcile_human_input_for_app(app_name: str) -> None:
-    """Human-in-the-loop escalation (GitHub issue #34): the polling-based
-    half of the GitHub-issue-comment answer channel -- there is no inbound
-    Slack/GitHub webhook (see connectors/slack.py's module docstring and
-    design.md), so a comment posted on a needs_human issue only gets
-    noticed here, on the next /trigger/scheduled tick. Bounded, documented
-    polling interval: compute.tf's agentra-trigger-loop already hits this
-    endpoint every 15 minutes with no new infra (see its own comment) --
-    same cadence GCP's Cloud Scheduler equivalent would use, just without
-    provisioning it. Best-effort per run: one bad issue/lookup must not
-    stop the rest of this app's waiting runs (or the next app in the
-    caller's loop) from being checked.
-
-    Checks both waiting_for_human AND escalated runs (registry.
-    list_waiting_for_human already returns both) -- a run that's aged past
-    the max-wait timeout and gotten auto-escalated must still resume the
-    moment a human replies on its GitHub issue, same as one that hasn't
-    escalated yet. Only excluding non-"waiting_for_human" here would leave
-    an escalated run stuck forever even after being answered, silently
-    contradicting the whole point of escalating it in the first place."""
+    """Human-in-the-loop escalation (GitHub issue #34): the polling-based half of the GitHub-issue-comment answer channel -- there is no inbound Slack/GitHub webhook (see connectors/slack.py's module docstring and design.md), so a comment posted on a needs_human issue only gets noticed here, on the next /trigger/scheduled tick."""
     repo = registry.get_app_repo(app_name)
     if repo is None:
         return
@@ -282,13 +253,7 @@ def _reconcile_human_input_for_app(app_name: str) -> None:
 
 
 def _reconcile_human_input_timeouts() -> None:
-    """The other half of GitHub issue #34's max-wait handling: a run must
-    never sit in waiting_for_human forever with no further signal. Global
-    (not per-app), called once per /trigger/scheduled tick -- registry.
-    reconcile_waiting_for_human() already scans every app's runs in one
-    pass. Re-notifies Slack (best-effort, same silent-skip-if-unconfigured
-    behavior as the original notification) so a human sees this got
-    escalated, not just the dashboard's badge changing color."""
+    """The other half of GitHub issue #34's max-wait handling: a run must never sit in waiting_for_human forever with no further signal."""
     try:
         escalated = registry.reconcile_waiting_for_human()
     except Exception:

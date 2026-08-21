@@ -1,21 +1,4 @@
-"""GitHub Projects v2 (GraphQL) — read, provisioning, and write operations.
-
-One Project PER FEATURE, not per app/repo — titled after the feature itself,
-not a generic per-repo name. A feature's issue is the seed item of its
-Project; any sub-issues it spawns are added to the same board via
-add_item_to_feature_project.
-
-No local cache: a feature issue's Project association is queried from GitHub
-directly every time (issue.projectItems), so there's no side table to drift
-out of sync. ensure_feature_project() is idempotent as a result: calling it
-twice finds what the first call created.
-
-Requires the GitHub App to have the "Projects" repository permission
-(read/write) granted. Confirmed live: only works for org-owned repos —
-GitHub rejects createProjectV2 for personal accounts regardless of
-permissions, a platform limitation. All public functions here catch their own
-exceptions and return None/no-op rather than raising.
-"""
+"""GitHub Projects v2 (GraphQL) — read, provisioning, and write operations."""
 
 from __future__ import annotations
 
@@ -103,17 +86,12 @@ def _create_project(repo_url: str, owner_id: str, repository_id: str, title: str
         )
     except Exception:
         # Cosmetic only (shows the Project under the repo's Projects tab) —
-        # the board is fully functional without this link.
         logger.warning("_create_project: failed to link project to repository for %s", repo_url, exc_info=True)
     return project
 
 
 def _find_status_field(repo_url: str, project_id: str) -> dict | None:
-    """A freshly created ProjectV2 already has a default "Status" single-select
-    field (Todo/In Progress/Done). createProjectV2Field fails with "Name has
-    already been taken" if called again, so this reads it back instead.
-    _create_status_field stays as a fallback for the (unobserved) case
-    where a Project has no Status field at all."""
+    """A freshly created ProjectV2 already has a default "Status" single-select field (Todo/In Progress/Done)."""
     data = _graphql(
         repo_url,
         """
@@ -175,9 +153,7 @@ def _issue_node_id(repo_url: str, issue_number: int) -> str | None:
 
 
 def _existing_feature_project(repo_url: str, feature_issue_number: int) -> dict | None:
-    """A feature issue can only ever be the seed item of the one Project
-    created for it — so its own projectItems is the live, authoritative
-    answer to 'does this feature already have a board', no bookkeeping needed."""
+    """A feature issue can only ever be the seed item of the one Project..."""
     owner, name = _owner_repo_or_raise(repo_url)
     data = _graphql(
         repo_url,
@@ -224,13 +200,7 @@ def _existing_feature_project(repo_url: str, feature_issue_number: int) -> dict 
 
 
 def ensure_feature_project(repo_url: str, feature_issue_number: int, title: str) -> dict | None:
-    """Idempotent: returns the existing Project for feature_issue_number if it
-    already has one (via projectItems), provisioning a fresh one titled
-    `title` otherwise. Does NOT add the feature issue itself to a newly
-    created project — callers do that via add_item_to_feature_project, so
-    there is exactly one code path for 'put an item on this board'.
-
-    None if the repo has no github.com remote, or provisioning failed (logged)."""
+    """Idempotent: returns the existing Project for feature_issue_number if it already has one (via projectItems), provisioning a fresh one titled `title` otherwise."""
     try:
         existing = _existing_feature_project(repo_url, feature_issue_number)
         if existing is not None:
@@ -254,10 +224,7 @@ def ensure_feature_project(repo_url: str, feature_issue_number: int, title: str)
 
 
 def get_feature_project_url(repo_url: str, feature_issue_number: int) -> str | None:
-    """Read-only: does feature_issue_number already have a Project board?
-    Never provisions one (unlike ensure_feature_project) — for the
-    dashboard, which shouldn't create GitHub infrastructure just by
-    rendering a page."""
+    """Read-only: does feature_issue_number already have a Project board?..."""
     try:
         project = _existing_feature_project(repo_url, feature_issue_number)
         return project["url"] if project else None
@@ -266,14 +233,7 @@ def get_feature_project_url(repo_url: str, feature_issue_number: int) -> str | N
 
 
 def get_feature_status(repo_url: str, feature_issue_number: int) -> str | None:
-    """The feature issue's own Project card Status value ("Todo"/"In
-    Progress"/"Done"), or None. Distinct from _existing_feature_project's
-    query: that one fetches the Status FIELD's available options (for
-    writing); this one fetches the VALUE actually set on this issue's card.
-
-    Used by memory.py's in_progress_features() to distinguish 'broken into
-    parts, already underway' from 'broken into parts, nothing started yet' —
-    something subIssuesSummary.total > 0 alone can't do."""
+    """The feature issue's own Project card Status value ("Todo"/"In Progress"/"Done"), or None."""
     try:
         owner, name = _owner_repo_or_raise(repo_url)
         data = _graphql(
@@ -315,10 +275,7 @@ def add_item_to_feature_project(
     issue_number: int | None = None,
     status: str = "Todo",
 ) -> None:
-    """Backward-compatible re-export: the implementation lives in
-    github_project_mutations.py. Imported lazily (not at module load time)
-    since that module imports ensure_feature_project/_issue_node_id/_graphql
-    from this one -- an eager import here would be circular."""
+    """Backward-compatible re-export: the implementation lives in github_project_mutations.py."""
     from agentra.connectors.github_project_mutations import add_item_to_feature_project as _impl
 
     return _impl(repo_url, feature_issue_number, title, issue_number=issue_number, status=status)

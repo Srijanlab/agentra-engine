@@ -1,25 +1,4 @@
-"""Orchestrator Agent (vision.md 5.1).
-
-Two entry points:
-
-run_cycle() — the fixed-pipeline loop (CLI: `agentra run --fixed-pipeline`):
-understand codebase -> discover (or accept) a feature -> implement -> test ->
-deploy to PRE-PROD -> assess measurability -> repeat, in that hardcoded
-order. Not the default anymore — agents/brain.py::run_autonomous_cycle() is,
-letting the Orchestrator Agent itself decide which specialized agent to call
-and when, rather than following this fixed script. This function still
-exists for a deterministic, always-the-same-order path when that's what's
-wanted. Never touches production either way. If no feature is given, the
-Product Discovery Agent (5.3) picks one, prioritizing any known bugs filed
-by the Production Debugging Agent above ordinary feature work.
-
-run_prod_debug_cycle() — on-demand: diagnose a production issue. If the
-app's EnvironmentConfig.auto_remediate_prod is off (the default), it stops
-at diagnosis and files a known bug for the next run_cycle() to pick up. If
-it's on, it builds the fix, proves it in pre-prod, and only then promotes to
-prod — the one path in this system allowed to touch production without a
-human in the loop, and only because the app explicitly opted in.
-"""
+"""Orchestrator Agent."""
 
 import uuid
 from dataclasses import dataclass, field
@@ -83,28 +62,10 @@ async def run_cycle(
         mem.log(run_id, f"codebase agent: ok={cb.ok} turns={cb.turns} cost=${cb.cost_usd:.4f}")
         if not cb.ok:
             # GitHub issue #42: this is the earliest agent-subprocess call in the
-            # fixed pipeline -- previously the only step whose failure was never
-            # reported through mem.record_failure at all, so e.g. a Claude Code
-            # auth/login failure here (cb.auth_failure) would silently abort the
-            # cycle with no bug filed and no Slack escalation, then repeat
-            # identically on every future run_cycle call forever. record_failure
-            # both files the needs_human/blocking_agentra bug (auth failures
-            # specifically also get the Slack human-in-the-loop escalation, see
-            # its own docstring) and -- since it's blocking_agentra=True for an
-            # auth failure -- nothing here needs to also gate future cycles: this
-            # function already returns immediately below, matching "fails fast
-            # without burning further retries/cost" the same way every other
-            # failure branch in this pipeline already does.
             mem.record_failure(run_id, "understand_codebase", cb.text)
             return CycleReport(run_id, feature or "", False, False, False, None, [], "codebase understanding failed; aborting cycle")
 
         # GitHub issue #42 hardening: this pipeline has no blocking_bugs()
-        # pre-flight gate at all (unlike agents/brain.py's default mode), so
-        # it always attempts understand_codebase regardless -- meaning a
-        # successful call here is itself proof a previously-filed Claude
-        # Code auth-failure blocking bug, if any is still open, is stale.
-        # See Memory.clear_resolved_auth_bugs's docstring for why only this
-        # specific bug class is safe to auto-clear this way.
         cleared = mem.clear_resolved_auth_bugs(run_id)
         if cleared:
             mem.log(run_id, f"auto-cleared previously-blocking Claude Code auth-failure bug(s): {', '.join('#' + c for c in cleared)}")
@@ -134,10 +95,6 @@ async def run_cycle(
             mem.log(run_id, f"discovery agent: selected {feature!r} from {len(opportunities)} candidates")
 
         # session_id: threads one Claude session across implementation -> testing ->
-        # deployment -> feedback for this feature, mirroring agents/brain/tools.py's
-        # OrchestratorSession.session_id -- captured from each AgentResult and fed
-        # into the next call so this fixed-pipeline cycle is also one SIM/session,
-        # not a chain of disconnected cold starts.
         session_id: str | None = None
 
         feature_branch = feature_branch_name(env, run_id, feature)
@@ -149,10 +106,6 @@ async def run_cycle(
             mem.record_failure(run_id, "implementation", impl.text)
             return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
         # record_shipped closes a GitHub 'feature'-labeled issue as the shipped record --
-        # the originating feature_queue issue itself if this opportunity came from
-        # there (resolves_id), otherwise a fresh one. A known_bug-origin opportunity
-        # still needs its own bug issue cleared separately, since that's a different
-        # label/ledger than the shipped-feature record.
         resolves_id = top["id"] if top and top.get("origin") == "feature_queue" else None
         mem.record_shipped(feature, run_id=run_id, resolves_id=resolves_id, session_id=session_id)
         mem.append_documentation(f"Shipped **{feature}**: {feature_brief[:300]}")
@@ -197,8 +150,6 @@ async def run_cycle(
                     mem.log(run_id, "deployment reported no preview_url; skipping live verification")
 
         # If nothing was deployed this cycle, local passing tests are all there is to go on.
-        # If something was deployed, feedback about measurable impact only makes sense once
-        # the live deployment has actually been verified — not just "the deploy step didn't error".
         feedback_ready = test_passed if skip_deploy else bool(pre_prod_verified)
         if feedback_ready:
             mem.log(run_id, "feedback agent: starting")
@@ -208,9 +159,6 @@ async def run_cycle(
 
         if deploy_ok:
             # Only meaningful once merged onto a durable, shared branch (pre-prod) -- a feature
-            # branch that was never deployed is about to be abandoned regardless. Must come after
-            # every mem.write above so architecture/memory.md notes ride along too, not just
-            # documentation.md's changelog line (shipped itself lives on GitHub now, not here).
             persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
             if persist_error:
                 mem.log(run_id, f"persist_audit_trail: failed: {persist_error}")
@@ -234,20 +182,7 @@ async def run_cycle(
 
 
 async def run_promote(repo: Path, run_id: str | None = None) -> dict:
-    """Human-triggered prod promotion: `agentra promote`, or the dashboard's
-    Promote button (server.py's /apps/{name}/promote). Always
-    allow_prod=True here because a human explicitly invoked it -- this is
-    the approval gate. run_id: see run_autonomous_cycle's docstring -- this
-    is promote's own log-trail id, separate from whichever build's Claude
-    session gets resumed below.
-
-    Resumes the Claude session of whichever pending feature was shipped most
-    recently (by updated_at, falling back to ts/external_id when that's
-    missing), so promotion continues the same conversation that built and
-    tested the change instead of a disconnected cold start. If several
-    features from different issues are queued for promotion at once, only
-    the most-recent one's session is actually resumed; the rest are just
-    logged as carried by this promote run."""
+    """Human-triggered prod promotion: `agentra promote`, or the dashboard's Promote button (server.py's /apps/{name}/promote)."""
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
@@ -304,8 +239,6 @@ async def run_prod_debug_cycle(
         mem.log(run_id, f"prod-debug agent: ok={diag.ok} turns={diag.turns} cost=${diag.cost_usd:.4f}")
         if not diag.ok:
             # The agent itself failed (crashed/errored) -- distinct from
-            # completing normally but finding no confident root cause,
-            # which isn't a failure worth filing anywhere (see below).
             mem.record_failure(run_id, "prod-debug", diag.text)
         registry.record_agent_step(
             repo.name, run_id, "prod_debug", diag.ok, diag.cost_usd, diag.turns, f"diagnosing: ok={diag.ok}"
@@ -326,7 +259,6 @@ async def run_prod_debug_cycle(
 
         mem.log(run_id, "prod-debug: auto_remediate_prod is on; building fix")
         # One Claude session across build -> deploy -> verify -> promote for this
-        # hotfix, same reasoning as run_cycle's session_id (see its comment).
         session_id: str | None = None
         cb = await codebase.run_cached(repo, mem)
         registry.record_agent_step(repo.name, run_id, "understand_codebase", cb.ok, cb.cost_usd, cb.turns, "understand_codebase: ok=%s" % cb.ok)
@@ -357,14 +289,10 @@ async def run_prod_debug_cycle(
         preview_url = (deploy.json_data or {}).get("preview_url")
         if not preview_url:
             # Not a failure to file anywhere -- expected/normal for any app
-            # with neither Vercel nor Firebase configured (agentra itself
-            # included), not a defect. The auto-remediate safety gate just
-            # can't proceed without a live URL to verify against.
             mem.log(run_id, "prod-debug: no preview_url returned; NOT promoting to prod")
             return ProdDebugReport(run_id, True, severity, True, False, diag.text)
 
         # Must verify the actual live deployment here, not re-run local tests — the whole point
-        # of this gate is proving the hotfix works once deployed, before it's ever allowed near prod.
         test = await testing.run_pre_prod(repo, cb.text, preview_url, run_id, session_id=session_id)
         session_id = test.session_id or session_id
         test_passed = test.ok and (test.json_data or {}).get("status") != "fail"

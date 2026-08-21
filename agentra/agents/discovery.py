@@ -1,13 +1,4 @@
-"""Product Discovery Agent (vision.md 5.3) — the critical component.
-
-Decides *what to build next* without a human naming a feature. Looks at the
-codebase, whatever analytics are available, what's already been shipped by
-this system, and (via WebSearch) competitor products, then produces a ranked
-list of feature opportunities. Known production bugs and the customer
-feature-request queue (agentra/registry.py's inbox, absorbed by
-`agentra dispatch`) both take priority over the agent's own autonomous
-ideation -- see the priority ordering in the system prompt.
-"""
+"""Product Discovery Agent — the critical component."""
 
 from pathlib import Path
 

@@ -1,34 +1,4 @@
-"""Outbound-only Slack notifications for human-in-the-loop escalation
-(GitHub issue #34).
-
-Scope, deliberately: this module can only ever *send* a message. There is
-no inbound Slack Events API receiver here and none should be added in this
-pass -- per the finalized spec for issue #34, a new unauthenticated (or
-even signature-verified) public HTTP endpoint is a distinct security
-surface (replay protection, signature verification, request routing to the
-right run) that deserves its own review, not a rider on this feature. A
-human's answer to a Slack notification is expected to come back through
-one of the two channels server/routes/human_input.py already wires up
-instead: the dashboard's "Needs your input" panel, or a plain comment on
-the needs_human GitHub issue (polled -- see
-memory.find_unanswered_human_input_comment and
-server/routes/triggers.py's scheduled reconciliation). See this repo's
-.agentra/memory/architecture/design.md for the follow-up note.
-
-Configuration: SLACK_BOT_TOKEN (a `xoxb-...` bot token) and
-SLACK_HUMAN_INPUT_CHANNEL (a channel ID, e.g. "C0123456789", or a
-"#channel-name" the bot has been invited to) as plain environment
-variables -- same pattern as GITHUB_APP_PRIVATE_KEY (connectors/
-github_app.py's module docstring): a deployment sources these from GCP
-Secret Manager into the container's env at deploy time (Terraform), this
-module just reads os.environ and never touches Secret Manager itself.
-Either unset means this deployment hasn't configured Slack -- every
-function below silently no-ops (returns False, never raises) rather than
-surfacing a "Slack failed" error as a run failure, per the finalized
-spec's explicit acceptance criterion that a HUMAN_INPUT_REQUIRED event
-must complete cleanly (GitHub issue filed, run visible in the dashboard)
-whether or not Slack is configured.
-"""
+"""Outbound-only Slack notifications for human-in-the-loop escalation (GitHub issue #34)."""
 
 from __future__ import annotations
 
@@ -50,14 +20,7 @@ def is_configured() -> bool:
 
 
 def _post_message(text: str) -> bool:
-    """Raw chat.postMessage call. Returns True on a real Slack-API-level
-    success (Slack returns HTTP 200 with a JSON body even for most
-    failures, e.g. a bad token or a channel the bot isn't in -- `ok: false`
-    -- so an HTTP-level try/except alone isn't enough to know whether the
-    message actually landed). Never raises -- every failure mode (not
-    configured, network error, bad token, bot not in channel, ...) is
-    logged and swallowed, since Slack is a best-effort notification
-    channel, never something a run's success should depend on."""
+    """Raw chat.postMessage call."""
     token = os.environ.get(_BOT_TOKEN_ENV)
     channel = os.environ.get(_CHANNEL_ENV)
     if not token or not channel:
@@ -127,11 +90,7 @@ def notify_human_input_required(
     session_id: str | None = None,
     escalated: bool = False,
 ) -> bool:
-    """Posts a HUMAN_INPUT_REQUIRED notification to the configured Slack
-    channel. Returns True if it was actually sent, False if Slack isn't
-    configured for this deployment or the send failed -- callers must
-    treat both the same way (log-and-move-on, never fail the run over
-    this), per this module's docstring."""
+    """Posts a HUMAN_INPUT_REQUIRED notification to the configured Slack channel."""
     if not is_configured():
         return False
     text = _format_human_input_message(

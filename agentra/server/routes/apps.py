@@ -174,7 +174,6 @@ async def list_apps() -> dict:
             repo_url_map[name] = url
 
     # Single GraphQL call for all apps — falls back to {} on any error
-    # so individual _app_digest calls degrade gracefully to the REST path.
     batch: dict[str, dict] = {}
     if repo_url_map:
         try:
