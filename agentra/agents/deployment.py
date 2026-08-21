@@ -487,6 +487,54 @@ def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hou
     return removed
 
 
+def _own_container_id() -> str | None:
+    """The container ID Docker gave *this* process's own container, read
+    from HOSTNAME -- Docker sets a container's hostname to its own short ID
+    by default, and nothing in compute.tf's `docker run` for agentra-blue/
+    agentra-green passes --hostname to override that. None if HOSTNAME isn't
+    set at all (e.g. running outside a container, as under pytest/local
+    dev) -- callers must treat that as "can't determine, don't guess"."""
+    hostname = os.environ.get("HOSTNAME", "").strip()
+    return hostname or None
+
+
+def _own_container_name() -> str | None:
+    """Resolves this process's own container's Docker --name (e.g.
+    'agentra-blue' or 'agentra-green') by asking the host daemon (reachable
+    over the bind-mounted docker.sock) to inspect the container ID from
+    _own_container_id.
+
+    This must be figured out dynamically at call time, never hardcoded or
+    read from static config: blue/green promotion (promote_prod_self_hosted)
+    flips which color is actually running this very process on every
+    promotion, and the previous bug here was exactly that kind of static
+    assumption -- deploy_pre_prod_self_hosted used to Docker-network-connect
+    config.anchor_container (the nginx reverse-proxy) to preprod_network,
+    but the orchestrator process that runs verify_pre_prod's Testing Agent
+    turn (and any curl/getent/python socket call issued from inside it)
+    lives in the blue/green *app* container, not nginx -- so it was never on
+    preprod_network at all and could never resolve the pre-prod sibling's
+    Docker DNS name, regardless of which color was active. Connecting
+    whichever container this code is actually running in, found fresh on
+    every call, fixes that for either color without needing to know which
+    one is live.
+
+    Returns None if the ID can't be determined or `docker inspect` fails
+    (e.g. running outside Docker entirely) -- callers must treat that as a
+    hard failure, not silently skip the network join and report success
+    anyway."""
+    container_id = _own_container_id()
+    if not container_id:
+        return None
+    inspect = subprocess.run(
+        ["docker", "inspect", container_id, "--format", "{{.Name}}"],
+        capture_output=True, text=True,
+    )
+    if inspect.returncode != 0 or not inspect.stdout.strip():
+        return None
+    return inspect.stdout.strip().lstrip("/")
+
+
 def _docker_build_env() -> dict:
     """Env for every `docker build` subprocess call in this module --
     explicitly enables BuildKit (DOCKER_BUILDKIT=1) rather than relying on
@@ -578,11 +626,31 @@ async def deploy_pre_prod_self_hosted(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
-    # Idempotent: both no-op harmlessly (network already exists / anchor
-    # container already attached) on every call after the first.
+    # This process's OWN container -- not config.anchor_container (nginx) --
+    # must be on preprod_network: the Testing Agent turn verify_pre_prod
+    # spawns, and every curl/getent/python-socket call it issues, runs
+    # inside whichever blue/green app container is running *this very
+    # Python process*, never inside nginx. Determined dynamically on every
+    # call (see _own_container_name) since blue/green promotion moves which
+    # color that is. Idempotent: both no-op harmlessly (network already
+    # exists / container already attached) on every call after the first.
     subprocess.run(["docker", "network", "create", config.preprod_network], capture_output=True, text=True)
+    own_container = _own_container_name()
+    if own_container is None:
+        return AgentResult(
+            ok=False,
+            text=(
+                "Could not determine this orchestrator process's own container name "
+                "(HOSTNAME unset or `docker inspect` failed) -- refusing to deploy a "
+                "pre-prod instance nothing would be able to reach: without knowing which "
+                f"container to join to {config.preprod_network!r}, verify_pre_prod would "
+                "fail with an unresolvable host."
+            ),
+            json_data={"status": "failed"},
+            cost_usd=0.0, turns=0,
+        )
     subprocess.run(
-        ["docker", "network", "connect", config.preprod_network, config.anchor_container],
+        ["docker", "network", "connect", config.preprod_network, own_container],
         capture_output=True, text=True,
     )
 
@@ -594,6 +662,18 @@ async def deploy_pre_prod_self_hosted(
         [
             "docker", "run", "-d", "--name", container_name,
             "--network", config.preprod_network,
+            # GitHub issue #45: publish 8080 to a Docker-assigned free host
+            # port (bare "-p 8080", no host-side port given) -- see
+            # _host_reachable_preview_url's docstring for why preview_url is
+            # built from this instead of container_name's Docker-embedded-DNS
+            # name. Auto-assigned rather than hashed/derived from run_id so
+            # concurrent runs can never collide on a host port -- the OS/
+            # Docker's own ephemeral-port allocator already solves that
+            # uniqueness problem, no need for agentra to reinvent it. Freed
+            # automatically the moment this container is removed (teardown_
+            # self_hosted_preprod / cleanup_stale_preprod's existing `docker
+            # rm -f`) -- no separate port bookkeeping needed.
+            "-p", "8080",
             "--memory=1g", "--cpus=1",
             "-v", f"{claude_home}:/home/agentuser/.claude:ro",
             *env_args,
@@ -607,7 +687,15 @@ async def deploy_pre_prod_self_hosted(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
-    preview_url = f"http://{container_name}:8080"
+    preview_url = _host_reachable_preview_url(config, container_name)
+    if preview_url is None:
+        return AgentResult(
+            ok=False,
+            text=f"{container_name} started but its published port and/or {config.app_network!r} gateway "
+            "address could not be determined -- no reachable preview_url to hand to verify_pre_prod.",
+            json_data={"status": "failed", "preview_url": None},
+            cost_usd=0.0, turns=0,
+        )
     healthy = await _wait_for_healthy(container_name)
 
     if not healthy:
@@ -619,12 +707,95 @@ async def deploy_pre_prod_self_hosted(
             cost_usd=0.0, turns=0,
         )
 
+    # _wait_for_healthy only proves the sibling's own process is up (it
+    # curls itself via `docker exec`) -- it never exercises the network path
+    # verify_pre_prod's Testing Agent turn will actually use. Genuinely curl
+    # preview_url from THIS process (the orchestrator itself), over whatever
+    # real network path exists to it, before ever reporting "deployed": this
+    # is exactly the check that was missing before, which is why a broken
+    # network join (previously: only nginx on preprod_network, never the app
+    # container) used to report status=deployed and fail opaquely one step
+    # later in verify_pre_prod instead of failing clearly here.
+    reachable, reach_detail = await _wait_for_reachable_from_orchestrator(preview_url)
+    if not reachable:
+        return AgentResult(
+            ok=False,
+            text=(
+                f"pre-prod instance not reachable from the orchestrator's own network path: "
+                f"{reach_detail} (preview_url={preview_url!r}). This usually means this "
+                f"process's own container isn't actually joined to {config.preprod_network!r} "
+                "-- see deploy_pre_prod_self_hosted/_own_container_name."
+            ),
+            json_data={"status": "failed", "preview_url": preview_url},
+            cost_usd=0.0, turns=0,
+        )
+
     return AgentResult(
         ok=True,
-        text=f"Self-hosted pre-prod instance {container_name!r} is up at {preview_url}.",
+        text=f"Self-hosted pre-prod instance {container_name!r} is up at {preview_url} and reachable from the orchestrator.",
         json_data={"status": "deployed", "preview_url": preview_url, "notes": f"internal-only, image {image_tag!r}"},
         cost_usd=0.0, turns=0,
     )
+
+
+def _host_reachable_preview_url(config: "environments.SelfHostedVMConfig", container_name: str) -> str | None:
+    """GitHub issue #45: preview_url used to be built as
+    f"http://{container_name}:8080" -- a Docker embedded-DNS name that only
+    resolves for containers actually joined to config.preprod_network. But
+    only config.anchor_container (nginx) is ever connected to that network
+    (see the `docker network connect` call above, in
+    deploy_pre_prod_self_hosted) -- the process that actually verifies this
+    URL (testing.run_pre_prod's Playwright screenshot + HTTP checks) is
+    spawned as a Claude Agent SDK subprocess of the very "agentra" app
+    container this function itself runs inside (see this module's own
+    docstring: no run_agent call here because this needs the bind-mounted
+    docker.sock the calling container has), which per compute.tf is
+    attached to config.app_network, never config.preprod_network -- so the
+    hostname could never resolve there. Confirmed via curl/getent/python
+    socket resolution and a browser ERR_NAME_NOT_RESOLVED.
+
+    Fixed by publishing the container's port 8080 to a Docker-assigned free
+    host port (the bare `-p 8080` docker-run arg above) and addressing it
+    through config.app_network's own gateway IP instead of a container
+    name: that gateway is a real interface of the HOST's own network stack
+    (every Docker bridge network's gateway is), so any container attached
+    to config.app_network -- which the verifying process's own container
+    always is, by construction, since that's the network the persistent
+    "agentra" app container itself runs on -- can reach it, and Docker's
+    published-port DNAT rules bind on every host-side interface including
+    that one. Deliberately does NOT touch compute.tf's own container
+    network wiring (agentra-app-net/agentra-proxy attachment) -- that's
+    shared with the production blue/green promotion anchor and every
+    self_hosted_vm repo, out of scope and too risky for this fix; this only
+    reads config.app_network's already-existing gateway, never modifies who
+    is attached to it.
+
+    Returns None if either the port-publish or the gateway lookup fails --
+    callers must treat that as a deploy failure, never silently fall back
+    to the unreachable-by-design container-name URL this issue was filed
+    over."""
+    port = subprocess.run(
+        ["docker", "port", container_name, "8080/tcp"], capture_output=True, text=True,
+    )
+    if port.returncode != 0 or not port.stdout.strip():
+        return None
+    # "docker port" prints one "<host-ip>:<host-port>" line per bound host
+    # address (0.0.0.0:NNNNN and/or [::]:NNNNN for the default "publish on
+    # every interface" bare `-p 8080`) -- same port number on every line,
+    # so just taking the first is fine; host port is whatever follows the
+    # last ':'.
+    host_port = port.stdout.strip().splitlines()[0].rsplit(":", 1)[-1].strip()
+    if not host_port.isdigit():
+        return None
+
+    gateway = subprocess.run(
+        ["docker", "network", "inspect", config.app_network, "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+        capture_output=True, text=True,
+    )
+    host_address = gateway.stdout.strip() if gateway.returncode == 0 else ""
+    if not host_address:
+        return None
+    return f"http://{host_address}:{host_port}"
 
 
 async def _wait_for_healthy(container_name: str) -> bool:
@@ -637,6 +808,29 @@ async def _wait_for_healthy(container_name: str) -> bool:
             return True
         await asyncio.sleep(_HEALTH_CHECK_DELAY_SECONDS)
     return False
+
+
+async def _wait_for_reachable_from_orchestrator(preview_url: str) -> tuple[bool, str]:
+    """Curls preview_url directly from THIS process -- no `docker exec` into
+    the sibling -- the same network path (this process's own container's
+    view of preprod_network) verify_pre_prod's Testing Agent turn will use.
+    Distinct from, and strictly more meaningful than, _wait_for_healthy:
+    that only proves the sibling's own curl-against-itself succeeds, which
+    stays green even when nothing else on the host can resolve its name at
+    all (exactly the bug this function exists to catch). Returns
+    (reachable, diagnostic); diagnostic is the last curl error seen, or
+    "reachable" on success."""
+    last_error = "no attempt made"
+    for _ in range(_HEALTH_CHECK_ATTEMPTS):
+        check = subprocess.run(
+            ["curl", "-sf", "-m", "5", f"{preview_url}/health"],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0:
+            return True, "reachable"
+        last_error = check.stderr.strip() or f"curl exited {check.returncode}"
+        await asyncio.sleep(_HEALTH_CHECK_DELAY_SECONDS)
+    return False, last_error
 
 
 def teardown_self_hosted_preprod(repo: Path, run_id: str) -> None:
@@ -658,6 +852,19 @@ def teardown_self_hosted_preprod(repo: Path, run_id: str) -> None:
 
 def _candidate_image_tag(config: "environments.SelfHostedVMConfig", run_id: str) -> str:
     return f"{_local_image_name(config)}:{run_id}"
+
+
+def _image_of(container_name: str) -> str | None:
+    """The image reference (as originally passed to `docker run`, e.g.
+    'agentra:a1b2c3d') backing a running container -- captured before
+    removing that container, since the container name won't resolve it
+    afterward. None if the container doesn't exist / inspect fails
+    (best-effort, same as every other cleanup call in this module)."""
+    inspect = subprocess.run(
+        ["docker", "inspect", container_name, "--format", "{{.Config.Image}}"],
+        capture_output=True, text=True,
+    )
+    return inspect.stdout.strip() if inspect.returncode == 0 and inspect.stdout.strip() else None
 
 
 def _other_color(color: str) -> str:
@@ -788,6 +995,7 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
 
     if not await _wait_for_healthy(new_container):
         subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+        subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
         return AgentResult(
             ok=False,
             text=f"{new_container} did not become healthy -- promotion aborted, "
@@ -805,6 +1013,7 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
     )
     if reload.returncode != 0:
         subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
+        subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
         return AgentResult(
             ok=False,
             text=f"nginx reload to {new_color} failed: {reload.stderr.strip()} -- promotion aborted, "
@@ -813,7 +1022,19 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
             cost_usd=0.0, turns=0,
         )
 
+    # The outgoing color's image is never referenced again once its container
+    # is gone -- captured before removal (the container name won't resolve it
+    # afterward) and reclaimed right alongside it. Without this, every
+    # successful promotion leaves one more full image (~GBs) permanently
+    # orphaned: _reclaim_build_disk_space's `docker image prune -f` only
+    # catches *dangling* (untagged) images, and this one still carries its
+    # real tag. Confirmed live: this exact leak filled the VM's disk to 100%
+    # (16G/16G) after a handful of same-day promotions, deadlocking every
+    # subsequent autonomous cycle at pull_latest before real work could start.
+    old_image = _image_of(old_container)
     subprocess.run(["docker", "rm", "-f", old_container], capture_output=True, text=True)
+    if old_image:
+        subprocess.run(["docker", "rmi", old_image], capture_output=True, text=True)
 
     return AgentResult(
         ok=True,

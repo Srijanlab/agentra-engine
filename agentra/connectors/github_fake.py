@@ -166,6 +166,115 @@ class FakeGitHubBackend:
             return match.group(1) if match else None
         return None
 
+    _IN_PROGRESS_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
+
+    def get_in_progress_session_id(self, repo_url: str, issue_number: int) -> str | None:
+        comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
+        for comment in reversed(comments):
+            if not self._IN_PROGRESS_BRANCH_RE.search(comment):
+                continue
+            match = self._IN_PROGRESS_SESSION_ID_RE.search(comment)
+            return match.group(1) if match else None
+        return None
+
+    # Human-in-the-loop escalation (GitHub issue #34) -- same marker/regex
+    # shapes as github_issue_lifecycle.py's real implementation, reimplemented
+    # here (rather than relying on it) for the same reason every other method
+    # in this class is: github_issue_lifecycle.py binds add_comment/
+    # list_comments as local names at import time, so patching
+    # github_issues.add_comment later (this class's own methods, via
+    # install() below) would never reach it.
+    _HUMAN_INPUT_MARKER = "Human-Input-Required (agentra):"
+    _HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
+    _HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
+    _HUMAN_INPUT_BRANCH_RE = re.compile(r"^Branch: (\S+)$", re.MULTILINE)
+    _HUMAN_INPUT_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
+    _HUMAN_INPUT_TRACKING_ISSUE_RE = re.compile(r"^Tracking-Issue: (\d+)$", re.MULTILINE)
+    _HUMAN_INPUT_QUESTION_RE = re.compile(r"^Question: (.*)$", re.MULTILINE)
+    # "Spec (agentra):" duplicated as a literal (not _SPEC_MARKER) -- that
+    # class attribute is defined later in this same class body, below
+    # record_commit, and isn't available yet at this point during class
+    # construction.
+    _INTERNAL_COMMENT_PREFIXES = ("In-Progress-Branch:", "Spec (agentra):", "Commit:", _HUMAN_INPUT_MARKER, "Answered:")
+
+    def record_human_input_context(
+        self,
+        repo_url: str,
+        issue_number: int,
+        *,
+        app: str,
+        run_id: str,
+        question: str,
+        branch: str | None = None,
+        session_id: str | None = None,
+        tracking_issue: int | None = None,
+    ) -> None:
+        question_line = " ".join(question.split())
+        body = f"{self._HUMAN_INPUT_MARKER}\nApp: {app}\nRun-ID: {run_id}\n"
+        if branch:
+            body += f"Branch: {branch}\n"
+        if session_id:
+            body += f"Session-ID: {session_id}\n"
+        if tracking_issue is not None:
+            body += f"Tracking-Issue: {tracking_issue}\n"
+        body += f"Question: {question_line}"
+        self.add_comment(repo_url, issue_number, body)
+
+    def get_human_input_context(self, repo_url: str, issue_number: int) -> dict | None:
+        comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
+        for comment in reversed(comments):
+            if not comment.startswith(self._HUMAN_INPUT_MARKER):
+                continue
+            app_m = self._HUMAN_INPUT_APP_RE.search(comment)
+            run_id_m = self._HUMAN_INPUT_RUN_ID_RE.search(comment)
+            branch_m = self._HUMAN_INPUT_BRANCH_RE.search(comment)
+            session_id_m = self._HUMAN_INPUT_SESSION_ID_RE.search(comment)
+            tracking_issue_m = self._HUMAN_INPUT_TRACKING_ISSUE_RE.search(comment)
+            question_m = self._HUMAN_INPUT_QUESTION_RE.search(comment)
+            return {
+                "app": app_m.group(1) if app_m else None,
+                "run_id": run_id_m.group(1) if run_id_m else None,
+                "branch": branch_m.group(1) if branch_m else None,
+                "session_id": session_id_m.group(1) if session_id_m else None,
+                "tracking_issue": int(tracking_issue_m.group(1)) if tracking_issue_m else None,
+                "question": question_m.group(1) if question_m else None,
+            }
+        return None
+
+    def record_human_answer(self, repo_url: str, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
+        body = f"Answered: {answer}"
+        if resumed_run_key:
+            body += f"\n\nResuming as run {resumed_run_key}."
+        self.add_comment(repo_url, issue_number, body)
+
+    def find_unanswered_human_input_comment(self, repo_url: str, issue_number: int) -> str | None:
+        comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
+        marker_seen = False
+        for comment in comments:  # oldest-first
+            if comment.startswith(self._HUMAN_INPUT_MARKER):
+                marker_seen = True
+                continue
+            if not marker_seen:
+                continue
+            if any(comment.startswith(prefix) for prefix in self._INTERNAL_COMMENT_PREFIXES):
+                continue
+            if not comment.strip():
+                continue
+            return comment.strip()
+        return None
+
+    def remove_label(self, repo_url: str, issue_number: int, label: str) -> None:
+        if issue_number in self.issues[repo_url]:
+            existing = self.issues[repo_url][issue_number]["labels"]
+            self.issues[repo_url][issue_number]["labels"] = [l for l in existing if l != label]
+            self._save()
+
+    def issue_html_url(self, repo_url: str, issue_number: int) -> str | None:
+        issue = self.issues[repo_url].get(issue_number)
+        if issue is not None:
+            return issue.get("html_url")
+        return f"{_repo_https_url(repo_url)}/issues/{issue_number}"
+
     def record_commit(self, repo_url: str, issue_number: int, commit_sha: str) -> None:
         self.add_comment(repo_url, issue_number, f"Commit: {commit_sha}")
 
@@ -259,11 +368,18 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),
         (github_issues, "get_in_progress_branch", backend.get_in_progress_branch),
         (github_issues, "get_in_progress_run_id", backend.get_in_progress_run_id),
+        (github_issues, "get_in_progress_session_id", backend.get_in_progress_session_id),
         (github_issues, "record_spec", backend.record_spec),
         (github_issues, "get_spec", backend.get_spec),
         (github_issues, "record_commit", backend.record_commit),
         (github_issues, "add_labels", backend.add_labels),
         (github_issues, "ensure_labels", backend.ensure_labels),
+        (github_issues, "remove_label", backend.remove_label),
+        (github_issues, "issue_html_url", backend.issue_html_url),
+        (github_issues, "record_human_input_context", backend.record_human_input_context),
+        (github_issues, "get_human_input_context", backend.get_human_input_context),
+        (github_issues, "record_human_answer", backend.record_human_answer),
+        (github_issues, "find_unanswered_human_input_comment", backend.find_unanswered_human_input_comment),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
     ]

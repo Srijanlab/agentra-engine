@@ -21,6 +21,19 @@ _IN_PROGRESS_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
 _SPEC_MARKER = "Spec (agentra):"
 _SPEC_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
+# Human-in-the-loop escalation (GitHub issue #34): resume-correlation data
+# stamped on a needs_human issue, same post/read-most-recent comment pattern
+# as the In-Progress-Branch/Spec markers above. Question is stored on one
+# line (newlines flattened by the caller) so a single-line regex can read it
+# back without needing a closing sentinel.
+_HUMAN_INPUT_MARKER = "Human-Input-Required (agentra):"
+_HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_BRANCH_RE = re.compile(r"^Branch: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_SESSION_ID_RE = re.compile(r"^Session-ID: (\S+)$", re.MULTILINE)
+_HUMAN_INPUT_TRACKING_ISSUE_RE = re.compile(r"^Tracking-Issue: (\d+)$", re.MULTILINE)
+_HUMAN_INPUT_QUESTION_RE = re.compile(r"^Question: (.*)$", re.MULTILINE)
+
 
 def record_in_progress_branch(
     repo_url: str, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None
@@ -127,6 +140,121 @@ def get_spec(repo_url: str, issue_number: int) -> dict | None:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def record_human_input_context(
+    repo_url: str,
+    issue_number: int,
+    *,
+    app: str,
+    run_id: str,
+    question: str,
+    branch: str | None = None,
+    session_id: str | None = None,
+    tracking_issue: int | None = None,
+) -> None:
+    """Stamps the resume-correlation data a HUMAN_INPUT_REQUIRED escalation
+    needs to resume later -- app id, run id, branch, Claude session_id, the
+    ORIGINAL tracking issue (implement_feature's resolves_id/sub_feature_of,
+    distinct from this needs_human issue itself -- None for an escalation
+    with no separate tracking issue, e.g. discover_opportunities), and the
+    original question -- onto the needs_human issue as a comment. This (not
+    a new database collection) is the single source of truth a resume reads
+    back via get_human_input_context, per the architecture review for
+    GitHub issue #34."""
+    question_line = " ".join(question.split())  # flatten to one line for the regex reader below
+    body = f"{_HUMAN_INPUT_MARKER}\nApp: {app}\nRun-ID: {run_id}\n"
+    if branch:
+        body += f"Branch: {branch}\n"
+    if session_id:
+        body += f"Session-ID: {session_id}\n"
+    if tracking_issue is not None:
+        body += f"Tracking-Issue: {tracking_issue}\n"
+    body += f"Question: {question_line}"
+    add_comment(repo_url, issue_number, body)
+
+
+def get_human_input_context(repo_url: str, issue_number: int) -> dict | None:
+    """The most recently stamped resume-correlation data for a needs_human
+    issue, or None if it was never stamped (e.g. an issue filed before this
+    existed)."""
+    comments = list_comments(repo_url, issue_number)
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if not body.startswith(_HUMAN_INPUT_MARKER):
+            continue
+        app_m = _HUMAN_INPUT_APP_RE.search(body)
+        run_id_m = _HUMAN_INPUT_RUN_ID_RE.search(body)
+        branch_m = _HUMAN_INPUT_BRANCH_RE.search(body)
+        session_id_m = _HUMAN_INPUT_SESSION_ID_RE.search(body)
+        tracking_issue_m = _HUMAN_INPUT_TRACKING_ISSUE_RE.search(body)
+        question_m = _HUMAN_INPUT_QUESTION_RE.search(body)
+        return {
+            "app": app_m.group(1) if app_m else None,
+            "run_id": run_id_m.group(1) if run_id_m else None,
+            "branch": branch_m.group(1) if branch_m else None,
+            "session_id": session_id_m.group(1) if session_id_m else None,
+            "tracking_issue": int(tracking_issue_m.group(1)) if tracking_issue_m else None,
+            "question": question_m.group(1) if question_m else None,
+        }
+    return None
+
+
+# Every marker this module posts as a plain comment, in one place, so
+# find_unanswered_human_input_comment (below) can recognize "one of ours"
+# and skip it rather than mistaking it for a human's reply.
+_INTERNAL_COMMENT_PREFIXES = (
+    "In-Progress-Branch:",
+    _SPEC_MARKER,
+    "Commit:",
+    _HUMAN_INPUT_MARKER,
+    "Answered:",
+)
+
+
+def find_unanswered_human_input_comment(repo_url: str, issue_number: int) -> str | None:
+    """Polling-based half of the GitHub-issue-comment answer channel -- no
+    inbound webhook (see connectors/slack.py's module docstring and
+    design.md for why Slack-reply-driven resume is deferred to its own
+    security review). Scans comments oldest-first for the first one posted
+    after the most recent Human-Input-Required marker that isn't itself one
+    of this module's own structured marker comments -- that is treated as
+    the human's answer. Returns None if the issue has no Human-Input-Required
+    marker yet, or nothing has been posted since it.
+
+    Best-effort and coarse: this can't tell a genuine answer from an
+    unrelated human comment on the same issue. Acceptable for a v1 --
+    record_human_answer removes the needs_human label the moment one is
+    found, so a stray comment can trigger at most one unwanted resume
+    attempt, not a silent infinite loop."""
+    comments = list_comments(repo_url, issue_number)
+    marker_seen = False
+    for comment in comments:  # oldest-first: the marker must come before its answer
+        body = comment.get("body") or ""
+        if body.startswith(_HUMAN_INPUT_MARKER):
+            marker_seen = True
+            continue
+        if not marker_seen:
+            continue
+        if any(body.startswith(prefix) for prefix in _INTERNAL_COMMENT_PREFIXES):
+            continue
+        if not body.strip():
+            continue
+        return body.strip()
+    return None
+
+
+def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
+    """Comments the human's answer onto the needs_human issue -- called once
+    a dashboard answer submission (or a GitHub-comment-driven resume via
+    find_unanswered_human_input_comment) has been accepted. Leaves the issue
+    open (a resumed run can still hit a second HUMAN_INPUT_REQUIRED);
+    memory.py's record_human_answer also strips the need_human label right
+    after this."""
+    body = f"Answered: {answer}"
+    if resumed_run_key:
+        body += f"\n\nResuming as run {resumed_run_key}."
+    add_comment(repo_url, issue_number, body)
 
 
 def close_issue(

@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-xdist>=3.6",
 ]
 
 [project.scripts]
@@ -30,3 +31,13 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["agentra*"]
+
+[tool.pytest.ini_options]
+# -n auto: parallelize across all available cores by default (pytest-xdist) --
+# the suite is dominated by subprocess-heavy integration tests (real git,
+# docker, graphify tree-sitter calls, not pure in-memory unit tests), which
+# is exactly the workload that benefits most from real parallelism rather
+# than sequential wall-clock time. Applies automatically to every `pytest`
+# invocation (agent or human) without needing -n auto typed out each time --
+# no separate CI config or Makefile target to keep in sync.
+addopts = "-n auto"

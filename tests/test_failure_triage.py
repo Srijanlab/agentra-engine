@@ -9,7 +9,7 @@ just logged, since a retry next cycle -- not a backlog entry -- is the fix.
 
 from unittest.mock import MagicMock
 
-from agentra.memory import Memory, cannot_be_fixed_by_agentra, is_transient_failure
+from agentra.memory import Memory, cannot_be_fixed_by_agentra, is_login_required_failure, is_transient_failure
 
 
 def test_is_transient_failure_detects_known_patterns():
@@ -92,6 +92,72 @@ def test_cannot_be_fixed_by_agentra_ignores_a_bare_status_code_in_unrelated_pros
     assert not cannot_be_fixed_by_agentra("HTTP 403 returned by a third-party API the app under test calls")
 
 
+def test_is_login_required_failure_detects_claude_code_auth_failures():
+    # GitHub issue #42: a prior autonomous cycle crashed opaquely on this
+    # exact text -- the CLI's own "no valid session on this runner" failure.
+    assert is_login_required_failure(
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)"
+    )
+    assert is_login_required_failure("Invalid API key · Please run /login")
+    assert is_login_required_failure("OAuth token has expired · Please run /login")
+
+
+def test_is_login_required_failure_false_for_an_ordinary_failure():
+    assert not is_login_required_failure("3 tests failed: test_login, test_logout, test_signup")
+    assert not is_login_required_failure("403 Write access to repository not granted")
+    assert not is_login_required_failure("Reached maximum number of turns (5)")
+
+
+def test_is_login_required_failure_detects_further_phrasing_variants():
+    """GitHub issue #42's resume brief asks to confirm detection covers
+    "this exact error string and any variants" -- the CLI has been
+    confirmed to phrase the /login instruction inconsistently (with/without
+    "please", with/without backticks around the command)."""
+    assert is_login_required_failure("Please run `/login` to continue")
+    assert is_login_required_failure("You must run /login before doing anything else")
+    assert is_login_required_failure("Not logged in.")
+    # Still must not fire on ordinary, agent-fixable text that merely
+    # mentions "run" and "login" without the specific "/login" command --
+    # a real regression risk when widening the pattern.
+    assert not is_login_required_failure("Test run failed: login endpoint returned 500")
+    assert not is_login_required_failure("failed to run the login flow's integration test")
+
+
+def test_cannot_be_fixed_by_agentra_treats_a_login_failure_as_unfixable():
+    assert cannot_be_fixed_by_agentra(
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)"
+    )
+
+
+def test_is_transient_failure_false_for_a_login_failure():
+    # A login failure must never be treated as "just retry next cycle" --
+    # only record_failure's needs_human/blocking_agentra path handles it.
+    assert not is_transient_failure(
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)"
+    )
+
+
+def test_record_failure_flags_a_login_failure_as_needing_a_human_and_blocking(tmp_path, monkeypatch):
+    mem = Memory(tmp_path)
+    recorded = {}
+
+    def fake_record_known_bug(
+        run_id, severity, diagnosis, proposed_fix, source="prod-monitoring", external_id=None,
+        needs_human=False, blocking_agentra=False,
+    ):
+        recorded.update(needs_human=needs_human, blocking_agentra=blocking_agentra, diagnosis=diagnosis)
+
+    monkeypatch.setattr(mem, "record_known_bug", fake_record_known_bug)
+
+    mem.record_failure(
+        "run1", "autonomous-cycle",
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+    )
+
+    assert recorded["needs_human"] is True
+    assert recorded["blocking_agentra"] is True
+
+
 def test_record_failure_flags_an_unfixable_failure_as_needing_a_human_and_blocking(tmp_path, monkeypatch):
     mem = Memory(tmp_path)
     recorded = {}
@@ -108,3 +174,144 @@ def test_record_failure_flags_an_unfixable_failure_as_needing_a_human_and_blocki
 
     assert recorded["needs_human"] is True
     assert recorded["blocking_agentra"] is True
+
+
+# -- GitHub issue #42: Slack escalation for Claude Code auth/login failures --
+
+
+def test_record_failure_notifies_slack_with_an_actionable_message_for_a_new_login_failure(tmp_path, monkeypatch):
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: 42)
+    monkeypatch.setattr(mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
+    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis, detail="": None)  # genuinely new
+    slack_calls = []
+    monkeypatch.setattr(slack, "notify_human_input_required", lambda **k: slack_calls.append(k) or True)
+
+    mem.record_failure(
+        "run1", "understand_codebase",
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+    )
+
+    assert len(slack_calls) == 1
+    call = slack_calls[0]
+    # The exact actionable message GitHub issue #42 asks for.
+    assert call["question"] == "Claude Code session is not authenticated on this runner -- run /login and re-trigger."
+    assert call["issue_url"] == "https://github.com/acme/app/issues/42"
+    assert call["app"] == tmp_path.name
+    assert call["run_id"] == "run1"
+
+
+def test_record_failure_does_not_notify_slack_for_an_ordinary_unfixable_failure(tmp_path, monkeypatch):
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: 42)
+    monkeypatch.setattr(
+        slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not notify"))
+    )
+
+    mem.record_failure("run1", "implement_feature", "403 Write access to repository not granted")
+
+
+def test_record_failure_does_not_notify_slack_for_a_transient_failure(tmp_path, monkeypatch):
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(
+        slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not notify"))
+    )
+
+    mem.record_failure("run1", "testing", "Reached maximum number of turns (5)")
+
+
+def test_record_failure_does_not_re_notify_slack_once_the_same_login_failure_is_already_reported(tmp_path, monkeypatch):
+    """GitHub issue #42's requirement (4): once escalated and awaiting a
+    human, this must not perpetually resurface as a fresh Slack ping on
+    every occurrence -- only a genuinely new (not-already-open) diagnosis
+    triggers the notification."""
+    from agentra.connectors import slack
+
+    mem = Memory(tmp_path)
+    known_bug_calls = []
+    monkeypatch.setattr(mem, "record_known_bug", lambda *a, **k: known_bug_calls.append(k) or 42)
+    monkeypatch.setattr(mem, "_find_similar_open_bug", lambda diagnosis, detail="": "42")  # already open
+    monkeypatch.setattr(
+        slack, "notify_human_input_required", lambda **k: (_ for _ in ()).throw(AssertionError("must not re-notify"))
+    )
+
+    # Must not raise (the Slack mock above throws if it's ever called) --
+    # record_known_bug itself is still called (it does its own comment-on-
+    # duplicate dedup and keeps needs_human/blocking_agentra applied).
+    mem.record_failure(
+        "run2", "understand_codebase",
+        "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+    )
+    assert len(known_bug_calls) == 1
+    assert known_bug_calls[0]["needs_human"] is True
+    assert known_bug_calls[0]["blocking_agentra"] is True
+
+
+# -- GitHub issue #42 (resumed): auto-clearing a resolved auth blocking bug --
+# so it stops resurfacing in the backlog once a human has actually
+# re-authenticated, without requiring them to separately close the GitHub
+# issue by hand.
+
+
+def _auth_bug(number: str) -> dict:
+    return {
+        "run_id": number, "severity": "high",
+        "diagnosis": "understand_codebase failed during an autonomous cycle",
+        "description": "understand_codebase failed during an autonomous cycle",
+        "proposed_fix": "Claude Code returned an error result: Not logged in · Please run /login (exit code: 1)",
+        "source": "autonomous-failure", "external_id": number,
+        "html_url": f"https://github.com/acme/app/issues/{number}",
+        "needs_human": True, "blocking_agentra": True,
+    }
+
+
+def _non_auth_bug(number: str) -> dict:
+    return {
+        "run_id": number, "severity": "high",
+        "diagnosis": "implement_feature failed during an autonomous cycle",
+        "description": "implement_feature failed during an autonomous cycle",
+        "proposed_fix": "403 Write access to repository not granted",
+        "source": "autonomous-failure", "external_id": number,
+        "html_url": f"https://github.com/acme/app/issues/{number}",
+        "needs_human": True, "blocking_agentra": True,
+    }
+
+
+def test_clear_resolved_auth_bugs_clears_only_auth_classified_blocking_bugs(tmp_path, monkeypatch):
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [_auth_bug("11"), _non_auth_bug("12")])
+    cleared_calls = []
+    monkeypatch.setattr(mem, "clear_known_bug", lambda id_, resolution_note=None: cleared_calls.append((id_, resolution_note)))
+
+    cleared = mem.clear_resolved_auth_bugs("run3")
+
+    assert cleared == ["11"]
+    assert len(cleared_calls) == 1
+    assert cleared_calls[0][0] == "11"
+    assert "re-authentication worked" in cleared_calls[0][1]
+
+
+def test_clear_resolved_auth_bugs_is_a_noop_with_no_blocking_bugs(tmp_path, monkeypatch):
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [])
+    monkeypatch.setattr(
+        mem, "clear_known_bug", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not clear anything"))
+    )
+
+    assert mem.clear_resolved_auth_bugs("run4") == []
+
+
+def test_clear_resolved_auth_bugs_leaves_non_auth_blocking_bugs_alone(tmp_path, monkeypatch):
+    mem = Memory(tmp_path)
+    monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [_non_auth_bug("13")])
+    monkeypatch.setattr(
+        mem, "clear_known_bug", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not clear a non-auth blocking bug"))
+    )
+
+    assert mem.clear_resolved_auth_bugs("run5") == []

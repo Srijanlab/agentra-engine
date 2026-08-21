@@ -24,6 +24,7 @@ from agentra.memory.core import (
     _github_closed_bug_to_dict,
     _label_names,
     cannot_be_fixed_by_agentra,
+    is_login_required_failure,
     is_transient_failure,
 )
 
@@ -86,14 +87,53 @@ class MemoryIssuesMixin:
                 return candidate.get("external_id")
         return None
 
-    def _find_similar_open_bug(self, diagnosis: str) -> str | None:
+    def _find_similar_open_bug(self, diagnosis: str, detail: str = "") -> str | None:
         """Best-effort duplicate suppression: record_failure() fires on every
         non-transient failure, and an unfixed real bug produces the same
         failure on every retry — without this, each cycle filed its own fresh
         issue for the identical problem. Confirmed live: 4 near-identical
         '403 Write access to repository not granted' bugs (#7-#10) from four
-        consecutive cycles hitting the same broken code path."""
-        return self._find_similar_open(diagnosis, self.known_bugs(), "diagnosis")
+        consecutive cycles hitting the same broken code path.
+
+        GitHub issue #42 regression (resumed): `diagnosis` alone used to be
+        the ONLY thing compared, but it's always the same generic
+        boilerplate title (record_failure's f"{step_name} failed during an
+        autonomous cycle") -- difflib scores two of those as highly
+        "similar" purely off that shared boilerplate suffix, regardless of
+        what actually failed. Confirmed live via a regression test
+        (test_issue42_auth_failure_regression.py): an unrelated
+        run_local_tests TypeError bug got silently merged into the SAME
+        GitHub issue as an understand_codebase Claude Code auth failure --
+        i.e. this dedup was the "close-issue-on-fix logic" that was
+        actually broken, not the auth detection itself. `detail` (the real
+        failure text -- record_known_bug's proposed_fix / record_failure's
+        raw text) is now folded into the comparison so it's content-aware,
+        not just title-aware.
+
+        A Claude Code auth/login failure specifically gets its own
+        deterministic fast path ahead of the fuzzy fallback: it's a single
+        well-known failure CLASS (is_login_required_failure), not
+        free-form text, and the several different message templates that
+        wrap it (agents/brain/__init__.py's top-level cycle-exception text
+        vs agents/base.py's per-tool-call AgentResult.text) don't share
+        enough literal substring overlap for generic difflib similarity to
+        reliably clear the threshold between them -- confirmed by direct
+        computation, ~0.42 ratio, well under
+        _DUPLICATE_BUG_SIMILARITY_THRESHOLD. Matching on the classifier
+        directly means the exact same underlying credential problem still
+        dedupes correctly no matter which of the nine tool call sites (or
+        the top-level orchestrator call) first surfaced it."""
+        bugs = self.known_bugs()
+        if is_login_required_failure(detail):
+            for candidate in bugs:
+                if is_login_required_failure(f"{candidate.get('diagnosis', '')}\n{candidate.get('proposed_fix', '')}"):
+                    return candidate.get("external_id")
+        candidate_text = f"{diagnosis}\n{detail[:300]}"
+        for candidate in bugs:
+            existing = f"{candidate.get('diagnosis', '')}\n{(candidate.get('proposed_fix') or '')[:300]}"
+            if difflib.SequenceMatcher(None, candidate_text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+                return candidate.get("external_id")
+        return None
 
     def record_known_bug(
         self,
@@ -106,33 +146,139 @@ class MemoryIssuesMixin:
         needs_human: bool = False,
         blocking_agentra: bool = False,
         title: str | None = None,
-    ) -> None:
+    ) -> int | None:
         """If a similar bug is already open, adds a comment instead of filing
         a duplicate — and applies needs_human/blocking_agentra labels to
         THAT issue (GitHub's add-labels endpoint is additive), since the
-        original occurrence might not have been recognized as unfixable."""
+        original occurrence might not have been recognized as unfixable.
+
+        Returns the issue number (the duplicate's, or the freshly created
+        one's) so a HUMAN_INPUT_REQUIRED escalation can stamp resume
+        correlation data onto it via record_human_input_context -- or None
+        if GitHub is unreachable/has no remote, matching every other
+        best-effort write in this module."""
         repo_url = self._repo_url()
         if not repo_url:
             logger.error("record_known_bug: %s has no github.com remote -- bug %r was NOT recorded anywhere", self.repo, diagnosis)
-            return
+            return None
         extra_labels = ([_NEED_HUMAN_LABEL] if needs_human else []) + ([_BLOCKING_AGENTRA_LABEL] if blocking_agentra else [])
         try:
             from agentra.connectors import github_issues
 
-            duplicate_of = self._find_similar_open_bug(diagnosis)
+            duplicate_of = self._find_similar_open_bug(diagnosis, proposed_fix)
             if duplicate_of and duplicate_of.isdigit():
                 github_issues.add_comment(repo_url, int(duplicate_of), f"Still occurring (run {run_id}, source: {source}).\n\n{diagnosis}")
                 if extra_labels:
                     github_issues.add_labels(repo_url, int(duplicate_of), extra_labels)
                 logger.info("record_known_bug: run %s matched existing open bug #%s -- commented instead of filing a duplicate", run_id, duplicate_of)
-                return
+                return int(duplicate_of)
 
             body = f"Description: {diagnosis}\n\nSeverity: {severity}\nSource: {source}\n\nProposed fix:\n{proposed_fix}"
             if external_id:
                 body += f"\n\nExternal-ID: {external_id}"
-            github_issues.create_issue(repo_url, title or diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
+            created = github_issues.create_issue(repo_url, title or diagnosis, body, labels=[_BUG_LABEL, _AGENTRA_LABEL, *extra_labels])
+            return created.get("number")
         except Exception:
             logger.error("record_known_bug: failed to create a GitHub issue on %s -- bug %r was NOT recorded anywhere", repo_url, diagnosis, exc_info=True)
+            return None
+
+    def record_human_input_context(
+        self,
+        issue_number: int,
+        *,
+        app: str,
+        run_id: str,
+        question: str,
+        branch: str | None = None,
+        session_id: str | None = None,
+        tracking_issue: int | None = None,
+    ) -> None:
+        """Stamps resume-correlation data (app id, run id, branch, session_id,
+        the original tracking issue, the original question) onto a
+        needs_human issue that record_known_bug just filed/updated -- the
+        same post-and-read-most-recent comment pattern as
+        record_in_progress_branch/record_spec, so the needs_human GitHub
+        issue stays the single source of truth for blocked-run state (per
+        architecture review) rather than a new database collection.
+        Best-effort: a failure here just means a resume has to fall back to
+        whatever the run record in the dashboard's own registry still has."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_human_input_context(
+                repo_url, issue_number, app=app, run_id=run_id, branch=branch,
+                session_id=session_id, question=question, tracking_issue=tracking_issue,
+            )
+        except Exception:
+            logger.warning("record_human_input_context: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def get_human_input_context(self, issue_number: int) -> dict | None:
+        """The most recently stamped resume-correlation data for a
+        needs_human issue, or None. Read back by a future GitHub-comment-
+        driven resume path (not built in this pass -- see
+        .agentra/memory/architecture/design.md)."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.get_human_input_context(repo_url, issue_number)
+        except Exception:
+            return None
+
+    def record_human_answer(self, issue_number: int, answer: str, resumed_run_key: str | None = None) -> None:
+        """Comments the human's answer onto the needs_human issue and removes
+        the need_human label (GitHub issue is updated to reflect it was
+        answered) -- called once a dashboard answer submission has been
+        accepted and a resume dispatched. Best-effort, same as every other
+        issue-lifecycle write here."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.record_human_answer(repo_url, issue_number, answer, resumed_run_key)
+            github_issues.remove_label(repo_url, issue_number, _NEED_HUMAN_LABEL)
+        except Exception:
+            logger.warning("record_human_answer: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
+    def issue_html_url(self, issue_number: int) -> str | None:
+        """The browsable GitHub URL for an issue, or None if this repo has
+        no github.com remote. Used to build the GitHub-issue link in a
+        HUMAN_INPUT_REQUIRED Slack notification and the dashboard's 'Needs
+        your input' panel -- no live API call, just owner/repo/number."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.issue_html_url(repo_url, issue_number)
+        except Exception:
+            return None
+
+    def find_unanswered_human_input_comment(self, issue_number: int) -> str | None:
+        """The human's answer to a needs_human issue's blocking question, if
+        one has been posted as a plain GitHub comment since the question was
+        filed -- the polling-based half of the GitHub-issue-comment resume
+        channel (see github_issue_lifecycle.py's
+        find_unanswered_human_input_comment for the matching heuristic;
+        there is no inbound webhook receiving these). None if the issue has
+        no Human-Input-Required marker yet or nothing has been posted since."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+
+            return github_issues.find_unanswered_human_input_comment(repo_url, issue_number)
+        except Exception:
+            return None
 
     def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
         """Marks status:shipped and leaves the issue OPEN (mark_shipped) —
@@ -151,17 +297,107 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
 
+    def clear_resolved_auth_bugs(self, run_id: str) -> list[str]:
+        """GitHub issue #42 hardening: a Claude Code CLI auth/login-failure
+        blocking bug is unlike every other blocking_agentra bug (e.g. a
+        missing GitHub permission) in one important way -- there's a cheap,
+        unambiguous way to confirm it's actually resolved: just get one
+        real Claude Code CLI turn back with no auth failure. Every other
+        unfixable-by-agentra bug stays blocking until a human explicitly
+        closes/clears the issue on GitHub, because agentra has no reliable
+        way to verify THOSE are fixed on its own; this one it does.
+
+        Without this, once filed, an auth-failure bug stayed open forever
+        (nothing else in this codebase ever called clear_known_bug on it --
+        implement_feature can't "implement a fix" for a human needing to
+        run `claude /login`), so it kept surfacing as the same still-open
+        blocking bug on every future scheduled trigger indefinitely even
+        after a human had already fixed the underlying credentials and
+        simply hadn't also remembered to separately close the GitHub issue
+        by hand -- confirmed to be exactly why GitHub issue #42 itself kept
+        resurfacing despite two prior shipped fixes that only handled
+        detection/escalation, not this closing-the-loop step.
+
+        Callers (run_autonomous_cycle, orchestrator.run_cycle) must only
+        call this after confirming *this exact run* actually got a real,
+        successful Claude Code CLI turn back with no auth failure of its
+        own this run -- see their own call sites for that guard; this
+        method itself does not re-verify anything, it just clears whatever
+        is currently open and auth-classified.
+
+        Returns the external_id (GitHub issue number as str) of each bug
+        cleared, for logging/tests."""
+        cleared: list[str] = []
+        for bug in self.blocking_bugs():
+            if is_login_required_failure(f"{bug.get('diagnosis', '')}\n{bug.get('proposed_fix', '')}"):
+                self.clear_known_bug(
+                    bug["external_id"],
+                    resolution_note=(
+                        f"Auto-resolved by run {run_id}: a subsequent autonomous cycle completed a "
+                        "Claude Code CLI call successfully, confirming re-authentication worked. "
+                        "Closing so this doesn't keep blocking or resurfacing on future cycles."
+                    ),
+                )
+                cleared.append(bug["external_id"])
+        return cleared
+
     def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
         """The one place a failed agent turn's full output should be reported to.
-        Transient failures are just logged; permanent failures become GitHub Issues."""
+        Transient failures are just logged; permanent failures become GitHub Issues.
+
+        GitHub issue #42: a Claude Code CLI auth/login failure additionally
+        gets an active Slack escalation (the same human-in-the-loop channel
+        GitHub issue #34 built for HUMAN_INPUT_REQUIRED decisions -- see
+        connectors/slack.py) with a clear, actionable message, since a human
+        needs to actually go run `claude /login` before anything else can
+        proceed -- filing the GitHub issue alone is easy to miss. Only sent
+        for a genuinely new occurrence (diagnosis not already matching an
+        open bug -- see _find_similar_open_bug below): once reported, this
+        guards against re-notifying for every subsequent occurrence of the
+        *same* unresolved failure -- both the (bounded, same-cycle) case of
+        more than one tool call hitting it before that cycle's own
+        hard-stop takes effect, AND every later cycle's own self-test retry
+        (run_autonomous_cycle no longer hard-blocks pre-flight purely on an
+        open auth-classified blocking bug -- see clear_resolved_auth_bugs
+        below for why one more real attempt is safe/cheap here) hitting it
+        again while a human hasn't actually fixed credentials yet."""
         if is_transient_failure(text):
             self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
             return
         unfixable = cannot_be_fixed_by_agentra(text)
-        self.record_known_bug(
-            run_id, severity, f"{step_name} failed during an autonomous cycle", text[:2000],
+        diagnosis = f"{step_name} failed during an autonomous cycle"
+        auth_failure = is_login_required_failure(text)
+        already_reported = auth_failure and self._find_similar_open_bug(diagnosis, text) is not None
+        issue_number = self.record_known_bug(
+            run_id, severity, diagnosis, text[:2000],
             source="autonomous-failure", needs_human=unfixable, blocking_agentra=unfixable,
         )
+        if auth_failure and not already_reported:
+            self._notify_claude_code_auth_failure(run_id, issue_number)
+
+    def _notify_claude_code_auth_failure(self, run_id: str, issue_number: int | None) -> None:
+        """GitHub issue #42: best-effort outbound Slack notification for a
+        Claude Code CLI auth/login failure, reusing GitHub issue #34's
+        connectors/slack.py -- silently skipped (never raised) if Slack
+        isn't configured for this deployment, same as every other call to
+        notify_human_input_required."""
+        try:
+            from agentra import urls
+            from agentra.connectors import slack
+
+            issue_url = self.issue_html_url(issue_number) if issue_number is not None else None
+            slack.notify_human_input_required(
+                app=self.repo.name,
+                run_id=run_id,
+                question=(
+                    "Claude Code session is not authenticated on this runner -- "
+                    "run /login and re-trigger."
+                ),
+                issue_url=issue_url,
+                dashboard_url=urls.dashboard_run_url(run_id, self.repo.name),
+            )
+        except Exception:
+            logger.warning("_notify_claude_code_auth_failure: failed to notify for run %s", run_id, exc_info=True)
 
     def record_in_progress_branch(
         self, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None

@@ -20,26 +20,31 @@ from agentra.memory import Memory
 STANDUP_SYSTEM_PROMPT = """You are writing a daily standup update for agentra, an autonomous engineering system.
 You are given, verbatim, everything this project's own record-keeping has about the last 24 hours of activity, its recently shipped features, and its current backlog.
 
-Write a daily standup update structured by agent. Respond with a JSON block containing the standup updates for each agent. The JSON block must look exactly like this:
+The input starts with a "Project: <app name>" line -- read the app name from there.
+
+Write a daily standup update structured by agent. Respond with a JSON block containing the standup updates for each agent. The JSON block must look exactly like this (using the real agent names and the real app name from the input in place of the bracketed placeholders):
 ```json
 {
   "updates": {
-    "orchestrator": "Yesterday: [brief summary of orchestrator activity]. Today: [brief plan].",
-    "codebase": "Yesterday: [brief summary]. Today: [brief plan].",
-    "discovery": "Yesterday: [brief summary]. Today: [brief plan].",
-    "implementation": "Yesterday: [brief summary]. Today: [brief plan].",
-    "testing": "Yesterday: [brief summary]. Today: [brief plan].",
-    "deployment": "Yesterday: [brief summary]. Today: [brief plan].",
-    "feedback": "Yesterday: [brief summary]. Today: [brief plan].",
-    "prod_debug": "Yesterday: [brief summary]. Today: [brief plan]."
+    "orchestrator": "Orchestrator, [app name]. Yesterday: [one plain-English sentence]. Today: [one plain-English sentence].",
+    "codebase": "Codebase Agent, [app name]. Yesterday: [...]. Today: [...].",
+    "discovery": "Discovery Agent, [app name]. Yesterday: [...]. Today: [...].",
+    "implementation": "Implementation Agent, [app name]. Yesterday: [...]. Today: [...].",
+    "testing": "Testing Agent, [app name]. Yesterday: [...]. Today: [...].",
+    "deployment": "Deployment Agent, [app name]. Yesterday: [...]. Today: [...].",
+    "feedback": "Analytics Feedback Agent, [app name]. Yesterday: [...]. Today: [...].",
+    "prod_debug": "Production Debugging Agent, [app name]. Yesterday: [...]. Today: [...]."
   }
 }
 ```
 
 Rules:
-- For each agent, summarize their actual logged activity or shipped features in the last 24 hours for "Yesterday", and their role-specific next step or backlog item for "Today".
+- Open every update with "<Agent Name>, <app name>." exactly as shown above, so each update is self-identifying even read on its own, out of context.
+- Write the way a person would actually talk in a standup meeting, not a commit message or a code diff. Say what changed and why it matters in plain English -- never paste raw function/variable names, snake_case identifiers, file paths, or other code syntax verbatim. "Fixed a bug where pre-prod couldn't reach the deployed app over the network" is right; "added _own_container_id/_own_container_name helpers and joined preprod_network" is not -- paraphrase it.
+- One short, concrete sentence each for "Yesterday" and "Today" -- this is a standup, not a changelog. If there's a lot going on, pick the single most important thing, don't list everything.
+- For each agent, base "Yesterday" on their actual logged activity or shipped features in the last 24 hours, and "Today" on their role-specific next step or backlog item.
 - Only mention things that appear in the data you were given. Never invent activity, features, or plans that aren't present.
-- If an agent had no logged activity or shipped features, its update should simply say: "Yesterday: No activity. Today: Idle." or similar, do not pad it out.
+- If an agent had no logged activity or shipped features, its update should simply say: "<Agent Name>, <app name>. Yesterday: No activity. Today: Idle." -- do not pad it out.
 - Ensure the response contains the fenced JSON block and nothing else.
 """
 
@@ -54,9 +59,15 @@ AGENT_LABELS: dict[str, str] = {
     "prod_debug": "Production Debugging Agent",
 }
 
-_IDLE_UPDATES: dict[str, str] = {
-    agent_id: "Yesterday: No activity. Today: Idle." for agent_id in AGENT_LABELS
-}
+def _idle_updates(app_name: str) -> dict[str, str]:
+    """The no-LLM-call fallback for a genuinely empty project (see
+    _is_empty_context) -- kept in the same "<Agent Name>, <app name>. ..."
+    shape the real LLM-generated updates use, so a message read on its own
+    (e.g. in the live standup channel) is self-identifying either way."""
+    return {
+        agent_id: f"{label}, {app_name}. Yesterday: No activity. Today: Idle."
+        for agent_id, label in AGENT_LABELS.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +228,7 @@ async def generate_standup_updates(
         # Nothing at all to report -- don't spend an LLM call manufacturing
         # prose around an empty project. Same rule the model itself is
         # given below: no activity/backlog means say so plainly.
-        return _IDLE_UPDATES
+        return _idle_updates(app_name)
 
     prompt = _format_input(app_name, yesterday_lines, shipped_recently, known_bugs, feature_queue, objective)
     result = await run_agent(

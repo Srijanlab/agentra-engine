@@ -32,6 +32,7 @@ from claude_agent_sdk import (
 )
 
 from agentra.agents.safety import make_hooks
+from agentra.memory.core import is_login_required_failure
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 _WHITESPACE = re.compile(r"\s+")
@@ -61,6 +62,8 @@ def _friendly_error_text(raw: str) -> str:
         return "I needed more steps than I had available to fully answer that -- try asking something narrower, or ask again for another attempt."
     if _CONTRADICTORY_RESULT_SUFFIX in raw:
         return "Claude Code returned a self-contradictory result (known CLI quirk, not a real failure) -- try asking again."
+    if is_login_required_failure(raw):
+        return "Claude Code isn't authenticated on this server right now -- that needs a human to fix (re-run /login or refresh credentials), not something asking again will resolve."
     return raw
 
 RunLogger = Callable[[str], None]
@@ -219,6 +222,13 @@ class AgentResult:
     # turn never produced a ResultMessage at all (the early-return failure
     # paths below).
     session_id: str | None = None
+    # True only for the Claude Code CLI's own "this runner has no valid
+    # session at all" failure (see memory.core.is_login_required_failure) --
+    # distinct from every other reason ok can be False (a failing test, a
+    # rejected diff, a transient API hiccup, ...). Callers that need to react
+    # specifically (skip a retry, route to a distinct diagnostic) can check
+    # this instead of re-deriving it from `text` themselves.
+    auth_failure: bool = False
 
 
 def extract_json_block(text: str) -> dict[str, Any] | None:
@@ -334,6 +344,42 @@ async def run_agent(
                     result_msg = message
             break
         except Exception as exc:
+            exc_text = str(exc)
+            # GitHub issue #42: a prior autonomous cycle crashed opaquely on
+            # "Claude Code returned an error result: Not logged in · Please
+            # run /login (exit code: 1)". Checked first, ahead of both retry
+            # paths below, and deliberately never retried by either of them:
+            # this means the CLI subprocess itself has no valid session on
+            # this runner at all, so every other tool/prompt-shaped signal
+            # below (a stale `resume`, the contradictory-result quirk) is
+            # irrelevant -- a retry reruns the exact same subprocess with the
+            # exact same missing credentials and fails identically, just
+            # slower and more expensively. The only real fix (a human running
+            # `claude /login` or otherwise provisioning credentials on this
+            # runner) is outside agentra's control -- see this module's
+            # docstring note and memory.core.is_login_required_failure, which
+            # also routes this into record_failure's needs_human/
+            # blocking_agentra GitHub-issue path instead of a plain retry.
+            if is_login_required_failure(exc_text):
+                if logger:
+                    logger(
+                        f"claude agent AUTH FAILURE, not retrying: {exc_text} -- this runner's "
+                        "Claude Code CLI has no valid session; a human needs to run `claude /login` "
+                        "(or otherwise refresh credentials) before further cycles can make progress."
+                    )
+                return AgentResult(
+                    ok=False,
+                    text=(
+                        "Claude Code authentication failure -- the CLI reported it is not "
+                        f"usable on this runner ({exc_text}). This needs a human to run "
+                        "`claude /login` or otherwise refresh credentials here; retrying "
+                        "automatically will not help."
+                    ),
+                    json_data=None,
+                    cost_usd=0.0,
+                    turns=0,
+                    auth_failure=True,
+                )
             # A `resume` session_id can go stale -- e.g. it lived only on local
             # disk and the VM was redeployed since (session_store isn't wired up
             # here). The CLI reports this as a plain ProcessError; the SDK
@@ -354,7 +400,7 @@ async def run_agent(
                 options = replace(options, resume=None)
                 resume_fallback_used = True
                 continue
-            is_contradictory = str(exc).endswith(_CONTRADICTORY_RESULT_SUFFIX)
+            is_contradictory = exc_text.endswith(_CONTRADICTORY_RESULT_SUFFIX)
             contradictory_attempts_used += 1
             if is_contradictory and contradictory_attempts_used < max_contradictory_attempts:
                 continue

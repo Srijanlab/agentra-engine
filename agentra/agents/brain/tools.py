@@ -14,6 +14,7 @@ from claude_agent_sdk import tool
 from agentra import change_risk
 from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, implementation, requirements, testing
 from agentra.agents import catalog as agents_catalog
+from agentra.agents.base import AgentResult
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
 from agentra.environments import feature_branch_name
 from agentra.memory.core import _DISCOVERY_LABEL
@@ -33,13 +34,25 @@ def _actionable_bugs(bugs: list[dict]) -> list[dict]:
     return [b for b in bugs if not b.get("needs_human")]
 
 
-def _format_spec(spec: dict) -> str:
-    """Requirements Agent's JSON spec formatted as readable text."""
+def _format_spec(spec: dict, human_answer: str | None = None) -> str:
+    """Requirements Agent's JSON spec formatted as readable text.
+
+    human_answer: human-in-the-loop escalation (GitHub issue #34) -- when
+    resuming an implement_feature call that previously hit
+    HUMAN_INPUT_REQUIRED, the human's answer to the blocking question gets
+    woven directly into this spec text (not just the outer cycle prompt),
+    so the Implementation Agent's resumed turn sees it as part of what it's
+    building, not as a detached side note it might not read."""
     lines = [f"Spec: {spec.get('spec', '')}"]
     criteria = spec.get("acceptance_criteria") or []
     if criteria:
         lines.append("\nAcceptance criteria:")
         lines.extend(f"- {c}" for c in criteria)
+    if human_answer:
+        lines.append(
+            "\nA human has answered your previous blocking question -- use this to proceed, "
+            "do not ask it again:\n" + human_answer.strip()
+        )
     return "\n".join(lines)
 
 
@@ -97,6 +110,123 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
     if impact or effort:
         body += f"\n\nImpact: {impact or 'unspecified'}, Effort: {effort or 'unspecified'}"
     return session.mem.record_feature_request(body, source="github", title=feature, extra_labels=[_DISCOVERY_LABEL])
+
+
+def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: AgentResult) -> dict | None:
+    """GitHub issue #42: a Claude Code CLI auth/login failure
+    (result.auth_failure, set distinctly by agents/base.py's run_agent) is
+    an infra-level problem -- no retry, no different tool call, no
+    different brief will fix it, only a human running `claude /login`.
+    Checked first, immediately after every single agent-subprocess call in
+    this file (understand_codebase, discover_opportunities,
+    assess_design_impact, implement_feature (incl. its self-heal retry),
+    run_local_tests, deploy_pre_prod, verify_pre_prod, assess_feedback,
+    spawn_custom_agent) -- before that tool's own ok/not-ok handling, so
+    this class of failure is detected the same way everywhere an agent
+    subprocess can be invoked, not just at run_autonomous_cycle's own
+    top-level query() call.
+
+    Files the needs_human/blocking_agentra bug -- which also sends the
+    Slack escalation with a clear, actionable message, see
+    Memory.record_failure/_notify_claude_code_auth_failure -- and ends
+    THIS cycle immediately via hard_stop_reason, bypassing the normal
+    MAX_CONSECUTIVE_TOOL_FAILURES count entirely: a second tool call this
+    same cycle would just hit the identical missing credentials, so
+    waiting for two consecutive failures before stopping would only burn
+    more cost/turns for no benefit ("fails fast without burning further
+    retries/cost"). Since the bug is filed blocking_agentra=True, a *future*
+    cycle only gets one more cheap, zero-retry attempt before hitting this
+    exact same short-circuit again (run_autonomous_cycle's blocking_bugs()
+    pre-flight check no longer hard-stops purely on an open auth-classified
+    bug -- see clear_resolved_auth_bugs) -- so this can't perpetually
+    resurface as fresh Slack noise/duplicate issues either way. Also sets
+    session.auth_failure_this_cycle=True so that same self-clearing logic
+    knows *this* run is not proof of a working re-authentication.
+
+    Returns the tool's is_error response dict if this was in fact an auth
+    failure (the caller should return it immediately, before any of its
+    own further processing of `result`), or None otherwise."""
+    if not result.auth_failure:
+        return None
+    session.auth_failure_this_cycle = True
+    session.mem.record_failure(session.run_id, tool_name, result.text)
+    session.hard_stop_reason = (
+        f"Claude Code session is not authenticated on this runner (detected in {tool_name}) -- "
+        "run /login and re-trigger. Filed as a blocking bug and notified via Slack (if "
+        "configured); stop calling tools and end your turn."
+    )
+    session.note(f"{tool_name}: Claude Code auth failure -- escalated, ending this cycle", ok=False)
+    return {"content": [{"type": "text", "text": result.text}], "is_error": True}
+
+
+def _escalate_to_human(
+    session: OrchestratorSession,
+    *,
+    diagnosis: str,
+    question: str,
+    source: str,
+    title: str,
+    branch: str | None = None,
+    tracking_issue: int | None = None,
+) -> int | None:
+    """Human-in-the-loop escalation (GitHub issue #34), shared by
+    implement_feature and discover_opportunities' HUMAN_INPUT_REQUIRED
+    branches (deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly
+    out of scope for this -- see deploy_pre_prod's own handling, left
+    untouched). Does everything the architecture review scoped for this
+    part beyond the pre-existing needs_human GitHub issue filing:
+
+    1. Stamps resume-correlation data (app, run_id, branch, session_id,
+       tracking_issue, question) onto the filed/updated needs_human issue.
+    2. Posts an outbound Slack notification if SLACK_BOT_TOKEN/
+       SLACK_HUMAN_INPUT_CHANNEL are configured -- silently skipped
+       otherwise (see connectors/slack.py), never surfaced as a run
+       failure.
+    3. Marks the run waiting_for_human immediately (session.mark_waiting_for_human).
+
+    tracking_issue: the ORIGINAL feature/bug issue this escalation is
+    blocking (implement_feature's resolves_id/sub_feature_of), distinct
+    from the needs_human issue number this function returns -- a resume
+    dispatched later (server/routes/human_input.py) reads this back via
+    Memory.get_human_input_context to know which implement_feature call to
+    continue and which tracking issue's spec to weave the human's answer
+    into (see _format_spec's human_answer param). None for
+    discover_opportunities, which has no resume contract in this pass.
+
+    Returns the needs_human issue number (or None if GitHub was
+    unreachable/unconfigured -- matching every other best-effort write in
+    memory.py), so implement_feature can also stamp record_in_progress_branch/
+    record_spec on it to make the escalation issue itself resumable when
+    there's no separate tracking issue (a self-initiated idea with no
+    resolves_id/sub_feature_of)."""
+    issue_number = session.mem.record_known_bug(
+        session.run_id, "medium", diagnosis,
+        "Requires an explicit human decision -- not an implementation/discovery failure, "
+        "not something a different brief/approach fixes.",
+        source=source,
+        needs_human=True,
+        title=title,
+    )
+    issue_url = session.mem.issue_html_url(issue_number) if issue_number is not None else None
+    if issue_number is not None:
+        session.mem.record_human_input_context(
+            issue_number, app=session.app_name, run_id=session.run_id, question=question,
+            branch=branch, session_id=session.session_id, tracking_issue=tracking_issue,
+        )
+    from agentra import urls
+    from agentra.connectors import slack
+
+    slack.notify_human_input_required(
+        app=session.app_name,
+        run_id=session.run_id,
+        question=question,
+        issue_url=issue_url,
+        dashboard_url=urls.dashboard_run_url(session.run_id, session.app_name),
+        branch=branch,
+        session_id=session.session_id,
+    )
+    session.mark_waiting_for_human(issue_number=issue_number, issue_url=issue_url, question=question, branch=branch)
+    return issue_number
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
@@ -160,6 +290,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := session.check_hard_stop():
             return stop
         cb = await codebase.run_cached(session.repo, session.mem)
+        if stop := _check_auth_failure(session, "understand_codebase", cb):
+            return stop
         session.cost_usd += cb.cost_usd
         if cb.ok:
             session.cb_summary = cb.text
@@ -231,6 +363,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             _actionable_bugs(session.mem.known_bugs()),
             session.mem.feature_queue(),
         )
+        if stop := _check_auth_failure(session, "discover_opportunities", disc):
+            return stop
         session.cost_usd += disc.cost_usd
         data = disc.json_data or {}
 
@@ -243,16 +377,26 @@ def _tools_for(session: OrchestratorSession) -> list:
                 diagnosis += f"\n\nQuestion for a human: {question}"
             if options:
                 diagnosis += f"\n\nOptions considered: {options}"
-            session.mem.record_known_bug(
-                session.run_id, "medium", diagnosis,
-                "Requires an explicit human decision about product direction before Discovery Agent can propose opportunities.",
+            # No resume contract for discover_opportunities (out of scope for this
+            # part, per the architecture review -- resuming discovery with an
+            # answer is a separate future feature): _escalate_to_human still files
+            # the needs_human issue, notifies Slack, and marks this run
+            # waiting_for_human, but passes branch=None since there is no
+            # branch/session for a human's answer to resume onto here.
+            _escalate_to_human(
+                session,
+                diagnosis=diagnosis,
+                question=question or reason,
                 source="discovery-agent-human-input-required",
-                needs_human=True,
                 title="Human input required: product direction",
             )
             session.note(f"discover_opportunities: human input required -- {reason[:200]}", ok=None)
             return {
-                "content": [{"type": "text", "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human)."}],
+                "content": [{
+                    "type": "text",
+                    "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human) and notified via "
+                    "Slack (if configured); this run is now waiting_for_human.",
+                }],
                 "is_error": True,
             }
 
@@ -303,6 +447,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         review = await architecture_review.run(session.repo, session.objective, args["feature_brief"], session.cb_summary)
+        if stop := _check_auth_failure(session, "assess_design_impact", review):
+            return stop
         session.cost_usd += review.cost_usd
         session.note(f"assess_design_impact: ok={review.ok}", ok=review.ok, cost_usd=review.cost_usd, turns=review.turns)
         if not review.ok:
@@ -354,13 +500,37 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.note(f"requirements: reusing existing spec for issue #{tracking_issue}", ok=True)
         else:
             req = await requirements.run(session.repo, session.objective, brief, session.cb_summary)
+            if stop := _check_auth_failure(session, "implement_feature", req):
+                return stop
             session.cost_usd += req.cost_usd
             session.note(f"requirements: ok={req.ok}", ok=req.ok, cost_usd=req.cost_usd, turns=req.turns)
             if req.ok and req.json_data and req.json_data.get("spec"):
                 spec_dict = req.json_data
                 if tracking_issue is not None:
                     session.mem.record_spec(tracking_issue, spec_dict)
-        spec_text = _format_spec(spec_dict) if spec_dict else ""
+        # Human-in-the-loop escalation (GitHub issue #34): if this session was
+        # itself dispatched as a resume from a human's answer AND this
+        # particular implement_feature call is for the tracking issue that
+        # answer belongs to, weave it into the spec text so the Implementation
+        # Agent's resumed turn sees it as part of what it's building (see
+        # _format_spec's human_answer param). Consumed (cleared) immediately
+        # after use so a later implement_feature call this same cycle -- e.g.
+        # a multi-part feature's next part -- doesn't get a stale answer
+        # re-injected into an unrelated spec.
+        human_answer_for_this_call = None
+        if session.human_answer and tracking_issue is not None and tracking_issue == session.human_answer_issue:
+            human_answer_for_this_call = session.human_answer
+            session.human_answer = None
+            session.human_answer_issue = None
+        if spec_dict:
+            spec_text = _format_spec(spec_dict, human_answer=human_answer_for_this_call)
+        elif human_answer_for_this_call:
+            spec_text = (
+                "A human has answered your previous blocking question -- use this to proceed, "
+                "do not ask it again:\n" + human_answer_for_this_call.strip()
+            )
+        else:
+            spec_text = ""
         session.current_spec = spec_text or None
 
         try:
@@ -372,6 +542,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("implement_feature")
             session.note(f"implement_feature: raised {exc!r}", ok=False)
             return {"content": [{"type": "text", "text": f"implement_feature raised: {exc}"}], "is_error": True}
+        if stop := _check_auth_failure(session, "implement_feature", impl):
+            return stop
         session.cost_usd += impl.cost_usd
         session.session_id = impl.session_id or session.session_id
         data = impl.json_data or {}
@@ -410,13 +582,22 @@ def _tools_for(session: OrchestratorSession) -> list:
                 diagnosis += f"\n\nQuestion for a human: {question}"
             if options:
                 diagnosis += f"\n\nOptions considered: {options}"
-            session.mem.record_known_bug(
-                session.run_id, "medium", diagnosis,
-                "Requires an explicit human decision before Implementation Agent can proceed -- "
-                "not an implementation failure, not something a different brief/approach fixes.",
+            # Human-in-the-loop escalation (GitHub issue #34): implement_feature
+            # is THE flow with an existing resume contract (feature_branch +
+            # session_id), so route through _escalate_to_human rather than a
+            # bare record_known_bug -- this additionally stamps resume
+            # correlation data (including tracking_issue, so a later resume's
+            # answer gets woven back into THIS issue's spec, see above),
+            # posts the Slack notification, and marks the run waiting_for_human
+            # immediately.
+            _escalate_to_human(
+                session,
+                diagnosis=diagnosis,
+                question=question or reason,
                 source="implementation-agent-human-input-required",
-                needs_human=True,
                 title=f"Human input required: {feature_name}",
+                branch=session.feature_branch,
+                tracking_issue=tracking_issue,
             )
             # Also note it on the tracking issue itself (if this call was
             # resuming/working one) -- the needs_human issue above is a
@@ -431,7 +612,11 @@ def _tools_for(session: OrchestratorSession) -> list:
                 )
             session.note(f"implement_feature: human input required -- {reason[:200]}", ok=None)
             return {
-                "content": [{"type": "text", "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human); moving on to other work this cycle."}],
+                "content": [{
+                    "type": "text",
+                    "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human) and notified "
+                    "via Slack (if configured); this run is now waiting_for_human.",
+                }],
                 "is_error": True,
             }
 
@@ -499,6 +684,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+        if stop := _check_auth_failure(session, "run_local_tests", test):
+            return stop
         session.cost_usd += test.cost_usd
         session.session_id = test.session_id or session.session_id
         data = test.json_data or {}
@@ -519,6 +706,8 @@ def _tools_for(session: OrchestratorSession) -> list:
                 resume=True,
                 session_id=session.session_id,
             )
+            if stop := _check_auth_failure(session, "run_local_tests", fix):
+                return stop
             session.cost_usd += fix.cost_usd
             session.session_id = fix.session_id or session.session_id
             session.note(
@@ -528,6 +717,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             if not fix.ok:
                 break
             test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+            if stop := _check_auth_failure(session, "run_local_tests", test):
+                return stop
             session.cost_usd += test.cost_usd
             session.session_id = test.session_id or session.session_id
             data = test.json_data or {}
@@ -591,6 +782,8 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         if session.change_risk == change_risk.TRIVIAL:
             deploy = await deployment.merge_to_pre_prod_only(session.repo, session.env, session.feature_branch)
+            if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
+                return stop
             session.deploy_attempted = True
             session.cost_usd += deploy.cost_usd
             ok = deploy.ok
@@ -616,6 +809,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         deploy = await strategy(
             session.repo, session.env, session.feature_branch, session.run_id, session.session_id
         )
+        if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
+            return stop
         session.deploy_attempted = True
         session.cost_usd += deploy.cost_usd
         session.session_id = deploy.session_id or session.session_id
@@ -685,6 +880,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         test = await testing.run_pre_prod(
             session.repo, spec_for_verification, session.pre_prod_url, session.run_id, session_id=session.session_id
         )
+        if stop := _check_auth_failure(session, "verify_pre_prod", test):
+            return stop
         session.cost_usd += test.cost_usd
         session.session_id = test.session_id or session.session_id
         data = test.json_data or {}
@@ -718,6 +915,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         feature = session.current_feature or "unknown feature"
         fb = await feedback.run(session.repo, session.objective, feature, session_id=session.session_id)
+        if stop := _check_auth_failure(session, "assess_feedback", fb):
+            return stop
         session.cost_usd += fb.cost_usd
         session.session_id = fb.session_id or session.session_id
         session.note("assess_feedback", ok=fb.ok, cost_usd=fb.cost_usd, turns=fb.turns)
@@ -755,6 +954,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             allowed_tools=requested,
         )
         result = await spawn_generic(session.repo, spec, mem=session.mem, run_id=session.run_id)
+        if stop := _check_auth_failure(session, "spawn_custom_agent", result):
+            return stop
         session.cost_usd += result.cost_usd
         session.note(
             f"spawn_custom_agent[{args['task_name']}]: ok={result.ok}",

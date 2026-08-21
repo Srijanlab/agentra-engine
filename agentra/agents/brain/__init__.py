@@ -11,6 +11,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from agentra.agents.brain.prompts import SYSTEM_PROMPT
 from agentra.agents.safety import make_hooks
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
+from agentra.memory.core import is_login_required_failure
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +72,94 @@ class OrchestratorSession:
     hard_stop_reason: str | None = None
     recent_tool_calls: list[tuple[str, bool]] = field(default_factory=list)
     stagnation_detected: bool = False
+    # Human-in-the-loop escalation (GitHub issue #34). Set by implement_feature
+    # or discover_opportunities the moment either returns HUMAN_INPUT_REQUIRED
+    # -- distinct from hard_stop_reason's generic "stop calling tools" (which
+    # this also sets, to end the cycle immediately rather than let the brain
+    # burn budget on other backlog items with no direction) because the
+    # *run's* terminal status needs to become "waiting_for_human", not
+    # "completed"/"failed" (see run_autonomous_cycle's return and
+    # server/routes/triggers.py's _run_autonomous_background).
+    waiting_for_human: bool = False
+    human_input: dict | None = None
+    # Set (only) when this session is itself a resume dispatched from a
+    # human's answer (server/routes/human_input.py) -- human_answer_issue is
+    # the tracking issue that answer belongs to, so implement_feature only
+    # weaves it into _format_spec's spec_text for the matching resolves_id/
+    # sub_feature_of call, not any other implement_feature call the brain
+    # might also make this same session.
+    human_answer: str | None = None
+    human_answer_issue: int | None = None
+    # GitHub issue #42 hardening: distinct from hard_stop_reason (which is
+    # also set when this happens, to end the cycle) -- set True the moment
+    # *this run* actually hits a Claude Code auth/login failure, whether at
+    # the top-level query() call (run_autonomous_cycle's own except block)
+    # or inside any sub-agent tool call (brain/tools.py's
+    # _check_auth_failure). Read at the end of the cycle to decide whether
+    # it's safe to auto-clear a previously-filed auth blocking bug (it is
+    # NOT safe if this exact run also just hit one -- see
+    # clear_resolved_auth_bugs's docstring for why that guard matters).
+    auth_failure_this_cycle: bool = False
+    # Set True the moment the top-level orchestrator query() call actually
+    # returns a ResultMessage -- i.e. proof this run got at least one real,
+    # authenticated Claude Code CLI turn back (a ProcessError there never
+    # yields a ResultMessage at all). Together with
+    # `not auth_failure_this_cycle`, this is what makes it safe to
+    # self-clear a stale auth-classified blocking bug at cycle end.
+    orchestrator_result_received: bool = False
 
     @property
     def app_name(self) -> str:
         return self.repo.name
 
+    def mark_waiting_for_human(
+        self, *, issue_number: int | None, issue_url: str | None, question: str, branch: str | None = None
+    ) -> None:
+        """Called by implement_feature/discover_opportunities right after
+        filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED
+        result. Writes the waiting_for_human status through to the run
+        registry immediately (not just at cycle end) so the dashboard/run
+        status API reflects it the moment this fires, per GitHub issue #34's
+        acceptance criteria -- not only once the whole cycle eventually winds
+        down. Also sets hard_stop_reason so the brain stops calling tools and
+        ends its turn this same cycle, since continuing to work other
+        backlog items would burn budget without knowing whether/when the
+        human will answer, and would blur which session/branch a later
+        resume should continue."""
+        self.waiting_for_human = True
+        self.human_input = {
+            "issue_number": issue_number,
+            "issue_url": issue_url,
+            "question": question,
+            "branch": branch,
+            "session_id": self.session_id,
+            "app": self.app_name,
+            "waiting_since": time.time(),
+        }
+        self.hard_stop_reason = (
+            "Waiting on a human to answer a blocking question "
+            f"(GitHub issue #{issue_number}" + (f", {issue_url}" if issue_url else "") + "). "
+            "Stop calling tools -- summarize what's blocked and end your turn; this run will "
+            "resume automatically once the human answers."
+        )
+        from agentra import registry
+
+        registry.record_run(self.run_id, status="waiting_for_human", human_input=self.human_input)
+
     def note(
         self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None
     ) -> None:
         self.actions.append(action)
-        self.mem.log(self.run_id, action)
+        # "[Orchestrator]" prefix, matching base.py's log_claude_message convention
+        # for every sub-agent ("[Implementation Agent] ...", "[Testing Agent] ...")
+        # -- without it, the Orchestrator's own top-level narration (cycle start,
+        # check_backlog, implement_feature: ok=..., cycle complete) was
+        # indistinguishable from generic unattributed log noise. Confirmed live:
+        # standup.py's LLM call reads these same raw lines and, unable to tell
+        # which ones were the Orchestrator's own activity, systematically wrote
+        # "Yesterday: No activity. Today: Idle." for Orchestrator on every cycle
+        # even when it clearly dispatched real work that run.
+        self.mem.log(self.run_id, f"[Orchestrator] {action}")
         print(f"[agentra] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
         from agentra import registry
 
@@ -154,6 +234,12 @@ class AutonomousCycleReport:
     final_message: str
     cost_usd: float
     feature: str | None = None
+    # Human-in-the-loop escalation (GitHub issue #34): set when this cycle
+    # ended because implement_feature/discover_opportunities hit
+    # HUMAN_INPUT_REQUIRED -- server/routes/triggers.py uses this to set the
+    # run's terminal status to "waiting_for_human" instead of "completed".
+    waiting_for_human: bool = False
+    human_input: dict | None = None
 
 
 async def run_autonomous_cycle(
@@ -165,7 +251,16 @@ async def run_autonomous_cycle(
     skip_deploy: bool = False,
     max_turns: int = 40,
     run_id: str | None = None,
+    human_answer: str | None = None,
+    human_answer_issue: int | None = None,
 ) -> AutonomousCycleReport:
+    """human_answer/human_answer_issue: set only when this call is itself a
+    resume dispatched from a human's HUMAN_INPUT_REQUIRED answer (dashboard
+    submission or a GitHub issue comment -- see
+    server/routes/human_input.py). Threaded onto the session so
+    implement_feature's tools.py handler can weave the answer into
+    _format_spec/spec_text for the matching implement_feature call, instead
+    of the resumed session continuing with no new information."""
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
@@ -177,6 +272,8 @@ async def run_autonomous_cycle(
         run_id=run_id,
         analytics_summary=analytics_summary,
         skip_deploy=skip_deploy,
+        human_answer=human_answer,
+        human_answer_issue=human_answer_issue,
     )
     # Pre-seed from any existing cached scan so the model doesn't have to spend
     # a call on understand_codebase just to satisfy the "cb_summary is not None"
@@ -205,13 +302,38 @@ async def run_autonomous_cycle(
     )
 
     blocking = mem.blocking_bugs()
-    if blocking:
-        refs = ", ".join(f"#{b['external_id']}" for b in blocking)
+    # GitHub issue #42 hardening: a Claude Code auth/login-failure blocking
+    # bug is split out from every other blocking_agentra bug here -- unlike
+    # e.g. a missing GitHub permission (which genuinely can't be re-tested,
+    # only fixed by a separate human infra action), whether *this* one is
+    # still true is exactly one cheap, unambiguous Claude Code CLI call
+    # away from being verified: either it fails again identically (caught
+    # with zero retries the same as ever, see agents/base.py's run_agent /
+    # brain/tools.py's _check_auth_failure -- no more expensive than the
+    # very first time this failure was ever detected) or it succeeds, which
+    # is definitive proof a human already ran `claude /login` -- at which
+    # point clear_resolved_auth_bugs below auto-closes it so it stops
+    # resurfacing on every future trigger. A NON-auth blocking bug (or a mix
+    # of both) still hard-stops the cycle before even attempting anything,
+    # unchanged from before.
+    hard_blocking = [b for b in blocking if not is_login_required_failure(f"{b.get('diagnosis', '')}\n{b.get('proposed_fix', '')}")]
+    auth_blocking = [b for b in blocking if b not in hard_blocking]
+    if hard_blocking:
+        refs = ", ".join(f"#{b['external_id']}" for b in hard_blocking)
         session.hard_stop_reason = (
-            f"Blocked: {len(blocking)} open bug(s) labeled blocking_agentra ({refs}) need a human before "
+            f"Blocked: {len(hard_blocking)} open bug(s) labeled blocking_agentra ({refs}) need a human before "
             "agentra can make further progress. See the issue(s) for diagnosis -- not retrying."
         )
         session.note(f"autonomous cycle blocked by open blocking_agentra bug(s): {refs}", agent="cycle", ok=False)
+    elif auth_blocking:
+        refs = ", ".join(f"#{b['external_id']}" for b in auth_blocking)
+        session.note(
+            f"open Claude Code auth-failure blocking bug(s) found ({refs}) -- attempting this cycle "
+            "anyway to cheaply verify whether a human has re-authenticated since; will auto-clear "
+            "the bug(s) if this run gets a real result back, or fail fast again (no extra retries) "
+            "if not",
+            agent="cycle",
+        )
 
     tools = _tools_for(session)
     server = create_sdk_mcp_server(name="agentra_brain", tools=tools)
@@ -271,10 +393,52 @@ async def run_autonomous_cycle(
                     if isinstance(message, ResultMessage):
                         final_text = message.result or ""
                         session.cost_usd += message.total_cost_usd or 0.0
+                        session.orchestrator_result_received = True
         except Exception as exc:
-            final_text = f"autonomous cycle raised: {exc}"
-            session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
+            # GitHub issue #42: this is the exact spot a prior cycle crashed
+            # opaquely on "Claude Code returned an error result: Not logged
+            # in · Please run /login (exit code: 1)" -- the orchestrator's
+            # own top-level query() call, not a sub-agent tool call (those
+            # are already normalized to AgentResult by agents/base.py's
+            # run_agent -- see brain/tools.py's _check_auth_failure, which
+            # covers every tool-call site the same way -- and never raise up
+            # to here). Detected distinctly so the diagnostic actually says
+            # what's wrong instead of a bare "cycle crashed"; record_failure
+            # below still runs either way, and with is_login_required_failure
+            # folded into cannot_be_fixed_by_agentra (memory/core.py) this
+            # always files as needs_human + blocking_agentra AND sends the
+            # Slack human-in-the-loop escalation (GitHub issue #34's
+            # connectors/slack.py, wired in by Memory.record_failure itself
+            # -- see its docstring). blocking_bugs()'s pre-flight check
+            # (above) now only hard-stops the *next* cycle outright for a
+            # non-auth blocking bug; for this one specifically the next
+            # cycle instead gets one more cheap, zero-retry attempt and
+            # self-clears it the moment that attempt actually succeeds (see
+            # clear_resolved_auth_bugs) -- no manual GitHub-issue-closing
+            # required once a human actually runs `claude /login`.
+            if is_login_required_failure(str(exc)):
+                session.auth_failure_this_cycle = True
+                final_text = (
+                    "Claude Code session is not authenticated -- run /login and re-trigger. "
+                    f"(CLI reported: {exc}). Filed as a blocking bug and notified via Slack (if "
+                    "configured) so future cycles stop immediately instead of repeating this "
+                    "failure pointlessly."
+                )
+                session.note(f"autonomous cycle blocked: Claude Code authentication failure: {exc}", agent="cycle", ok=False)
+            else:
+                final_text = f"autonomous cycle raised: {exc}"
+                session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
             mem.record_failure(run_id, "autonomous-cycle", final_text)
+
+    if session.orchestrator_result_received and not session.auth_failure_this_cycle:
+        cleared = mem.clear_resolved_auth_bugs(run_id)
+        if cleared:
+            refs = ", ".join(f"#{c}" for c in cleared)
+            session.note(
+                f"auto-cleared previously-blocking Claude Code auth-failure bug(s) ({refs}) -- "
+                "this run confirmed re-authentication succeeded",
+                agent="cycle", ok=True,
+            )
 
     if session.stagnation_detected:
         stagnation_note = (
@@ -282,6 +446,10 @@ async def run_autonomous_cycle(
         )
         final_text = f"{final_text}\n\n{stagnation_note}" if final_text else stagnation_note
         session.note("stagnation breaker: cycle terminated early, no progress", agent="cycle", ok=False)
+    elif session.waiting_for_human:
+        pause_note = f"Cycle paused, waiting on a human answer. {session.hard_stop_reason}"
+        final_text = f"{final_text}\n\n{pause_note}" if final_text else pause_note
+        session.note("human-in-the-loop: cycle paused, waiting_for_human", agent="cycle", ok=None)
 
     persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
     if persist_error:
@@ -296,4 +464,6 @@ async def run_autonomous_cycle(
         final_message=final_text,
         cost_usd=session.cost_usd,
         feature=session.current_feature,
+        waiting_for_human=session.waiting_for_human,
+        human_input=session.human_input,
     )

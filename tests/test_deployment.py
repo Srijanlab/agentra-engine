@@ -386,7 +386,19 @@ def _self_hosted_config(**overrides) -> SelfHostedVMConfig:
     return SelfHostedVMConfig(**defaults)
 
 
-def _fake_docker_run(calls: list, *, build_ok=True, run_ok=True, health_ok=True, inspect_env=None):
+# Fake values _fake_docker_run returns for the two GitHub issue #45 lookups
+# (`docker port`, `docker network inspect ... Gateway`) -- a plausible
+# Docker-assigned ephemeral host port and a plausible bridge-network
+# gateway IP, so every test's expected preview_url is built from these two
+# constants rather than repeating magic strings everywhere.
+_FAKE_HOST_PORT = "32768"
+_FAKE_GATEWAY_IP = "172.20.0.1"
+
+
+def _fake_docker_run(
+    calls: list, *, build_ok=True, run_ok=True, health_ok=True, inspect_env=None,
+    port_ok=True, gateway_ok=True, reachable_ok=True,
+):
     def _run(args, **kwargs):
         calls.append(list(args))
         import subprocess as _subprocess
@@ -395,8 +407,23 @@ def _fake_docker_run(calls: list, *, build_ok=True, run_ok=True, health_ok=True,
             return _subprocess.CompletedProcess(args, 0 if build_ok else 1, stdout="", stderr="" if build_ok else "build failed")
         if args[:2] == ["docker", "run"]:
             return _subprocess.CompletedProcess(args, 0 if run_ok else 1, stdout="", stderr="" if run_ok else "run failed")
+        if args[:2] == ["docker", "port"]:
+            if not port_ok:
+                return _subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such container")
+            return _subprocess.CompletedProcess(args, 0, stdout=f"0.0.0.0:{_FAKE_HOST_PORT}\n[::]:{_FAKE_HOST_PORT}\n", stderr="")
+        if args[:3] == ["docker", "network", "inspect"]:
+            if not gateway_ok:
+                return _subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such network")
+            return _subprocess.CompletedProcess(args, 0, stdout=f"{_FAKE_GATEWAY_IP}\n", stderr="")
         if args[:2] == ["docker", "exec"]:
             return _subprocess.CompletedProcess(args, 0 if health_ok else 1, stdout="", stderr="")
+        if args[:1] == ["curl"]:
+            # The orchestrator-process-side reachability check (no `docker exec` --
+            # a bare curl, exactly what would fail with "Could not resolve host"
+            # if this process's own container were never joined to preprod_network).
+            return _subprocess.CompletedProcess(
+                args, 0 if reachable_ok else 6, stdout="", stderr="" if reachable_ok else "Could not resolve host",
+            )
         if args[:2] == ["docker", "inspect"]:
             import json as _json
 
@@ -425,12 +452,13 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
     monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
     monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
 
     result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
 
     assert result.ok is True
     assert result.json_data["status"] == "deployed"
-    assert result.json_data["preview_url"] == "http://widget-app-preprod-run123:8080"
+    assert result.json_data["preview_url"] == f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}"
     assert pull_calls == [env.pre_prod_branch]
     assert push_calls == [env.pre_prod_branch]
     assert PROD_SENTINEL not in pull_calls and PROD_SENTINEL not in push_calls
@@ -445,8 +473,129 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
     assert "--memory=1g" in run_cmd and "--cpus=1" in run_cmd
     assert "AGENTRA_FIRESTORE_PROJECT=widget-prod" in run_cmd
     assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude:ro" in run_cmd
+    # GitHub issue #45: 8080 is published to a Docker-assigned free host
+    # port (bare "-p 8080", no host port hardcoded/derived) so preview_url
+    # can be built from a host-reachable address instead of the
+    # never-resolves-for-the-verifier container-name DNS name.
+    assert "-p" in run_cmd and "8080" in run_cmd[run_cmd.index("-p") + 1]
+    # The orchestrator's OWN (currently-active blue/green) container is joined to
+    # preprod_network -- never config.anchor_container ("widget-proxy"), which is
+    # the nginx reverse-proxy the orchestrator process doesn't run inside of and
+    # was the actual root cause of the DNS-resolution bug this pins.
     network_connect_calls = [c for c in docker_calls if c[:3] == ["docker", "network", "connect"]]
-    assert network_connect_calls == [["docker", "network", "connect", "widget-preprod-net", "widget-proxy"]]
+    assert network_connect_calls == [["docker", "network", "connect", "widget-preprod-net", "widget-app-blue"]]
+    assert not any("widget-proxy" in c for c in network_connect_calls)
+    # A genuine end-to-end reachability check (bare curl from this process,
+    # not `docker exec` into the sibling) must run before reporting "deployed".
+    reachability_calls = [c for c in docker_calls if c[:1] == ["curl"]]
+    assert reachability_calls == [["curl", "-sf", "-m", "5", f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}/health"]]
+
+    # The actual GitHub issue #45 lookups: the published host port via
+    # `docker port`, and config.app_network's gateway (not
+    # preprod_network's -- the verifying process's own container is on
+    # app_network, never preprod_network).
+    port_calls = [c for c in docker_calls if c[:2] == ["docker", "port"]]
+    assert port_calls == [["docker", "port", "widget-app-preprod-run123", "8080/tcp"]]
+    gateway_calls = [c for c in docker_calls if c[:3] == ["docker", "network", "inspect"]]
+    assert gateway_calls == [["docker", "network", "inspect", "widget-app-net", "--format", "{{(index .IPAM.Config 0).Gateway}}"]]
+
+
+def test_deploy_pre_prod_self_hosted_returns_a_url_reachable_via_a_plain_socket_connection(tmp_path, monkeypatch):
+    """The regression this issue asked for: assert the URL handed to
+    verification is actually reachable via a plain socket connection in the
+    same environment run_pre_prod executes in -- not just that it's
+    *shaped* like a URL. A real TCP server bound to 127.0.0.1 stands in for
+    "the docker daemon's published-port target"; deploy_pre_prod_self_hosted
+    is monkeypatched to report that server's own host:port as if `docker
+    port`/`docker network inspect` had returned it, then a plain
+    socket.create_connection call (exactly what a reachability check in the
+    verification environment would do) proves the returned preview_url is
+    genuinely connectable, unlike the old container-name DNS name which
+    never was."""
+    import socket as _socket
+
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    server = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    host, port = server.getsockname()
+
+    def _fake_run(args, **kwargs):
+        import subprocess as _subprocess
+
+        if args[:2] == ["docker", "port"]:
+            return _subprocess.CompletedProcess(args, 0, stdout=f"{host}:{port}\n", stderr="")
+        if args[:3] == ["docker", "network", "inspect"]:
+            return _subprocess.CompletedProcess(args, 0, stdout=f"{host}\n", stderr="")
+        if args[:2] == ["docker", "exec"]:
+            return _subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return _subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    try:
+        monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+        monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+        monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+        monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+        monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+        monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+        result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+        assert result.ok is True
+        preview_url = result.json_data["preview_url"]
+        assert preview_url == f"http://{host}:{port}"
+
+        parsed_host, parsed_port = preview_url.removeprefix("http://").split(":")
+        conn = _socket.create_connection((parsed_host, int(parsed_port)), timeout=2)
+        conn.close()
+    finally:
+        server.close()
+
+
+def test_deploy_pre_prod_self_hosted_fails_cleanly_when_the_published_port_cannot_be_determined(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, port_ok=False))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert result.json_data["preview_url"] is None
+    # Never got as far as the health check -- no reachable URL to check yet.
+    assert not any(c[:2] == ["docker", "exec"] for c in docker_calls)
+
+
+def test_deploy_pre_prod_self_hosted_fails_cleanly_when_the_app_network_gateway_cannot_be_determined(tmp_path, monkeypatch):
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, gateway_ok=False))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert result.json_data["preview_url"] is None
 
 
 def test_deploy_pre_prod_self_hosted_reports_a_clear_error_when_repo_has_no_config(tmp_path, monkeypatch):
@@ -495,13 +644,143 @@ def test_deploy_pre_prod_self_hosted_returns_failed_status_when_health_check_nev
     monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
     monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, health_ok=False))
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
     monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
 
     result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
 
     assert result.ok is False
     assert result.json_data["status"] == "failed"
-    assert result.json_data["preview_url"] == "http://widget-app-preprod-run123:8080"
+    assert result.json_data["preview_url"] == f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}"
+
+
+# -- regression tests for the preprod-network DNS-resolution bug -------------------
+#
+# Root cause: deploy_pre_prod_self_hosted used to Docker-network-connect only
+# config.anchor_container (nginx) to preprod_network. The orchestrator process
+# that runs verify_pre_prod's Testing Agent turn (and any curl/getent/python
+# socket call it issues) actually lives inside the currently-active blue/green
+# APP container, never nginx -- so that container could never resolve the
+# pre-prod sibling's Docker DNS name, and deploy_pre_prod_self_hosted still
+# reported status=deployed because its only health check (_wait_for_healthy)
+# execs into the sibling itself and never exercises this network path at all.
+
+
+def test_deploy_pre_prod_self_hosted_joins_its_own_container_not_the_anchor_container(tmp_path, monkeypatch):
+    """Pins the actual fix: preprod_network must be connected to whichever
+    container this orchestrator process is itself running in, never to
+    config.anchor_container (nginx) -- the old, buggy behavior."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    # Simulate running inside the "green" app container this time, to prove
+    # the target is resolved dynamically rather than hardcoded to one color.
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-green")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is True
+    network_connect_calls = [c for c in docker_calls if c[:3] == ["docker", "network", "connect"]]
+    assert network_connect_calls == [["docker", "network", "connect", "widget-preprod-net", "widget-app-green"]]
+    assert config.anchor_container not in [name for c in network_connect_calls for name in c]
+
+
+def test_deploy_pre_prod_self_hosted_fails_clearly_when_own_container_name_cannot_be_determined(tmp_path, monkeypatch):
+    """If this process's own container identity can't be resolved (HOSTNAME
+    unset / docker inspect failure), refuse to deploy something nothing would
+    be able to reach, rather than silently skipping the network join and
+    reporting a false 'deployed' (the old bug's exact failure shape)."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: None)
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert result.json_data["status"] == "failed"
+    assert "own container" in result.text.lower()
+    # Never got as far as `docker run` -- refused before starting the sibling.
+    assert not any(c[:2] == ["docker", "run"] for c in docker_calls)
+
+
+def test_deploy_pre_prod_self_hosted_reports_failed_when_unreachable_from_orchestrator_even_if_sibling_health_check_passes(
+    tmp_path, monkeypatch
+):
+    """This is the class of failure the brief describes: the sibling container's
+    OWN curl-against-itself (_wait_for_healthy) can pass while the orchestrator's
+    own process still can't resolve/reach preview_url at all (e.g. network join
+    silently failed) -- that must be caught here and reported as status=failed
+    with a reachability/network diagnostic, not reported as status=deployed
+    only to fail opaquely in a later, separate verify_pre_prod call."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
+    monkeypatch.setattr(
+        deployment.subprocess, "run", _fake_docker_run(docker_calls, health_ok=True, reachable_ok=False)
+    )
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert result.json_data["status"] == "failed"
+    assert result.json_data["preview_url"] == f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}"
+    text_lower = result.text.lower()
+    assert "reachable" in text_lower or "network" in text_lower or "dns" in text_lower
+    # The reachability check (bare curl, no docker exec) did run -- retried up to
+    # _HEALTH_CHECK_ATTEMPTS times, same as _wait_for_healthy -- and every attempt failed.
+    reachability_calls = [c for c in docker_calls if c[:1] == ["curl"]]
+    assert len(reachability_calls) == deployment._HEALTH_CHECK_ATTEMPTS
+    assert all(c == ["curl", "-sf", "-m", "5", f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}/health"] for c in reachability_calls)
+
+
+def test_own_container_name_resolves_via_docker_inspect_of_the_hostname_env_var(monkeypatch):
+    """Unit-level pin for the resolution mechanism itself: HOSTNAME (Docker's
+    default container hostname, its own short ID) is fed to `docker inspect`
+    to recover the actual --name Docker assigned, e.g. 'agentra-blue'."""
+    monkeypatch.setenv("HOSTNAME", "abc123def456")
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        import subprocess as _subprocess
+
+        return _subprocess.CompletedProcess(args, 0, stdout="/agentra-blue\n", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+
+    name = deployment._own_container_name()
+
+    assert name == "agentra-blue"
+    assert calls == [["docker", "inspect", "abc123def456", "--format", "{{.Name}}"]]
+
+
+def test_own_container_name_is_none_when_hostname_env_var_is_unset(monkeypatch):
+    monkeypatch.delenv("HOSTNAME", raising=False)
+
+    assert deployment._own_container_name() is None
 
 
 def test_teardown_self_hosted_preprod_removes_container_and_image(tmp_path, monkeypatch):
@@ -548,6 +827,8 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_
             return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
         if args[:2] == ["docker", "build"]:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:2] == ["docker", "inspect"] and "{{.Config.Image}}" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="widget-app:oldrun123\n", stderr="")
         if args[:2] == ["docker", "inspect"]:
             return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
         if args[:1] == ["stat"]:
@@ -585,6 +866,13 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_
     remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
     assert ["docker", "rm", "-f", "widget-app-blue"] in remove_calls
 
+    # The outgoing color's image must be reclaimed too, not just its container --
+    # otherwise every successful promotion leaves one more full image (~GBs)
+    # permanently orphaned (confirmed live: this exact leak filled a VM's disk
+    # to 100%, deadlocking every subsequent autonomous cycle).
+    rmi_calls = [c for c in docker_calls if c[:2] == ["docker", "rmi"]]
+    assert ["docker", "rmi", "widget-app:oldrun123"] in rmi_calls
+
 
 def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_becomes_healthy(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
@@ -597,8 +885,10 @@ def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_b
     monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
 
     nginx_calls = []
+    docker_calls = []
 
     def _run(args, **kwargs):
+        docker_calls.append(list(args))
         if args[:3] == ["docker", "exec", "widget-proxy"] and "cat" in args:
             return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
         if "nginx" in " ".join(args):
@@ -617,6 +907,49 @@ def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_b
     assert result.ok is False
     assert "blue" in result.text  # still live, promotion aborted
     assert nginx_calls == []  # never flipped
+
+    # The never-became-healthy candidate's image must not be left behind either --
+    # only its container removal was covered before this.
+    assert ["docker", "rmi", "widget-app:run456"] in docker_calls
+
+
+def test_promote_prod_self_hosted_removes_the_new_image_when_nginx_reload_fails(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    env = _env(prod_branch="prod")
+    config = _self_hosted_config()
+
+    monkeypatch.setattr(git_ops, "pull_latest", lambda *a, **k: None)
+    monkeypatch.setattr(git_ops, "fetch_ref", lambda *a, **k: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda *a, **k: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+
+    docker_calls = []
+
+    def _run(args, **kwargs):
+        docker_calls.append(list(args))
+        if args[:3] == ["docker", "exec", "widget-proxy"] and "cat" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="blue\n", stderr="")
+        if args[:2] == ["docker", "exec"] and "curl" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")  # healthy
+        if "nginx -s reload" in " ".join(args):
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="reload failed")
+        if args[:1] == ["stat"]:
+            return subprocess.CompletedProcess(args, 0, stdout="999\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="[]" if args[:2] == ["docker", "inspect"] else "", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _run)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.promote_prod_self_hosted(repo, env, "run456"))
+
+    assert result.ok is False
+    assert "blue" in result.text  # still live, promotion aborted
+
+    remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
+    assert ["docker", "rm", "-f", "widget-app-green"] in remove_calls  # the candidate, not the still-live old color
+    assert ["docker", "rmi", "widget-app:run456"] in docker_calls
+    # The old (still-live) color must never be touched on this failure path.
+    assert ["docker", "rm", "-f", "widget-app-blue"] not in remove_calls
 
 
 # -- promote_prod: the only path allowed to touch prod, only via run_agent(allow_prod=True) --
@@ -807,6 +1140,7 @@ def test_deploy_pre_prod_self_hosted_sweeps_stale_siblings_before_deploying(tmp_
     monkeypatch.setattr(deployment, "cleanup_stale_preprod", lambda cfg: cleanup_calls.append(cfg) or [])
     docker_calls = []
     monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
 
     result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
 

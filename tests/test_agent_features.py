@@ -447,7 +447,8 @@ def test_idle_standup_reused_across_entry_points_same_day(tmp_path, monkeypatch)
                 break
             burst.append(event)
         assert len(burst) == len(standup.AGENT_LABELS)
-        assert all(m["text"] == "Yesterday: No activity. Today: Idle." for m in burst)
+        idle = standup._idle_updates("idle-app")
+        assert all(m["text"] == idle[m["sender"]] for m in burst)
         assert all(m["fresh"] is True for m in burst)
 
     post_response = client.post("/apps/idle-app/standup")

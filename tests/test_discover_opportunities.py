@@ -39,6 +39,11 @@ def _tool(session, name):
 
 def _patch_registry(monkeypatch):
     monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
+    # session.mark_waiting_for_human (human-in-the-loop escalation, GitHub
+    # issue #34) writes the run's status through to the registry immediately
+    # -- keep tests hermetic (no real writes under AGENTRA_HOME) the same way
+    # record_agent_step is patched above.
+    monkeypatch.setattr(registry, "record_run", lambda *a, **k: None)
 
 
 def _stub_backlog(session, monkeypatch, in_progress=None, bugs=None, queue=None):
@@ -281,3 +286,15 @@ def test_discover_opportunities_does_not_file_when_active_feature_branches_exist
             args=["git", "branch", "-a"],
             returncode=0,
             stdout="  dev/a365dcfd-human-in-the-loop-
+            stdout="  dev/a365dcfd-human-in-the-loop-escalation\n  main\n  origin/main\n",
+            stderr="",
+        )
+    
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", mock_git_branches)
+    monkeypatch.setattr(
+        session.mem, "record_feature_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not file -- active feature branches exist")),
+    )
+
+    asyncio.run(_tool(session, "discover_opportunities").handler({}))

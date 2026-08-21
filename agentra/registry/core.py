@@ -25,6 +25,15 @@ REPOS_ROOT = Path(_repos_env_value) if _repos_env_value else AGENTRA_HOME / "rep
 STALE_PROCESSING_SECONDS = 10 * 60
 REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 
+# Human-in-the-loop escalation (GitHub issue #34): how long a run may sit in
+# "waiting_for_human" before reconcile_waiting_for_human() auto-escalates it
+# (re-notifies Slack and flips its status to "escalated") rather than leaving
+# it silently stuck forever. Configurable per deployment since "how long is
+# too long to wait on a human" is itself a judgment call, not something this
+# codebase should hardcode -- default is generous (24h) since escalating too
+# eagerly just spams the same channel with duplicate asks.
+HUMAN_INPUT_MAX_WAIT_SECONDS = float(os.environ.get("AGENTRA_HUMAN_INPUT_MAX_WAIT_HOURS", "24")) * 3600
+
 
 def _init_firestore():
     project = os.environ.get("AGENTRA_FIRESTORE_PROJECT")
