@@ -133,7 +133,16 @@ class OrchestratorSession:
         self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None
     ) -> None:
         self.actions.append(action)
-        self.mem.log(self.run_id, action)
+        # "[Orchestrator]" prefix, matching base.py's log_claude_message convention
+        # for every sub-agent ("[Implementation Agent] ...", "[Testing Agent] ...")
+        # -- without it, the Orchestrator's own top-level narration (cycle start,
+        # check_backlog, implement_feature: ok=..., cycle complete) was
+        # indistinguishable from generic unattributed log noise. Confirmed live:
+        # standup.py's LLM call reads these same raw lines and, unable to tell
+        # which ones were the Orchestrator's own activity, systematically wrote
+        # "Yesterday: No activity. Today: Idle." for Orchestrator on every cycle
+        # even when it clearly dispatched real work that run.
+        self.mem.log(self.run_id, f"[Orchestrator] {action}")
         print(f"[agentra] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
         from agentra import registry
 
