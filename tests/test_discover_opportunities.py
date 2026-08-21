@@ -285,7 +285,6 @@ def test_discover_opportunities_does_not_file_when_active_feature_branches_exist
         return subprocess.CompletedProcess(
             args=["git", "branch", "-a"],
             returncode=0,
-            stdout="  dev/a365dcfd-human-in-the-loop-
             stdout="  dev/a365dcfd-human-in-the-loop-escalation\n  main\n  origin/main\n",
             stderr="",
         )

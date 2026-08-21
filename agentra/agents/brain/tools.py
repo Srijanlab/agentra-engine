@@ -15,6 +15,7 @@ from agentra import change_risk
 from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, implementation, requirements, testing
 from agentra.agents import catalog as agents_catalog
 from agentra.agents.base import AgentResult
+from agentra.agents.brain import infra_cost_gate
 from agentra.agents.generic import TaskSpec, spawn as spawn_generic
 from agentra.environments import feature_branch_name
 from agentra.memory.core import _DISCOVERY_LABEL
@@ -105,6 +106,7 @@ def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: Ag
 def _escalate_to_human(
     session: OrchestratorSession,
     *,
+    category: str,
     diagnosis: str,
     question: str,
     source: str,
@@ -112,9 +114,10 @@ def _escalate_to_human(
     branch: str | None = None,
     tracking_issue: int | None = None,
 ) -> int | None:
-    """Human-in-the-loop escalation (GitHub issue #34), shared by implement_feature and discover_opportunities' HUMAN_INPUT_REQUIRED branches (deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this -- see deploy_pre_prod's own handling, left untouched)."""
+    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body so an escalation's reason stays distinguishable from the outside."""
+    full_diagnosis = f"Category: {category}\n\n{diagnosis}"
     issue_number = session.mem.record_known_bug(
-        session.run_id, "medium", diagnosis,
+        session.run_id, "medium", full_diagnosis,
         "Requires an explicit human decision -- not an implementation/discovery failure, "
         "not something a different brief/approach fixes.",
         source=source,
@@ -141,6 +144,17 @@ def _escalate_to_human(
     )
     session.mark_waiting_for_human(issue_number=issue_number, issue_url=issue_url, question=question, branch=branch)
     return issue_number
+
+
+# Deterministic infra-cost gate (Part 2/2): keyword heuristic + gate decision logic live in
+# their own module (agents/brain/infra_cost_gate.py) -- these two thin wrappers just supply the
+# session/escalation plumbing that module doesn't own, to avoid a circular import.
+async def _run_design_review(session: OrchestratorSession, feature_brief: str) -> tuple[dict | None, AgentResult | None]:
+    return await infra_cost_gate.run_design_review(session, feature_brief, check_auth_failure=_check_auth_failure)
+
+
+def _infra_cost_gate(session: OrchestratorSession, feature_brief: str, tracking_issue: int | None) -> dict | None:
+    return infra_cost_gate.gate(session, feature_brief, tracking_issue, escalate_to_human=_escalate_to_human)
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
@@ -294,6 +308,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             # No resume contract for discover_opportunities (out of scope for this
             _escalate_to_human(
                 session,
+                category="product_direction",
                 diagnosis=diagnosis,
                 question=question or reason,
                 source="discovery-agent-human-input-required",
@@ -340,8 +355,11 @@ def _tools_for(session: OrchestratorSession) -> list:
         "Optional, conditional step before implement_feature -- call this only when the "
         "feature brief looks architecturally significant (a schema change, a new API "
         "surface, a cross-cutting refactor spanning multiple layers), not for routine "
-        "features. Asks the Architecture Review Agent to flag blast radius and risk before "
-        "Implementation Agent starts.",
+        "features. Asks the Architecture Review Agent to flag blast radius, risk, and infra "
+        "cost impact before Implementation Agent starts. A material infra_cost_impact or a "
+        "high risk_level touching the infra layer deterministically blocks implement_feature "
+        "and escalates to a human -- this is not skippable by not calling this tool: briefs "
+        "that plausibly touch infra get an automatic review inside implement_feature anyway.",
         {"feature_brief": str},
     )
     async def assess_design_impact(args):
@@ -349,15 +367,11 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
-        review = await architecture_review.run(session.repo, session.objective, args["feature_brief"], session.cb_summary)
-        if stop := _check_auth_failure(session, "assess_design_impact", review):
+        stop, review = await _run_design_review(session, args["feature_brief"])
+        if stop:
             return stop
-        session.cost_usd += review.cost_usd
-        session.note(f"assess_design_impact: ok={review.ok}", ok=review.ok, cost_usd=review.cost_usd, turns=review.turns)
         if not review.ok:
-            session.record_failure("assess_design_impact")
             return {"content": [{"type": "text", "text": f"Design review failed: {review.text[:2000]}"}], "is_error": True}
-        session.record_success("assess_design_impact")
         return {"content": [{"type": "text", "text": review.text[:3000]}]}
 
     @tool(
@@ -397,6 +411,26 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         if resuming and tracking_issue is not None and session.session_id is None:
             session.session_id = session.mem.resume_session_id_for(str(tracking_issue))
+
+        # Deterministic infra-cost gate, part a: close the coverage gap where
+        # assess_design_impact is fully LLM-discretionary and a brief that plausibly touches
+        # infra could skip review entirely -- if no review exists yet this cycle for this exact
+        # brief and it matches the keyword heuristic, force one now rather than silently
+        # skipping straight to implementation.
+        if brief not in session.design_reviews and infra_cost_gate.brief_plausibly_touches_infra(brief):
+            session.note(
+                "implement_feature: feature_brief matches the infra-cost keyword heuristic -- "
+                "automatically running a design-impact review before implementation",
+                ok=None,
+            )
+            stop, _review = await _run_design_review(session, brief)
+            if stop:
+                return stop
+
+        # Deterministic infra-cost gate, part b: a real Python check, not a prompt instruction --
+        # cannot be bypassed by the brain skipping assess_design_impact or by prompt wording.
+        if stop := _infra_cost_gate(session, brief, tracking_issue):
+            return stop
 
         spec_dict = session.mem.get_spec(tracking_issue) if tracking_issue is not None else None
         if spec_dict is not None:
@@ -480,6 +514,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             # Human-in-the-loop escalation (GitHub issue #34): implement_feature
             _escalate_to_human(
                 session,
+                category="implementation",
                 diagnosis=diagnosis,
                 question=question or reason,
                 source="implementation-agent-human-input-required",

@@ -50,6 +50,12 @@ class OrchestratorSession:
     pre_prod_verified: bool = False
     # Set by deploy_pre_prod (change_risk.classify_change) each time it's called --
     change_risk: str | None = None
+    # Architecture Review Agent results, keyed by the exact feature_brief string they were
+    # produced for. Lives only on this session instance (one per run/cycle), so a review
+    # done for one brief can never leak into gating a different brief -- it's naturally
+    # reset every new cycle along with the rest of this dataclass. Populated by
+    # assess_design_impact and by implement_feature's automatic keyword-triggered review.
+    design_reviews: dict[str, dict] = field(default_factory=dict)
     current_feature: str | None = None
     current_spec: str | None = None
     feature_branch: str | None = None
