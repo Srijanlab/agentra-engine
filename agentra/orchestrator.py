@@ -98,6 +98,17 @@ async def run_cycle(
             mem.record_failure(run_id, "understand_codebase", cb.text)
             return CycleReport(run_id, feature or "", False, False, False, None, [], "codebase understanding failed; aborting cycle")
 
+        # GitHub issue #42 hardening: this pipeline has no blocking_bugs()
+        # pre-flight gate at all (unlike agents/brain.py's default mode), so
+        # it always attempts understand_codebase regardless -- meaning a
+        # successful call here is itself proof a previously-filed Claude
+        # Code auth-failure blocking bug, if any is still open, is stale.
+        # See Memory.clear_resolved_auth_bugs's docstring for why only this
+        # specific bug class is safe to auto-clear this way.
+        cleared = mem.clear_resolved_auth_bugs(run_id)
+        if cleared:
+            mem.log(run_id, f"auto-cleared previously-blocking Claude Code auth-failure bug(s): {', '.join('#' + c for c in cleared)}")
+
         opportunities: list[dict] = []
         feature_brief = feature or ""
         top: dict | None = None

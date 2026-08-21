@@ -87,14 +87,53 @@ class MemoryIssuesMixin:
                 return candidate.get("external_id")
         return None
 
-    def _find_similar_open_bug(self, diagnosis: str) -> str | None:
+    def _find_similar_open_bug(self, diagnosis: str, detail: str = "") -> str | None:
         """Best-effort duplicate suppression: record_failure() fires on every
         non-transient failure, and an unfixed real bug produces the same
         failure on every retry — without this, each cycle filed its own fresh
         issue for the identical problem. Confirmed live: 4 near-identical
         '403 Write access to repository not granted' bugs (#7-#10) from four
-        consecutive cycles hitting the same broken code path."""
-        return self._find_similar_open(diagnosis, self.known_bugs(), "diagnosis")
+        consecutive cycles hitting the same broken code path.
+
+        GitHub issue #42 regression (resumed): `diagnosis` alone used to be
+        the ONLY thing compared, but it's always the same generic
+        boilerplate title (record_failure's f"{step_name} failed during an
+        autonomous cycle") -- difflib scores two of those as highly
+        "similar" purely off that shared boilerplate suffix, regardless of
+        what actually failed. Confirmed live via a regression test
+        (test_issue42_auth_failure_regression.py): an unrelated
+        run_local_tests TypeError bug got silently merged into the SAME
+        GitHub issue as an understand_codebase Claude Code auth failure --
+        i.e. this dedup was the "close-issue-on-fix logic" that was
+        actually broken, not the auth detection itself. `detail` (the real
+        failure text -- record_known_bug's proposed_fix / record_failure's
+        raw text) is now folded into the comparison so it's content-aware,
+        not just title-aware.
+
+        A Claude Code auth/login failure specifically gets its own
+        deterministic fast path ahead of the fuzzy fallback: it's a single
+        well-known failure CLASS (is_login_required_failure), not
+        free-form text, and the several different message templates that
+        wrap it (agents/brain/__init__.py's top-level cycle-exception text
+        vs agents/base.py's per-tool-call AgentResult.text) don't share
+        enough literal substring overlap for generic difflib similarity to
+        reliably clear the threshold between them -- confirmed by direct
+        computation, ~0.42 ratio, well under
+        _DUPLICATE_BUG_SIMILARITY_THRESHOLD. Matching on the classifier
+        directly means the exact same underlying credential problem still
+        dedupes correctly no matter which of the nine tool call sites (or
+        the top-level orchestrator call) first surfaced it."""
+        bugs = self.known_bugs()
+        if is_login_required_failure(detail):
+            for candidate in bugs:
+                if is_login_required_failure(f"{candidate.get('diagnosis', '')}\n{candidate.get('proposed_fix', '')}"):
+                    return candidate.get("external_id")
+        candidate_text = f"{diagnosis}\n{detail[:300]}"
+        for candidate in bugs:
+            existing = f"{candidate.get('diagnosis', '')}\n{(candidate.get('proposed_fix') or '')[:300]}"
+            if difflib.SequenceMatcher(None, candidate_text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+                return candidate.get("external_id")
+        return None
 
     def record_known_bug(
         self,
@@ -126,7 +165,7 @@ class MemoryIssuesMixin:
         try:
             from agentra.connectors import github_issues
 
-            duplicate_of = self._find_similar_open_bug(diagnosis)
+            duplicate_of = self._find_similar_open_bug(diagnosis, proposed_fix)
             if duplicate_of and duplicate_of.isdigit():
                 github_issues.add_comment(repo_url, int(duplicate_of), f"Still occurring (run {run_id}, source: {source}).\n\n{diagnosis}")
                 if extra_labels:
@@ -258,6 +297,50 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
 
+    def clear_resolved_auth_bugs(self, run_id: str) -> list[str]:
+        """GitHub issue #42 hardening: a Claude Code CLI auth/login-failure
+        blocking bug is unlike every other blocking_agentra bug (e.g. a
+        missing GitHub permission) in one important way -- there's a cheap,
+        unambiguous way to confirm it's actually resolved: just get one
+        real Claude Code CLI turn back with no auth failure. Every other
+        unfixable-by-agentra bug stays blocking until a human explicitly
+        closes/clears the issue on GitHub, because agentra has no reliable
+        way to verify THOSE are fixed on its own; this one it does.
+
+        Without this, once filed, an auth-failure bug stayed open forever
+        (nothing else in this codebase ever called clear_known_bug on it --
+        implement_feature can't "implement a fix" for a human needing to
+        run `claude /login`), so it kept surfacing as the same still-open
+        blocking bug on every future scheduled trigger indefinitely even
+        after a human had already fixed the underlying credentials and
+        simply hadn't also remembered to separately close the GitHub issue
+        by hand -- confirmed to be exactly why GitHub issue #42 itself kept
+        resurfacing despite two prior shipped fixes that only handled
+        detection/escalation, not this closing-the-loop step.
+
+        Callers (run_autonomous_cycle, orchestrator.run_cycle) must only
+        call this after confirming *this exact run* actually got a real,
+        successful Claude Code CLI turn back with no auth failure of its
+        own this run -- see their own call sites for that guard; this
+        method itself does not re-verify anything, it just clears whatever
+        is currently open and auth-classified.
+
+        Returns the external_id (GitHub issue number as str) of each bug
+        cleared, for logging/tests."""
+        cleared: list[str] = []
+        for bug in self.blocking_bugs():
+            if is_login_required_failure(f"{bug.get('diagnosis', '')}\n{bug.get('proposed_fix', '')}"):
+                self.clear_known_bug(
+                    bug["external_id"],
+                    resolution_note=(
+                        f"Auto-resolved by run {run_id}: a subsequent autonomous cycle completed a "
+                        "Claude Code CLI call successfully, confirming re-authentication worked. "
+                        "Closing so this doesn't keep blocking or resurfacing on future cycles."
+                    ),
+                )
+                cleared.append(bug["external_id"])
+        return cleared
+
     def record_failure(self, run_id: str, step_name: str, text: str, severity: str = "high") -> None:
         """The one place a failed agent turn's full output should be reported to.
         Transient failures are just logged; permanent failures become GitHub Issues.
@@ -269,20 +352,22 @@ class MemoryIssuesMixin:
         needs to actually go run `claude /login` before anything else can
         proceed -- filing the GitHub issue alone is easy to miss. Only sent
         for a genuinely new occurrence (diagnosis not already matching an
-        open bug -- see _find_similar_open_bug below): once reported, the
-        blocking_agentra label already stops every future cycle at
-        run_autonomous_cycle's blocking_bugs() pre-flight check before it
-        can ever reach this method again for the *same* unresolved failure,
-        so this guards the (bounded, same-cycle) case of more than one tool
-        call hitting the identical failure before that cycle's own hard-stop
-        takes effect."""
+        open bug -- see _find_similar_open_bug below): once reported, this
+        guards against re-notifying for every subsequent occurrence of the
+        *same* unresolved failure -- both the (bounded, same-cycle) case of
+        more than one tool call hitting it before that cycle's own
+        hard-stop takes effect, AND every later cycle's own self-test retry
+        (run_autonomous_cycle no longer hard-blocks pre-flight purely on an
+        open auth-classified blocking bug -- see clear_resolved_auth_bugs
+        below for why one more real attempt is safe/cheap here) hitting it
+        again while a human hasn't actually fixed credentials yet."""
         if is_transient_failure(text):
             self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
             return
         unfixable = cannot_be_fixed_by_agentra(text)
         diagnosis = f"{step_name} failed during an autonomous cycle"
         auth_failure = is_login_required_failure(text)
-        already_reported = auth_failure and self._find_similar_open_bug(diagnosis) is not None
+        already_reported = auth_failure and self._find_similar_open_bug(diagnosis, text) is not None
         issue_number = self.record_known_bug(
             run_id, severity, diagnosis, text[:2000],
             source="autonomous-failure", needs_human=unfixable, blocking_agentra=unfixable,

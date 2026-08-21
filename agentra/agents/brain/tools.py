@@ -134,16 +134,21 @@ def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: Ag
     same cycle would just hit the identical missing credentials, so
     waiting for two consecutive failures before stopping would only burn
     more cost/turns for no benefit ("fails fast without burning further
-    retries/cost"). Since the bug is filed blocking_agentra=True, the
-    *next* cycle's blocking_bugs() pre-flight check refuses to even start
-    until a human clears it -- so this can't perpetually resurface on
-    every cycle either.
+    retries/cost"). Since the bug is filed blocking_agentra=True, a *future*
+    cycle only gets one more cheap, zero-retry attempt before hitting this
+    exact same short-circuit again (run_autonomous_cycle's blocking_bugs()
+    pre-flight check no longer hard-stops purely on an open auth-classified
+    bug -- see clear_resolved_auth_bugs) -- so this can't perpetually
+    resurface as fresh Slack noise/duplicate issues either way. Also sets
+    session.auth_failure_this_cycle=True so that same self-clearing logic
+    knows *this* run is not proof of a working re-authentication.
 
     Returns the tool's is_error response dict if this was in fact an auth
     failure (the caller should return it immediately, before any of its
     own further processing of `result`), or None otherwise."""
     if not result.auth_failure:
         return None
+    session.auth_failure_this_cycle = True
     session.mem.record_failure(session.run_id, tool_name, result.text)
     session.hard_stop_reason = (
         f"Claude Code session is not authenticated on this runner (detected in {tool_name}) -- "

@@ -90,6 +90,23 @@ class OrchestratorSession:
     # might also make this same session.
     human_answer: str | None = None
     human_answer_issue: int | None = None
+    # GitHub issue #42 hardening: distinct from hard_stop_reason (which is
+    # also set when this happens, to end the cycle) -- set True the moment
+    # *this run* actually hits a Claude Code auth/login failure, whether at
+    # the top-level query() call (run_autonomous_cycle's own except block)
+    # or inside any sub-agent tool call (brain/tools.py's
+    # _check_auth_failure). Read at the end of the cycle to decide whether
+    # it's safe to auto-clear a previously-filed auth blocking bug (it is
+    # NOT safe if this exact run also just hit one -- see
+    # clear_resolved_auth_bugs's docstring for why that guard matters).
+    auth_failure_this_cycle: bool = False
+    # Set True the moment the top-level orchestrator query() call actually
+    # returns a ResultMessage -- i.e. proof this run got at least one real,
+    # authenticated Claude Code CLI turn back (a ProcessError there never
+    # yields a ResultMessage at all). Together with
+    # `not auth_failure_this_cycle`, this is what makes it safe to
+    # self-clear a stale auth-classified blocking bug at cycle end.
+    orchestrator_result_received: bool = False
 
     @property
     def app_name(self) -> str:
@@ -285,13 +302,38 @@ async def run_autonomous_cycle(
     )
 
     blocking = mem.blocking_bugs()
-    if blocking:
-        refs = ", ".join(f"#{b['external_id']}" for b in blocking)
+    # GitHub issue #42 hardening: a Claude Code auth/login-failure blocking
+    # bug is split out from every other blocking_agentra bug here -- unlike
+    # e.g. a missing GitHub permission (which genuinely can't be re-tested,
+    # only fixed by a separate human infra action), whether *this* one is
+    # still true is exactly one cheap, unambiguous Claude Code CLI call
+    # away from being verified: either it fails again identically (caught
+    # with zero retries the same as ever, see agents/base.py's run_agent /
+    # brain/tools.py's _check_auth_failure -- no more expensive than the
+    # very first time this failure was ever detected) or it succeeds, which
+    # is definitive proof a human already ran `claude /login` -- at which
+    # point clear_resolved_auth_bugs below auto-closes it so it stops
+    # resurfacing on every future trigger. A NON-auth blocking bug (or a mix
+    # of both) still hard-stops the cycle before even attempting anything,
+    # unchanged from before.
+    hard_blocking = [b for b in blocking if not is_login_required_failure(f"{b.get('diagnosis', '')}\n{b.get('proposed_fix', '')}")]
+    auth_blocking = [b for b in blocking if b not in hard_blocking]
+    if hard_blocking:
+        refs = ", ".join(f"#{b['external_id']}" for b in hard_blocking)
         session.hard_stop_reason = (
-            f"Blocked: {len(blocking)} open bug(s) labeled blocking_agentra ({refs}) need a human before "
+            f"Blocked: {len(hard_blocking)} open bug(s) labeled blocking_agentra ({refs}) need a human before "
             "agentra can make further progress. See the issue(s) for diagnosis -- not retrying."
         )
         session.note(f"autonomous cycle blocked by open blocking_agentra bug(s): {refs}", agent="cycle", ok=False)
+    elif auth_blocking:
+        refs = ", ".join(f"#{b['external_id']}" for b in auth_blocking)
+        session.note(
+            f"open Claude Code auth-failure blocking bug(s) found ({refs}) -- attempting this cycle "
+            "anyway to cheaply verify whether a human has re-authenticated since; will auto-clear "
+            "the bug(s) if this run gets a real result back, or fail fast again (no extra retries) "
+            "if not",
+            agent="cycle",
+        )
 
     tools = _tools_for(session)
     server = create_sdk_mcp_server(name="agentra_brain", tools=tools)
@@ -351,6 +393,7 @@ async def run_autonomous_cycle(
                     if isinstance(message, ResultMessage):
                         final_text = message.result or ""
                         session.cost_usd += message.total_cost_usd or 0.0
+                        session.orchestrator_result_received = True
         except Exception as exc:
             # GitHub issue #42: this is the exact spot a prior cycle crashed
             # opaquely on "Claude Code returned an error result: Not logged
@@ -366,11 +409,15 @@ async def run_autonomous_cycle(
             # always files as needs_human + blocking_agentra AND sends the
             # Slack human-in-the-loop escalation (GitHub issue #34's
             # connectors/slack.py, wired in by Memory.record_failure itself
-            # -- see its docstring), so check_hard_stop's blocking_bugs()
-            # gate at the top of the *next* cycle refuses to even start (and
-            # therefore never repeats this exact failure) until a human runs
-            # `claude /login` and clears the bug.
+            # -- see its docstring). blocking_bugs()'s pre-flight check
+            # (above) now only hard-stops the *next* cycle outright for a
+            # non-auth blocking bug; for this one specifically the next
+            # cycle instead gets one more cheap, zero-retry attempt and
+            # self-clears it the moment that attempt actually succeeds (see
+            # clear_resolved_auth_bugs) -- no manual GitHub-issue-closing
+            # required once a human actually runs `claude /login`.
             if is_login_required_failure(str(exc)):
+                session.auth_failure_this_cycle = True
                 final_text = (
                     "Claude Code session is not authenticated -- run /login and re-trigger. "
                     f"(CLI reported: {exc}). Filed as a blocking bug and notified via Slack (if "
@@ -382,6 +429,16 @@ async def run_autonomous_cycle(
                 final_text = f"autonomous cycle raised: {exc}"
                 session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
             mem.record_failure(run_id, "autonomous-cycle", final_text)
+
+    if session.orchestrator_result_received and not session.auth_failure_this_cycle:
+        cleared = mem.clear_resolved_auth_bugs(run_id)
+        if cleared:
+            refs = ", ".join(f"#{c}" for c in cleared)
+            session.note(
+                f"auto-cleared previously-blocking Claude Code auth-failure bug(s) ({refs}) -- "
+                "this run confirmed re-authentication succeeded",
+                agent="cycle", ok=True,
+            )
 
     if session.stagnation_detected:
         stagnation_note = (
