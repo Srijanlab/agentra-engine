@@ -133,8 +133,10 @@ def _escalate_to_human(
     title: str,
     branch: str | None = None,
     tracking_issue: int | None = None,
+    session_id: str | None = None,
 ) -> int | None:
-    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body AND threaded into session.mark_waiting_for_human's structured human_input dict, so an escalation's reason is queryable/chartable from the Firestore/local-JSON run record itself, not just discoverable by grepping issue text."""
+    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body AND threaded into session.mark_waiting_for_human's structured human_input dict, so an escalation's reason is queryable/chartable from the Firestore/local-JSON run record itself, not just discoverable by grepping issue text. session_id defaults to session.session_id (the cross-run resume seed) but a caller with a fresher just-returned session_id (e.g. implement_feature's own AgentResult) should pass it explicitly, since session.session_id is no longer kept in sync with every sub-agent call."""
+    session_id = session_id if session_id is not None else session.session_id
     full_diagnosis = f"Category: {category}\n\n{diagnosis}"
     issue_number = session.mem.record_known_bug(
         session.run_id, "medium", full_diagnosis,
@@ -148,7 +150,7 @@ def _escalate_to_human(
     if issue_number is not None:
         session.mem.record_human_input_context(
             issue_number, app=session.app_name, run_id=session.run_id, question=question,
-            branch=branch, session_id=session.session_id, tracking_issue=tracking_issue,
+            branch=branch, session_id=session_id, tracking_issue=tracking_issue,
         )
     from agentra import urls
     from agentra.connectors import slack
@@ -160,7 +162,7 @@ def _escalate_to_human(
         issue_url=issue_url,
         dashboard_url=urls.dashboard_run_url(session.run_id, session.app_name),
         branch=branch,
-        session_id=session.session_id,
+        session_id=session_id,
     )
     session.mark_waiting_for_human(
         issue_number=issue_number, issue_url=issue_url, question=question, branch=branch, category=category,
@@ -498,7 +500,11 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := _check_auth_failure(session, "implement_feature", impl):
             return stop
         session.cost_usd += impl.cost_usd
-        session.session_id = impl.session_id or session.session_id
+        # Disabled: chaining session.session_id across every sub-agent call in a cycle made
+        # later calls resume the whole prior transcript, compounding context (confirmed live:
+        # one Implementation Agent turn read 222K cached input tokens). Each call now starts
+        # fresh; session.session_id still only comes from the explicit cross-run resume path.
+        # session.session_id = impl.session_id or session.session_id
         data = impl.json_data or {}
         feature_name = data.get("feature") or brief.split(":")[0].strip()
         session.tests_passed = False
@@ -512,7 +518,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         )
         if tracking_issue is not None:
             session.mem.record_in_progress_branch(
-                tracking_issue, session.feature_branch, session.run_id, session.session_id
+                tracking_issue, session.feature_branch, session.run_id, impl.session_id or session.session_id
             )
         commit_sha = None
         try:
@@ -545,6 +551,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                 title=f"Human input required: {feature_name}",
                 branch=session.feature_branch,
                 tracking_issue=tracking_issue,
+                session_id=impl.session_id or session.session_id,
             )
             # Also note it on the tracking issue itself (if this call was
             if tracking_issue is not None:
@@ -629,7 +636,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := _check_auth_failure(session, "run_local_tests", test):
             return stop
         session.cost_usd += test.cost_usd
-        session.session_id = test.session_id or session.session_id
+        # session.session_id = test.session_id or session.session_id  # see implement_feature
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
 
@@ -651,7 +658,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             if stop := _check_auth_failure(session, "run_local_tests", fix):
                 return stop
             session.cost_usd += fix.cost_usd
-            session.session_id = fix.session_id or session.session_id
+            # session.session_id = fix.session_id or session.session_id  # see implement_feature
             session.note(
                 f"run_local_tests: self-heal attempt {attempts} ok={fix.ok}",
                 ok=fix.ok, cost_usd=fix.cost_usd, turns=fix.turns,
@@ -662,7 +669,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             if stop := _check_auth_failure(session, "run_local_tests", test):
                 return stop
             session.cost_usd += test.cost_usd
-            session.session_id = test.session_id or session.session_id
+            # session.session_id = test.session_id or session.session_id  # see implement_feature
             data = test.json_data or {}
             passed = test.ok and data.get("status") != "fail"
 
@@ -752,7 +759,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         session.deploy_attempted = True
         session.cost_usd += deploy.cost_usd
-        session.session_id = deploy.session_id or session.session_id
+        # session.session_id = deploy.session_id or session.session_id  # see implement_feature
         data = deploy.json_data or {}
 
         if data.get("status") == "HUMAN_INPUT_REQUIRED":
@@ -822,7 +829,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := _check_auth_failure(session, "verify_pre_prod", test):
             return stop
         session.cost_usd += test.cost_usd
-        session.session_id = test.session_id or session.session_id
+        # session.session_id = test.session_id or session.session_id  # see implement_feature
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
         session.pre_prod_verified = passed
@@ -855,7 +862,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := _check_auth_failure(session, "assess_feedback", fb):
             return stop
         session.cost_usd += fb.cost_usd
-        session.session_id = fb.session_id or session.session_id
+        # session.session_id = fb.session_id or session.session_id  # see implement_feature
         session.note("assess_feedback", ok=fb.ok, cost_usd=fb.cost_usd, turns=fb.turns)
         return {"content": [{"type": "text", "text": fb.text[:2000]}]}
 
