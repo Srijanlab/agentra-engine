@@ -219,6 +219,49 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
 
+    def clear_resolved_transient_bugs(self, run_id: str) -> list[str]:
+        """Reconciliation sweep (GitHub issue #60 hardening): a bug whose
+        diagnosis matches an already-handled transient/quota condition (Claude
+        Code CLI weekly/usage-limit or other rate-limit errors -- see
+        is_transient_failure) doesn't need proof of a working retry the way an
+        auth-failure bug does (clear_resolved_auth_bugs) -- the condition was
+        never something agentra could fix with code, so close it outright
+        (not mark_shipped's non-terminal 'open, awaiting promotion' state)
+        with an explanatory comment, so it stops resurfacing in the backlog."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return []
+        try:
+            from agentra.connectors import github_issues
+        except Exception:
+            logger.warning("clear_resolved_transient_bugs: could not import github_issues", exc_info=True)
+            return []
+        cleared: list[str] = []
+        for bug in self.known_bugs():
+            external_id = bug.get("external_id")
+            if not external_id or not str(external_id).isdigit():
+                continue
+            if not is_transient_failure(f"{bug.get('diagnosis', '')}\n{bug.get('proposed_fix', '')}"):
+                continue
+            try:
+                github_issues.close_issue(
+                    repo_url,
+                    int(external_id),
+                    comment=(
+                        f"Auto-resolved by run {run_id}: this diagnosis matches an already-handled "
+                        "transient/quota condition (Claude Code CLI weekly/usage-limit or other "
+                        "rate-limit error -- see is_transient_failure detection). No code fix is "
+                        "possible or needed here; closing so this doesn't keep resurfacing in the "
+                        "backlog across future cycles."
+                    ),
+                )
+                cleared.append(str(external_id))
+            except Exception:
+                logger.warning(
+                    "clear_resolved_transient_bugs: failed to close issue #%s on %s", external_id, repo_url, exc_info=True
+                )
+        return cleared
+
     def clear_resolved_auth_bugs(self, run_id: str) -> list[str]:
         """GitHub issue #42 hardening: a Claude Code CLI auth/login-failure blocking bug is unlike every other blocking_agentra bug (e.g."""
         cleared: list[str] = []

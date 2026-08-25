@@ -279,6 +279,8 @@ class FakeGitHubBackend:
         self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
     ) -> None:
         if issue_number in self.issues[repo_url]:
+            if comment:
+                self.add_comment(repo_url, issue_number, comment)
             issue = self.issues[repo_url][issue_number]
             issue["state"] = "closed"
             issue["closed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()

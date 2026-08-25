@@ -228,6 +228,19 @@ async def run_autonomous_cycle(
         agent="cycle",
     )
 
+    # GitHub issue #60 hardening: close out bugs matching an already-handled
+    # transient/quota condition (e.g. Claude Code CLI weekly/usage-limit
+    # errors) that were filed before that detection existed -- no need to
+    # wait for a successful attempt this cycle, unlike clear_resolved_auth_bugs.
+    cleared_transient = mem.clear_resolved_transient_bugs(run_id)
+    if cleared_transient:
+        refs = ", ".join(f"#{c}" for c in cleared_transient)
+        session.note(
+            f"auto-closed known bug(s) matching an already-handled transient/quota condition ({refs}) -- "
+            "no code fix needed, closing so they stop resurfacing in the backlog",
+            agent="cycle", ok=True,
+        )
+
     blocking = mem.blocking_bugs()
     # GitHub issue #42 hardening: a Claude Code auth/login-failure blocking
     hard_blocking = [b for b in blocking if not is_login_required_failure(f"{b.get('diagnosis', '')}\n{b.get('proposed_fix', '')}")]
