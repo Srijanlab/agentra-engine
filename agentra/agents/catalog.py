@@ -87,6 +87,7 @@ AGENT_METADATA: dict[str, AgentMeta] = {
             "Assesses architectural blast radius of a proposed feature before it's built",
             "Flags schema changes, new API surfaces, and cross-cutting refactors as higher risk",
             "Names concrete concerns rather than a generic risk score",
+            "Judges infra_cost_impact (none/low/material) with a concrete one-line reason",
             "Strictly read-only -- never proposes or makes edits, purely advisory to the Orchestrator",
         ],
         "tools": _tools("Read", "Glob", "Grep"),

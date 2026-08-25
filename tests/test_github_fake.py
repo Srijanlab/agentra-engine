@@ -52,6 +52,18 @@ def test_create_sub_issue_links_under_its_parent():
     assert backend.issues["https://github.com/acme/app.git"][parent["number"]]["sub_issue_numbers"] == [sub["number"]]
 
 
+def test_add_issue_as_sub_issue_links_an_already_existing_issue():
+    """GitHub issue #64: retroactively organizing two independently-filed issues under a parent,
+    unlike create_sub_issue which only ever links a brand-new issue it just created."""
+    backend = github_fake.FakeGitHubBackend()
+    parent = backend.create_issue("https://github.com/acme/app.git", "Epic", "")
+    existing = backend.create_issue("https://github.com/acme/app.git", "Filed independently", "")
+
+    backend.add_issue_as_sub_issue("https://github.com/acme/app.git", parent["number"], existing["number"])
+
+    assert backend.issues["https://github.com/acme/app.git"][parent["number"]]["sub_issue_numbers"] == [existing["number"]]
+
+
 def test_get_issue_returns_the_issue_or_none():
     backend = github_fake.FakeGitHubBackend()
     created = backend.create_issue("https://github.com/acme/app.git", "A feature", "")

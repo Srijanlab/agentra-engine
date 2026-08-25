@@ -41,6 +41,12 @@ _TRANSIENT_FAILURE_PATTERNS = [
     re.compile(r"rate.?limit", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
     re.compile(r"session limit", re.IGNORECASE),
+    # GitHub issue #60: the Claude Code CLI's actual weekly-quota wording
+    # ("You've hit your weekly limit · resets ...") doesn't contain the
+    # literal phrase "usage limit" -- catch that phrasing and its sibling
+    # (5-hour/session) quota messages too.
+    re.compile(r"weekly limit", re.IGNORECASE),
+    re.compile(r"hit your .{0,30}limit", re.IGNORECASE),
     re.compile(r"overloaded", re.IGNORECASE),
     re.compile(r"returned an error result: success"),
 ]

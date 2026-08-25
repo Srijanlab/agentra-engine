@@ -109,6 +109,9 @@ def test_discover_opportunities_routes_human_input_required_through_record_known
     assert kwargs.get("blocking_agentra", False) is False
     assert "two mutually exclusive directions" in diagnosis
     assert "Should we prioritize retention or acquisition?" in diagnosis
+    # The structured run record must carry the escalation category too, not
+    # just the GitHub issue body -- so it's queryable/chartable by reason.
+    assert session.human_input["category"] == "product_direction"
 
 
 def test_discover_opportunities_human_input_required_does_not_count_as_a_tool_failure(tmp_path, monkeypatch):
@@ -285,7 +288,6 @@ def test_discover_opportunities_does_not_file_when_active_feature_branches_exist
         return subprocess.CompletedProcess(
             args=["git", "branch", "-a"],
             returncode=0,
-            stdout="  dev/a365dcfd-human-in-the-loop-
             stdout="  dev/a365dcfd-human-in-the-loop-escalation\n  main\n  origin/main\n",
             stderr="",
         )

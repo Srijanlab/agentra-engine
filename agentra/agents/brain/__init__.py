@@ -50,6 +50,12 @@ class OrchestratorSession:
     pre_prod_verified: bool = False
     # Set by deploy_pre_prod (change_risk.classify_change) each time it's called --
     change_risk: str | None = None
+    # Architecture Review Agent results, keyed by the exact feature_brief string they were
+    # produced for. Lives only on this session instance (one per run/cycle), so a review
+    # done for one brief can never leak into gating a different brief -- it's naturally
+    # reset every new cycle along with the rest of this dataclass. Populated by
+    # assess_design_impact and by implement_feature's automatic keyword-triggered review.
+    design_reviews: dict[str, dict] = field(default_factory=dict)
     current_feature: str | None = None
     current_spec: str | None = None
     feature_branch: str | None = None
@@ -78,15 +84,22 @@ class OrchestratorSession:
         return self.repo.name
 
     def mark_waiting_for_human(
-        self, *, issue_number: int | None, issue_url: str | None, question: str, branch: str | None = None
+        self,
+        *,
+        issue_number: int | None,
+        issue_url: str | None,
+        question: str,
+        branch: str | None = None,
+        category: str | None = None,
     ) -> None:
-        """Called by implement_feature/discover_opportunities right after filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED result."""
+        """Called by implement_feature/discover_opportunities right after filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED result. category (e.g. "infra_cost", "product_direction", "implementation" -- see _escalate_to_human) is threaded into the structured human_input dict, not just the GitHub issue body, so the Firestore/local-JSON run record itself is queryable/chartable by escalation reason instead of only discoverable by grepping issue text."""
         self.waiting_for_human = True
         self.human_input = {
             "issue_number": issue_number,
             "issue_url": issue_url,
             "question": question,
             "branch": branch,
+            "category": category,
             "session_id": self.session_id,
             "app": self.app_name,
             "waiting_since": time.time(),
@@ -214,6 +227,19 @@ async def run_autonomous_cycle(
         f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}",
         agent="cycle",
     )
+
+    # GitHub issue #60 hardening: close out bugs matching an already-handled
+    # transient/quota condition (e.g. Claude Code CLI weekly/usage-limit
+    # errors) that were filed before that detection existed -- no need to
+    # wait for a successful attempt this cycle, unlike clear_resolved_auth_bugs.
+    cleared_transient = mem.clear_resolved_transient_bugs(run_id)
+    if cleared_transient:
+        refs = ", ".join(f"#{c}" for c in cleared_transient)
+        session.note(
+            f"auto-closed known bug(s) matching an already-handled transient/quota condition ({refs}) -- "
+            "no code fix needed, closing so they stop resurfacing in the backlog",
+            agent="cycle", ok=True,
+        )
 
     blocking = mem.blocking_bugs()
     # GitHub issue #42 hardening: a Claude Code auth/login-failure blocking

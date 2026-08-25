@@ -70,6 +70,17 @@ async def run_cycle(
         if cleared:
             mem.log(run_id, f"auto-cleared previously-blocking Claude Code auth-failure bug(s): {', '.join('#' + c for c in cleared)}")
 
+        # GitHub issue #60 hardening: close out bugs matching an already-handled
+        # transient/quota condition (e.g. Claude Code CLI weekly/usage-limit
+        # errors) that were filed before that detection existed.
+        cleared_transient = mem.clear_resolved_transient_bugs(run_id)
+        if cleared_transient:
+            mem.log(
+                run_id,
+                f"auto-closed known bug(s) matching an already-handled transient/quota condition: "
+                f"{', '.join('#' + c for c in cleared_transient)}",
+            )
+
         opportunities: list[dict] = []
         feature_brief = feature or ""
         top: dict | None = None
