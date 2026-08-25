@@ -98,6 +98,6 @@ def test_system_prompt_requires_infra_cost_impact_in_the_output_schema():
     edit ever dropped this from the Architecture Review Agent's required
     output schema, the gate would silently stop firing on material-cost
     briefs. Guards the schema/rubric, not just the downstream gate logic."""
-    assert '"infra_cost_impact": "none" | "moderate" | "material"' in brain.architecture_review.SYSTEM_PROMPT
+    assert '"infra_cost_impact": "none" | "low" | "material",' in brain.architecture_review.SYSTEM_PROMPT
     assert "material" in brain.architecture_review.SYSTEM_PROMPT
-    assert "moderate" in brain.architecture_review.SYSTEM_PROMPT
+    assert "infra_cost_reason" in brain.architecture_review.SYSTEM_PROMPT

@@ -162,7 +162,7 @@ def test_high_risk_with_infra_layer_touched_blocks_even_without_material_impact(
                 "risk_level": "high",
                 "concerns": ["Breaking API change plus a new min-instances setting"],
                 "recommendation": "needs_narrower_scope",
-                "infra_cost_impact": "moderate",
+                "infra_cost_impact": "low",
             }
         )
 
