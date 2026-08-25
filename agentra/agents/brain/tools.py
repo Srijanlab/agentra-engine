@@ -639,10 +639,31 @@ def _tools_for(session: OrchestratorSession) -> list:
         # session.session_id = test.session_id or session.session_id  # see implement_feature
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
+        # The Testing Agent itself can fail to produce a verdict at all (e.g. it hits
+        # its own max_turns budget) -- that's an agent-execution problem, not a failing
+        # test, and test.json_data is None in that case (see run_agent's exception path).
+        # Feeding the raw exception text to the Implementation Agent as "fix these
+        # failing tests" is nonsensical (there is no such code bug); retry the test run
+        # itself instead of asking Implementation to "fix" it.
+        agent_errored = test.json_data is None
 
         attempts = 0
         while not passed and attempts < MAX_SELF_HEAL_ATTEMPTS and session.feature_branch is not None:
             attempts += 1
+            if agent_errored:
+                session.note(
+                    f"run_local_tests: attempt {attempts} produced no verdict ({test.text[:200]!r}); "
+                    "retrying the test run instead of dispatching a bogus fix",
+                    ok=False, cost_usd=test.cost_usd, turns=test.turns,
+                )
+                test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+                if stop := _check_auth_failure(session, "run_local_tests", test):
+                    return stop
+                session.cost_usd += test.cost_usd
+                data = test.json_data or {}
+                passed = test.ok and data.get("status") != "fail"
+                agent_errored = test.json_data is None
+                continue
             failing = data.get("failed_tests") or [test.text[:1000]]
             fix = await implementation.run(
                 session.repo,
@@ -672,6 +693,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             # session.session_id = test.session_id or session.session_id  # see implement_feature
             data = test.json_data or {}
             passed = test.ok and data.get("status") != "fail"
+            agent_errored = test.json_data is None
 
         session.tests_passed = passed
         detail = f"lint={data.get('lint_status', '?')} typecheck={data.get('typecheck_status', '?')}"

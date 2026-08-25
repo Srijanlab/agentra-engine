@@ -157,6 +157,39 @@ def test_does_not_self_heal_without_a_feature_branch(tmp_path, monkeypatch):
     assert session.tests_passed is False
 
 
+def test_agent_execution_error_retries_the_test_run_not_a_bogus_fix(tmp_path, monkeypatch):
+    # When the Testing Agent itself errors out (e.g. hits its own max_turns
+    # budget), run_agent returns json_data=None and the raw exception text as
+    # test.text -- there is no real failing-test list to hand to Implementation
+    # Agent, so run_local_tests must retry the test run itself instead of
+    # dispatching a "fix these failing tests" brief containing the raw
+    # exception text.
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
+
+    agent_error_text = (
+        "agent turn raised: Claude Code returned an error result: "
+        "Reached maximum number of turns (30) (exit code: 1)"
+    )
+    test_results = [
+        AgentResult(ok=False, text=agent_error_text, json_data=None, cost_usd=0.01, turns=30),
+        _test_result("pass", lint_status="pass", typecheck_status="pass"),
+    ]
+
+    async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
+        return test_results.pop(0)
+
+    monkeypatch.setattr(brain.testing, "run_local", fake_run_local)
+    monkeypatch.setattr(
+        brain.implementation, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not attempt a fix"))
+    )
+
+    result = asyncio.run(_tool(session, "run_local_tests").handler({}))
+
+    assert result.get("is_error") is not True
+    assert session.tests_passed is True
+
+
 def test_does_not_self_heal_when_the_suite_already_passes(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
