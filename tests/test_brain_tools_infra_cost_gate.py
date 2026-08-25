@@ -142,6 +142,11 @@ def test_material_infra_cost_impact_blocks_and_escalates(tmp_path, monkeypatch):
     assert len(slack_calls) == 1
     assert session.waiting_for_human is True
     assert session.current_feature is None  # nothing shipped
+    # The structured run record (what the dashboard / any analytics actually
+    # query) must carry the escalation category too, not just the GitHub
+    # issue body -- otherwise "which runs were blocked by the infra-cost
+    # gate" is only discoverable by grepping issue text.
+    assert session.human_input["category"] == "infra_cost"
 
 
 def test_high_risk_with_infra_layer_touched_blocks_even_without_material_impact(tmp_path, monkeypatch):
@@ -180,6 +185,7 @@ def test_high_risk_with_infra_layer_touched_blocks_even_without_material_impact(
     _, diagnosis, kwargs = known_bug_calls[0]
     assert "Category: infra_cost" in diagnosis
     assert session.waiting_for_human is True
+    assert session.human_input["category"] == "infra_cost"
 
 
 def test_low_risk_none_impact_proceeds_normally_with_no_escalation(tmp_path, monkeypatch):

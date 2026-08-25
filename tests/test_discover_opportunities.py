@@ -109,6 +109,9 @@ def test_discover_opportunities_routes_human_input_required_through_record_known
     assert kwargs.get("blocking_agentra", False) is False
     assert "two mutually exclusive directions" in diagnosis
     assert "Should we prioritize retention or acquisition?" in diagnosis
+    # The structured run record must carry the escalation category too, not
+    # just the GitHub issue body -- so it's queryable/chartable by reason.
+    assert session.human_input["category"] == "product_direction"
 
 
 def test_discover_opportunities_human_input_required_does_not_count_as_a_tool_failure(tmp_path, monkeypatch):

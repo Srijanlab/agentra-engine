@@ -125,6 +125,9 @@ def test_implement_feature_human_input_required_escalates_via_shared_helper(tmp_
     _, diagnosis, kwargs = known_bug_calls[0]
     assert kwargs["needs_human"] is True
     assert "OAuth or magic links" in diagnosis
+    # The structured run record must carry the escalation category too, not
+    # just the GitHub issue body -- so it's queryable/chartable by reason.
+    assert session.human_input["category"] == "implementation"
 
     # Resume-correlation data stamped, including the tracking issue (#17).
     assert len(context_calls) == 1

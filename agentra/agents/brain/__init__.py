@@ -84,15 +84,22 @@ class OrchestratorSession:
         return self.repo.name
 
     def mark_waiting_for_human(
-        self, *, issue_number: int | None, issue_url: str | None, question: str, branch: str | None = None
+        self,
+        *,
+        issue_number: int | None,
+        issue_url: str | None,
+        question: str,
+        branch: str | None = None,
+        category: str | None = None,
     ) -> None:
-        """Called by implement_feature/discover_opportunities right after filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED result."""
+        """Called by implement_feature/discover_opportunities right after filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED result. category (e.g. "infra_cost", "product_direction", "implementation" -- see _escalate_to_human) is threaded into the structured human_input dict, not just the GitHub issue body, so the Firestore/local-JSON run record itself is queryable/chartable by escalation reason instead of only discoverable by grepping issue text."""
         self.waiting_for_human = True
         self.human_input = {
             "issue_number": issue_number,
             "issue_url": issue_url,
             "question": question,
             "branch": branch,
+            "category": category,
             "session_id": self.session_id,
             "app": self.app_name,
             "waiting_since": time.time(),

@@ -114,7 +114,7 @@ def _escalate_to_human(
     branch: str | None = None,
     tracking_issue: int | None = None,
 ) -> int | None:
-    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body so an escalation's reason stays distinguishable from the outside."""
+    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body AND threaded into session.mark_waiting_for_human's structured human_input dict, so an escalation's reason is queryable/chartable from the Firestore/local-JSON run record itself, not just discoverable by grepping issue text."""
     full_diagnosis = f"Category: {category}\n\n{diagnosis}"
     issue_number = session.mem.record_known_bug(
         session.run_id, "medium", full_diagnosis,
@@ -142,7 +142,9 @@ def _escalate_to_human(
         branch=branch,
         session_id=session.session_id,
     )
-    session.mark_waiting_for_human(issue_number=issue_number, issue_url=issue_url, question=question, branch=branch)
+    session.mark_waiting_for_human(
+        issue_number=issue_number, issue_url=issue_url, question=question, branch=branch, category=category,
+    )
     return issue_number
 
 
