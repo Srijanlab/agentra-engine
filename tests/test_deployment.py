@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from agentra import environments
-from agentra.agents import deployment, git_ops
+from agentra.agents import deployment, deployment_network, git_ops
 from agentra.agents.base import AgentResult
 from agentra.environments import EnvironmentConfig, SelfHostedVMConfig
 
@@ -397,8 +397,15 @@ _FAKE_GATEWAY_IP = "172.20.0.1"
 
 def _fake_docker_run(
     calls: list, *, build_ok=True, run_ok=True, health_ok=True, inspect_env=None,
-    port_ok=True, gateway_ok=True, reachable_ok=True,
+    port_ok=True, gateway_ok=True, reachable_ok=True, preprod_network="widget-preprod-net",
+    own_container_joined_preprod=False,
 ):
+    """own_container_joined_preprod controls what `docker inspect <container>
+    --format {{json .NetworkSettings.Networks}}` reports for _container_networks/
+    _ensure_network_joined -- False (the default) means every test that doesn't
+    care about the alias-based reachability path keeps exercising the
+    host-gateway fallback exactly as before."""
+
     def _run(args, **kwargs):
         calls.append(list(args))
         import subprocess as _subprocess
@@ -424,6 +431,11 @@ def _fake_docker_run(
             return _subprocess.CompletedProcess(
                 args, 0 if reachable_ok else 6, stdout="", stderr="" if reachable_ok else "Could not resolve host",
             )
+        if args[:2] == ["docker", "inspect"] and "{{json .NetworkSettings.Networks}}" in args:
+            import json as _json
+
+            networks = {preprod_network: {}} if own_container_joined_preprod else {}
+            return _subprocess.CompletedProcess(args, 0, stdout=_json.dumps(networks), stderr="")
         if args[:2] == ["docker", "inspect"]:
             import json as _json
 
@@ -693,11 +705,15 @@ def test_deploy_pre_prod_self_hosted_joins_its_own_container_not_the_anchor_cont
     assert config.anchor_container not in [name for c in network_connect_calls for name in c]
 
 
-def test_deploy_pre_prod_self_hosted_fails_clearly_when_own_container_name_cannot_be_determined(tmp_path, monkeypatch):
+def test_deploy_pre_prod_self_hosted_falls_back_to_gateway_address_when_own_container_name_cannot_be_determined(
+    tmp_path, monkeypatch
+):
     """If this process's own container identity can't be resolved (HOSTNAME
-    unset / docker inspect failure), refuse to deploy something nothing would
-    be able to reach, rather than silently skipping the network join and
-    reporting a false 'deployed' (the old bug's exact failure shape)."""
+    unset / docker inspect failure), that alone must not block the deploy --
+    _select_preview_url falls back to the host-gateway address (GitHub issue
+    #45's path), which doesn't depend on knowing this process's own container
+    name at all. Only a *truly* unreachable instance (see the next test)
+    should be reported as failed."""
     feature_branch = "dev/1234-feature"
     repo = _setup_pre_prod_repo(tmp_path, feature_branch)
     env = _env()
@@ -712,11 +728,80 @@ def test_deploy_pre_prod_self_hosted_fails_clearly_when_own_container_name_canno
 
     result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
 
+    assert result.ok is True
+    assert result.json_data["status"] == "deployed"
+    assert result.json_data["preview_url"] == f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}"
+    # No network connect was even attempted -- there's no container name to connect.
+    assert not any(c[:3] == ["docker", "network", "connect"] for c in docker_calls)
+
+
+def test_deploy_pre_prod_self_hosted_fails_clearly_when_no_reachable_address_can_be_found_at_all(tmp_path, monkeypatch):
+    """When this process's own container can't be determined/joined AND the
+    host-gateway fallback also can't be resolved (published port lookup
+    fails), that's a genuinely unreachable instance -- refuse to deploy
+    something nothing would be able to reach, with a clear, actionable
+    reason, rather than a bare curl exit code surfacing later."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls, port_ok=False))
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: None)
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
     assert result.ok is False
     assert result.json_data["status"] == "failed"
+    assert result.json_data["preview_url"] is None
     assert "own container" in result.text.lower()
-    # Never got as far as `docker run` -- refused before starting the sibling.
-    assert not any(c[:2] == ["docker", "run"] for c in docker_calls)
+    assert "preprod_network" in result.text.lower() or "preprod-net" in result.text.lower()
+    # Never got as far as the health check -- no reachable URL to check yet.
+    assert not any(c[:2] == ["docker", "exec"] for c in docker_calls)
+
+
+def test_deploy_pre_prod_self_hosted_prefers_the_docker_alias_address_when_own_container_is_confirmed_joined(
+    tmp_path, monkeypatch
+):
+    """The actual fix this bug asked for: once this process's own container
+    is confirmed (not just fire-and-forget-connected) joined to
+    preprod_network, prefer the sibling's Docker-network alias/service name
+    (a direct container-to-container path) over the host-only bridge-IP
+    gateway address -- the gateway path is what produced the reported curl
+    exit 28 (hairpin NAT back through a custom bridge's gateway is
+    unreliable), while the alias path is a plain same-network DNS lookup."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        _fake_docker_run(docker_calls, preprod_network=config.preprod_network, own_container_joined_preprod=True),
+    )
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is True
+    assert result.json_data["status"] == "deployed"
+    assert result.json_data["preview_url"] == "http://widget-app-preprod-run123:8080"
+    # No `docker network connect` was needed -- membership was already confirmed.
+    assert not any(c[:3] == ["docker", "network", "connect"] for c in docker_calls)
+    # Never fell back to the GitHub issue #45 gateway lookups -- unnecessary
+    # once the alias path is confirmed reachable.
+    assert not any(c[:2] == ["docker", "port"] for c in docker_calls)
+    reachability_calls = [c for c in docker_calls if c[:1] == ["curl"]]
+    assert reachability_calls == [["curl", "-sf", "-m", "5", "http://widget-app-preprod-run123:8080/health"]]
 
 
 def test_deploy_pre_prod_self_hosted_reports_failed_when_unreachable_from_orchestrator_even_if_sibling_health_check_passes(
@@ -756,11 +841,24 @@ def test_deploy_pre_prod_self_hosted_reports_failed_when_unreachable_from_orches
     assert all(c == ["curl", "-sf", "-m", "5", f"http://{_FAKE_GATEWAY_IP}:{_FAKE_HOST_PORT}/health"] for c in reachability_calls)
 
 
+def _mute_own_container_id_fallbacks(monkeypatch):
+    """Blanks out the /proc-derived detection candidates so tests can pin
+    behavior for exactly one source at a time, deterministically -- without
+    this, tests would depend on whatever /proc/self/cgroup and
+    /proc/self/mountinfo happen to contain in whatever environment pytest
+    itself runs in (e.g. inside agentra's own containers, where they'd
+    actually resolve to a real container and make an unrelated fallback
+    look like it succeeded)."""
+    monkeypatch.setattr(deployment_network, "_own_container_id_from_cgroup", lambda: None)
+    monkeypatch.setattr(deployment_network, "_own_container_id_from_mountinfo", lambda: None)
+
+
 def test_own_container_name_resolves_via_docker_inspect_of_the_hostname_env_var(monkeypatch):
     """Unit-level pin for the resolution mechanism itself: HOSTNAME (Docker's
     default container hostname, its own short ID) is fed to `docker inspect`
     to recover the actual --name Docker assigned, e.g. 'agentra-blue'."""
     monkeypatch.setenv("HOSTNAME", "abc123def456")
+    _mute_own_container_id_fallbacks(monkeypatch)
     calls = []
 
     def _fake_run(args, **kwargs):
@@ -777,10 +875,184 @@ def test_own_container_name_resolves_via_docker_inspect_of_the_hostname_env_var(
     assert calls == [["docker", "inspect", "abc123def456", "--format", "{{.Name}}"]]
 
 
-def test_own_container_name_is_none_when_hostname_env_var_is_unset(monkeypatch):
+def test_own_container_name_falls_back_to_cgroup_or_mountinfo_when_hostname_is_stale_or_unset(monkeypatch):
+    """The actual fix this bug asked for at the detection level: a stale or
+    unset HOSTNAME must not be the single hardcoded source of truth --
+    when `docker inspect` on the HOSTNAME candidate fails (or HOSTNAME is
+    unset entirely), fall through to the ID the kernel itself records for
+    this process's cgroup/mount namespace, which can't go stale the way an
+    env var can."""
     monkeypatch.delenv("HOSTNAME", raising=False)
+    monkeypatch.setattr(deployment_network, "_own_container_id_from_cgroup", lambda: None)
+    monkeypatch.setattr(
+        deployment_network, "_own_container_id_from_mountinfo",
+        lambda: "9e2a3811ee92bba15de986ba4d64ec79a7ea9c916d83a8d98fcf959403e097d1",
+    )
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        import subprocess as _subprocess
+
+        return _subprocess.CompletedProcess(args, 0, stdout="/agentra-green\n", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+
+    name = deployment._own_container_name()
+
+    assert name == "agentra-green"
+    assert calls == [[
+        "docker", "inspect",
+        "9e2a3811ee92bba15de986ba4d64ec79a7ea9c916d83a8d98fcf959403e097d1",
+        "--format", "{{.Name}}",
+    ]]
+
+
+def test_own_container_name_skips_a_stale_hostname_that_docker_inspect_rejects(monkeypatch):
+    """If HOSTNAME resolves to something `docker inspect` no longer
+    recognizes (e.g. stale/overridden), that single failed lookup must not
+    be treated as final -- the next candidate should still be tried."""
+    monkeypatch.setenv("HOSTNAME", "stale000000")
+    monkeypatch.setattr(deployment_network, "_own_container_id_from_cgroup", lambda: None)
+    monkeypatch.setattr(
+        deployment_network, "_own_container_id_from_mountinfo",
+        lambda: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba98765432",
+    )
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        import subprocess as _subprocess
+
+        if args[2] == "stale000000":
+            return _subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: No such object: stale000000")
+        return _subprocess.CompletedProcess(args, 0, stdout="/agentra-blue\n", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+
+    name = deployment._own_container_name()
+
+    assert name == "agentra-blue"
+    assert [c[2] for c in calls] == [
+        "stale000000", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba98765432",
+    ]
+
+
+def test_own_container_name_is_none_when_every_detection_method_is_exhausted(monkeypatch):
+    monkeypatch.delenv("HOSTNAME", raising=False)
+    _mute_own_container_id_fallbacks(monkeypatch)
 
     assert deployment._own_container_name() is None
+
+
+def test_own_container_id_from_cgroup_extracts_the_id_from_a_cgroup_v1_style_path(monkeypatch):
+    fake_id = "a" * 64
+    monkeypatch.setattr(
+        deployment.Path, "read_text",
+        lambda self: f"12:pids:/docker/{fake_id}\n11:cpu,cpuacct:/docker/{fake_id}\n" if str(self) == "/proc/self/cgroup" else "",
+    )
+
+    assert deployment._own_container_id_from_cgroup() == fake_id
+
+
+def test_own_container_id_from_cgroup_is_none_for_a_bare_cgroup_v2_root(monkeypatch):
+    """The actual reported-bug scenario: a cgroup v2 host with no per-
+    container cgroup path at all -- must fall through cleanly, not raise or
+    misparse."""
+    monkeypatch.setattr(
+        deployment.Path, "read_text", lambda self: "0::/\n" if str(self) == "/proc/self/cgroup" else "",
+    )
+
+    assert deployment._own_container_id_from_cgroup() is None
+
+
+def test_own_container_id_from_mountinfo_extracts_the_id_from_the_containers_path(monkeypatch):
+    fake_id = "b" * 64
+    line = (
+        f"645 635 8:1 /var/lib/docker/containers/{fake_id}/resolv.conf "
+        "/etc/resolv.conf rw,nosuid,nodev,relatime - ext4 /dev/sda1 rw\n"
+    )
+    monkeypatch.setattr(
+        deployment.Path, "read_text", lambda self: line if str(self) == "/proc/self/mountinfo" else "",
+    )
+
+    assert deployment._own_container_id_from_mountinfo() == fake_id
+
+
+def test_own_container_id_from_mountinfo_is_none_without_a_matching_containers_path(monkeypatch):
+    monkeypatch.setattr(
+        deployment.Path, "read_text",
+        lambda self: "645 635 8:1 / / rw - overlay overlay rw\n" if str(self) == "/proc/self/mountinfo" else "",
+    )
+
+    assert deployment._own_container_id_from_mountinfo() is None
+
+
+def test_own_container_id_candidates_falls_back_from_cgroup_v2_to_mountinfo(monkeypatch):
+    """Pins the reason /proc/self/mountinfo exists as a candidate at all:
+    cgroup v2 hosts (this repo's own reported bug environment) often report
+    a cgroup path with no container ID embedded in it at all (e.g. a bare
+    '0::/'), so cgroup-based detection alone isn't enough."""
+    monkeypatch.delenv("HOSTNAME", raising=False)
+    monkeypatch.setattr(deployment_network, "_own_container_id_from_cgroup", lambda: None)
+    monkeypatch.setattr(deployment_network, "_own_container_id_from_mountinfo", lambda: "1" * 64)
+
+    assert deployment._own_container_id_candidates() == ["1" * 64]
+
+
+def test_ensure_network_joined_returns_true_without_connecting_when_already_a_member(monkeypatch):
+    calls = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        import subprocess as _subprocess
+        import json as _json
+
+        return _subprocess.CompletedProcess(args, 0, stdout=_json.dumps({"widget-preprod-net": {}}), stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+
+    assert deployment._ensure_network_joined("widget-preprod-net", "widget-app-blue") is True
+    # Only the membership check -- no redundant `docker network connect` call.
+    assert not any(c[:3] == ["docker", "network", "connect"] for c in calls)
+
+
+def test_ensure_network_joined_connects_then_verifies_membership(monkeypatch):
+    state = {"joined": False}
+
+    def _fake_run(args, **kwargs):
+        import subprocess as _subprocess
+        import json as _json
+
+        if args[:3] == ["docker", "network", "connect"]:
+            state["joined"] = True
+            return _subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        networks = {"widget-preprod-net": {}} if state["joined"] else {}
+        return _subprocess.CompletedProcess(args, 0, stdout=_json.dumps(networks), stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+
+    assert deployment._ensure_network_joined("widget-preprod-net", "widget-app-blue") is True
+
+
+def test_ensure_network_joined_returns_false_when_connect_exits_zero_but_membership_never_sticks(monkeypatch):
+    """The actual fix this bug asked for at the join level: a `docker
+    network connect` call that exits 0 must not be trusted blindly --
+    membership is verified by re-inspecting, and a silent no-op connect
+    (the reported bug's actual failure mode) must be reported as not
+    joined, not papered over."""
+
+    def _fake_run(args, **kwargs):
+        import subprocess as _subprocess
+        import json as _json
+
+        if args[:3] == ["docker", "network", "connect"]:
+            return _subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return _subprocess.CompletedProcess(args, 0, stdout=_json.dumps({}), stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_run)
+
+    assert deployment._ensure_network_joined("widget-preprod-net", "widget-app-blue") is False
 
 
 def test_teardown_self_hosted_preprod_removes_container_and_image(tmp_path, monkeypatch):
