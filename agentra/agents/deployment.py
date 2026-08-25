@@ -8,6 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agentra.agents.base import AgentResult, run_agent
+from agentra.agents.deployment_network import (
+    _container_networks,  # noqa: F401 -- re-exported for tests/other callers
+    _ensure_network_joined,
+    _own_container_id_candidates,  # noqa: F401 -- re-exported for tests
+    _own_container_id_from_cgroup,  # noqa: F401 -- re-exported for tests
+    _own_container_id_from_mountinfo,  # noqa: F401 -- re-exported for tests
+    _own_container_name,
+)
 from agentra.environments import EnvironmentConfig
 
 PRE_PROD_SYSTEM_PROMPT = """You are the Deployment Agent, deploying to the \
@@ -361,26 +369,6 @@ def cleanup_stale_preprod(config: "environments.SelfHostedVMConfig", max_age_hou
     return removed
 
 
-def _own_container_id() -> str | None:
-    """The container ID Docker gave *this* process's own container, read from HOSTNAME -- Docker sets a container's hostname to its own short ID by default, and nothing in compute.tf's `docker run` for agentra-blue/ agentra-green passes --hostname to override that."""
-    hostname = os.environ.get("HOSTNAME", "").strip()
-    return hostname or None
-
-
-def _own_container_name() -> str | None:
-    """Resolves this process's own container's Docker --name (e.g."""
-    container_id = _own_container_id()
-    if not container_id:
-        return None
-    inspect = subprocess.run(
-        ["docker", "inspect", container_id, "--format", "{{.Name}}"],
-        capture_output=True, text=True,
-    )
-    if inspect.returncode != 0 or not inspect.stdout.strip():
-        return None
-    return inspect.stdout.strip().lstrip("/")
-
-
 def _docker_build_env() -> dict:
     """Env for every `docker build` subprocess call in this module -- explicitly enables BuildKit (DOCKER_BUILDKIT=1) rather than relying on whatever the legacy default happens to be on the build host: the legacy builder is deprecated and, unlike BuildKit, doesn't skip/cache unchanged layers as effectively, which matters directly on a disk-constrained long-lived host."""
     return {**os.environ, "DOCKER_BUILDKIT": "1"}
@@ -426,25 +414,21 @@ async def deploy_pre_prod_self_hosted(
         )
 
     # This process's OWN container -- not config.anchor_container (nginx) --
+    # needs to be joined to preprod_network to reach the sibling by its
+    # internal Docker-DNS name, the reliable path (direct container-to-
+    # container over a shared bridge, not dependent on hairpin NAT back
+    # through a bridge gateway, which is what actually produced the reported
+    # curl exit 28 against a host-gateway address). own_container is
+    # resolved fresh on every call (see _own_container_name) since
+    # blue/green promotion changes which color is running this process, and
+    # the join is verified rather than trusted (_ensure_network_joined) --
+    # a detection/permissions failure here is no longer fatal on its own:
+    # _select_preview_url below falls back to a host-gateway address when
+    # the join can't be confirmed, so this degrades gracefully instead of
+    # blocking every pre-prod deploy outright.
     subprocess.run(["docker", "network", "create", config.preprod_network], capture_output=True, text=True)
     own_container = _own_container_name()
-    if own_container is None:
-        return AgentResult(
-            ok=False,
-            text=(
-                "Could not determine this orchestrator process's own container name "
-                "(HOSTNAME unset or `docker inspect` failed) -- refusing to deploy a "
-                "pre-prod instance nothing would be able to reach: without knowing which "
-                f"container to join to {config.preprod_network!r}, verify_pre_prod would "
-                "fail with an unresolvable host."
-            ),
-            json_data={"status": "failed"},
-            cost_usd=0.0, turns=0,
-        )
-    subprocess.run(
-        ["docker", "network", "connect", config.preprod_network, own_container],
-        capture_output=True, text=True,
-    )
+    own_joined_preprod = bool(own_container) and _ensure_network_joined(config.preprod_network, own_container)
 
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
     env_args = []
@@ -469,12 +453,12 @@ async def deploy_pre_prod_self_hosted(
             json_data=None, cost_usd=0.0, turns=0,
         )
 
-    preview_url = _host_reachable_preview_url(config, container_name)
+    preview_url, unreachable_reason = _select_preview_url(config, container_name, own_joined_preprod)
     if preview_url is None:
         return AgentResult(
             ok=False,
-            text=f"{container_name} started but its published port and/or {config.app_network!r} gateway "
-            "address could not be determined -- no reachable preview_url to hand to verify_pre_prod.",
+            text=f"{container_name} started but no reachable preview_url could be determined for it "
+            f"({unreachable_reason}) -- nothing to hand to verify_pre_prod.",
             json_data={"status": "failed", "preview_url": None},
             cost_usd=0.0, turns=0,
         )
@@ -492,13 +476,26 @@ async def deploy_pre_prod_self_hosted(
     # _wait_for_healthy only proves the sibling's own process is up (it
     reachable, reach_detail = await _wait_for_reachable_from_orchestrator(preview_url)
     if not reachable:
+        if own_joined_preprod:
+            guidance = (
+                f"this process's own container ({own_container!r}) IS confirmed joined to "
+                f"{config.preprod_network!r} but still couldn't reach {container_name!r} over it -- "
+                "check the sibling's own logs/health, and whether anything (host firewall, iptables, "
+                "docker daemon config) is blocking inter-container traffic on that network."
+            )
+        else:
+            guidance = (
+                f"this process's own container ({(own_container or 'undetermined')!r}) "
+                f"could not be confirmed joined to {config.preprod_network!r}, so this fell back to a "
+                "host-gateway address -- check that the orchestrator container has access to the docker "
+                "socket and permission to run `docker network connect`, and that "
+                f"{config.preprod_network!r} exists."
+            )
         return AgentResult(
             ok=False,
             text=(
                 f"pre-prod instance not reachable from the orchestrator's own network path: "
-                f"{reach_detail} (preview_url={preview_url!r}). This usually means this "
-                f"process's own container isn't actually joined to {config.preprod_network!r} "
-                "-- see deploy_pre_prod_self_hosted/_own_container_name."
+                f"{reach_detail} (preview_url={preview_url!r}). {guidance}"
             ),
             json_data={"status": "failed", "preview_url": preview_url},
             cost_usd=0.0, turns=0,
@@ -512,8 +509,34 @@ async def deploy_pre_prod_self_hosted(
     )
 
 
+def _select_preview_url(
+    config: "environments.SelfHostedVMConfig", container_name: str, own_joined_preprod: bool,
+) -> tuple[str | None, str | None]:
+    """Picks the address to hand to verify_pre_prod. Prefers the sibling's
+    Docker-network alias (its own --name, resolvable via preprod_network's
+    embedded DNS) once this process's own container is confirmed joined to
+    that network: a direct container-to-container path that doesn't depend
+    on hairpin NAT back through a bridge gateway, which is unreliable on
+    custom (`docker network create`) bridges and is exactly what produced
+    the reported curl exit 28 against a host-gateway address. Falls back to
+    the host-gateway address (_host_reachable_preview_url, GitHub issue #45)
+    only when that join couldn't be confirmed. Returns (url, None) on
+    success, or (None, reason) when neither address could be determined."""
+    if own_joined_preprod:
+        return f"http://{container_name}:8080", None
+    gateway_url = _host_reachable_preview_url(config, container_name)
+    if gateway_url:
+        return gateway_url, None
+    return None, (
+        f"this process's own container could not be confirmed joined to {config.preprod_network!r}, and "
+        f"its published port and/or {config.app_network!r} gateway address could not be determined either"
+    )
+
+
 def _host_reachable_preview_url(config: "environments.SelfHostedVMConfig", container_name: str) -> str | None:
-    """GitHub issue #45: preview_url used to be built as f"http://{container_name}:8080" -- a Docker embedded-DNS name that only resolves for containers actually joined to config.preprod_network."""
+    """Fallback preview_url when this process's own container couldn't be
+    confirmed joined to config.preprod_network (see _select_preview_url).
+    GitHub issue #45: preview_url used to be built as f"http://{container_name}:8080" -- a Docker embedded-DNS name that only resolves for containers actually joined to config.preprod_network."""
     port = subprocess.run(
         ["docker", "port", container_name, "8080/tcp"], capture_output=True, text=True,
     )
