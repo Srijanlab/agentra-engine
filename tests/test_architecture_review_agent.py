@@ -90,3 +90,14 @@ def test_assess_design_impact_failure_calls_record_failure(tmp_path, monkeypatch
 def test_tools_for_places_assess_design_impact_between_discover_opportunities_and_implement_feature(tmp_path):
     names = [t.name for t in brain._tools_for(_session(tmp_path))]
     assert names.index("discover_opportunities") < names.index("assess_design_impact") < names.index("implement_feature")
+
+
+def test_system_prompt_requires_infra_cost_impact_in_the_output_schema():
+    """GitHub issue #54: the deterministic infra-cost gate (agents/brain/
+    infra_cost_gate.py) reads review["infra_cost_impact"] -- if a future
+    edit ever dropped this from the Architecture Review Agent's required
+    output schema, the gate would silently stop firing on material-cost
+    briefs. Guards the schema/rubric, not just the downstream gate logic."""
+    assert '"infra_cost_impact": "none" | "moderate" | "material"' in brain.architecture_review.SYSTEM_PROMPT
+    assert "material" in brain.architecture_review.SYSTEM_PROMPT
+    assert "moderate" in brain.architecture_review.SYSTEM_PROMPT
