@@ -93,15 +93,10 @@ _ISSUE_REF_RE = re.compile(r"#(\d+)")
 
 
 def _infer_resolves_from_brief(mem, feature_brief: str) -> tuple[str, str] | None:
-    """GitHub issue #64: implement_feature calls that reference an issue only in the free-text
-    feature_brief (e.g. "...(GitHub issue #60)") rather than in the resolves_id/resolves_origin
-    arguments used to leave the LLM caller's own #60/#61 duplicate-issue mistake uncaught --
-    record_shipped's fallback then matched on record_failure's generic, non-descriptive
-    diagnosis text and virtually never found the original issue, spawning a new one instead of
-    resolving it. Scans feature_brief for a #<number> reference and, if it matches an open known
+    """Best-effort fallback for when the caller didn't pass resolves_id/resolves_origin
+    explicitly: scans feature_brief for a #<number> reference and, if it matches an open known
     bug or feature-queue item's external_id, returns (id, origin) to use as if the caller had
-    passed it explicitly -- a best-effort safety net, not a replacement for the caller passing
-    resolves_id itself."""
+    passed it -- not a replacement for the caller passing resolves_id itself."""
     for match in _ISSUE_REF_RE.finditer(feature_brief):
         number = match.group(1)
         for bug in mem.known_bugs():
