@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -86,6 +87,30 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
     if impact or effort:
         body += f"\n\nImpact: {impact or 'unspecified'}, Effort: {effort or 'unspecified'}"
     return session.mem.record_feature_request(body, source="github", title=feature, extra_labels=[_DISCOVERY_LABEL])
+
+
+_ISSUE_REF_RE = re.compile(r"#(\d+)")
+
+
+def _infer_resolves_from_brief(mem, feature_brief: str) -> tuple[str, str] | None:
+    """GitHub issue #64: implement_feature calls that reference an issue only in the free-text
+    feature_brief (e.g. "...(GitHub issue #60)") rather than in the resolves_id/resolves_origin
+    arguments used to leave the LLM caller's own #60/#61 duplicate-issue mistake uncaught --
+    record_shipped's fallback then matched on record_failure's generic, non-descriptive
+    diagnosis text and virtually never found the original issue, spawning a new one instead of
+    resolving it. Scans feature_brief for a #<number> reference and, if it matches an open known
+    bug or feature-queue item's external_id, returns (id, origin) to use as if the caller had
+    passed it explicitly -- a best-effort safety net, not a replacement for the caller passing
+    resolves_id itself."""
+    for match in _ISSUE_REF_RE.finditer(feature_brief):
+        number = match.group(1)
+        for bug in mem.known_bugs():
+            if str(bug.get("external_id")) == number:
+                return number, "known_bug"
+        for feature in mem.feature_queue():
+            if str(feature.get("external_id")) == number:
+                return number, "feature_queue"
+    return None
 
 
 def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: AgentResult) -> dict | None:
@@ -403,6 +428,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.feature_branch = resume_branch if resume_branch else feature_branch_name(session.env, session.run_id, brief)
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
+        if not resolves_id:
+            resolves_id, resolves_origin = _infer_resolves_from_brief(session.mem, brief) or ("", "")
         sub_feature_of = args.get("sub_feature_of") or ""
         more_parts_expected = bool(args.get("more_parts_expected"))
         tracking_issue = None

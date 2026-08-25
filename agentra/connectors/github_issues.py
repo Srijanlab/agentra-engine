@@ -149,6 +149,31 @@ def create_sub_issue(
     return sub_issue
 
 
+def add_issue_as_sub_issue(repo_url: str, parent_issue_number: int, sub_issue_number: int) -> None:
+    """Links an already-existing issue as a GitHub-native sub-issue of parent_issue_number (GraphQL addSubIssue) --
+    for retroactively organizing issues filed independently, unlike create_sub_issue which files a new one."""
+    owner_repo = _owner_repo_or_raise(repo_url)
+    parent_resp = httpx.get(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{parent_issue_number}", headers=_headers(repo_url), timeout=15
+    )
+    parent_resp.raise_for_status()
+    sub_resp = httpx.get(
+        f"{GITHUB_API}/repos/{owner_repo}/issues/{sub_issue_number}", headers=_headers(repo_url), timeout=15
+    )
+    sub_resp.raise_for_status()
+    _graphql(
+        repo_url,
+        """
+        mutation($issueId: ID!, $subIssueId: ID!) {
+          addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) {
+            subIssue { id }
+          }
+        }
+        """,
+        {"issueId": parent_resp.json()["node_id"], "subIssueId": sub_resp.json()["node_id"]},
+    )
+
+
 def fetch_app_digest_batch(repo_urls: list[str], closed_limit: int = 5) -> dict[str, dict]:
     """Single GraphQL call fetching open bugs, open features, and most-recent closed issues for every repo in repo_urls simultaneously."""
     if not repo_urls:

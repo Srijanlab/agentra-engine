@@ -59,7 +59,7 @@ def test_record_failure_files_a_known_bug_for_a_real_defect(tmp_path, monkeypatc
 
     assert recorded["run_id"] == "run1"
     assert recorded["severity"] == "medium"
-    assert recorded["diagnosis"] == "testing failed during an autonomous cycle"
+    assert recorded["diagnosis"] == "testing failed during an autonomous cycle: 3 tests failed: test_login, test_logout, test_signup"
     assert "test_login" in recorded["proposed_fix"]
     assert recorded["source"] == "autonomous-failure"
     assert recorded["needs_human"] is False

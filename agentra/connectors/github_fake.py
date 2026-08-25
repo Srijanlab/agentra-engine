@@ -65,10 +65,13 @@ class FakeGitHubBackend:
         self, repo_url: str, parent_issue_number: int, title: str, body: str, labels: list[str] | None = None
     ) -> dict:
         sub_issue = self.create_issue(repo_url, title, body, labels=labels)
-        if parent_issue_number in self.issues[repo_url]:
-            self.issues[repo_url][parent_issue_number].setdefault("sub_issue_numbers", []).append(sub_issue["number"])
-            self._save()
+        self.add_issue_as_sub_issue(repo_url, parent_issue_number, sub_issue["number"])
         return sub_issue
+
+    def add_issue_as_sub_issue(self, repo_url: str, parent_issue_number: int, sub_issue_number: int) -> None:
+        if parent_issue_number in self.issues[repo_url]:
+            self.issues[repo_url][parent_issue_number].setdefault("sub_issue_numbers", []).append(sub_issue_number)
+            self._save()
 
     def get_issue(self, repo_url: str, issue_number: int) -> dict | None:
         issue = self.issues[repo_url].get(issue_number)
@@ -317,6 +320,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
     patches = [
         (github_issues, "create_issue", backend.create_issue),
         (github_issues, "create_sub_issue", backend.create_sub_issue),
+        (github_issues, "add_issue_as_sub_issue", backend.add_issue_as_sub_issue),
         (github_issues, "get_issue", backend.get_issue),
         (github_issues, "list_open_issues", backend.list_open_issues),
         (github_issues, "list_closed_issues", backend.list_closed_issues),

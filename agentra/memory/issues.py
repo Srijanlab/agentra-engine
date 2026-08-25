@@ -284,7 +284,13 @@ class MemoryIssuesMixin:
             self.log(run_id, f"{step_name} failed (transient, not filed as a bug): {text[:200]}")
             return
         unfixable = cannot_be_fixed_by_agentra(text)
-        diagnosis = f"{step_name} failed during an autonomous cycle"
+        # GitHub issue #64: a generic diagnosis ("X failed during an autonomous cycle") is
+        # identical across every distinct failure of the same step, so any later similarity-based
+        # dedup/match (here and in record_shipped's resolves_id fallback) against this field could
+        # never distinguish one real failure from another -- every fix looked equally "unrelated"
+        # to the bug it was fixing. Carry the actual error's first line so there's real signal.
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        diagnosis = f"{step_name} failed during an autonomous cycle: {first_line}" if first_line else f"{step_name} failed during an autonomous cycle"
         auth_failure = is_login_required_failure(text)
         already_reported = auth_failure and self._find_similar_open_bug(diagnosis, text) is not None
         issue_number = self.record_known_bug(
