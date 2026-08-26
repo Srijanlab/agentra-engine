@@ -135,17 +135,21 @@ def _escalate_to_human(
     tracking_issue: int | None = None,
     session_id: str | None = None,
 ) -> int | None:
-    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body AND threaded into session.mark_waiting_for_human's structured human_input dict, so an escalation's reason is queryable/chartable from the Firestore/local-JSON run record itself, not just discoverable by grepping issue text. session_id defaults to session.session_id (the cross-run resume seed) but a caller with a fresher just-returned session_id (e.g. implement_feature's own AgentResult) should pass it explicitly, since session.session_id is no longer kept in sync with every sub-agent call."""
+    """Human-in-the-loop escalation (GitHub issue #34), single shared helper for every escalation site in this module (implement_feature's own HUMAN_INPUT_REQUIRED branch, discover_opportunities, and the deterministic infra-cost gate) -- deploy_pre_prod's own HUMAN_INPUT_REQUIRED path is explicitly out of scope for this, left untouched. category is a short, machine-checkable tag (e.g. "product_direction", "implementation", "infra_cost") stamped into the filed issue body AND threaded into session.mark_waiting_for_human's structured human_input dict, so an escalation's reason is queryable/chartable from the Firestore/local-JSON run record itself, not just discoverable by grepping issue text. session_id defaults to session.session_id (the cross-run resume seed) but a caller with a fresher just-returned session_id (e.g. implement_feature's own AgentResult) should pass it explicitly, since session.session_id is no longer kept in sync with every sub-agent call. When tracking_issue is set, the blocking question is posted directly on that issue (never a separate needs_human issue) -- confirmed live as issues #79, #80, #81: the same interrupted item spawned three separate escalation issues instead of the question just landing on the tracking issue itself. Only a genuinely homeless escalation (no tracking_issue at all) files a new bug issue."""
     session_id = session_id if session_id is not None else session.session_id
     full_diagnosis = f"Category: {category}\n\n{diagnosis}"
-    issue_number = session.mem.record_known_bug(
-        session.run_id, "medium", full_diagnosis,
-        "Requires an explicit human decision -- not an implementation/discovery failure, "
-        "not something a different brief/approach fixes.",
-        source=source,
-        needs_human=True,
-        title=title,
-    )
+    if tracking_issue is not None:
+        session.mem.escalate_existing_issue(tracking_issue, session.run_id, full_diagnosis)
+        issue_number = tracking_issue
+    else:
+        issue_number = session.mem.record_known_bug(
+            session.run_id, "medium", full_diagnosis,
+            "Requires an explicit human decision -- not an implementation/discovery failure, "
+            "not something a different brief/approach fixes.",
+            source=source,
+            needs_human=True,
+            title=title,
+        )
     issue_url = session.mem.issue_html_url(issue_number) if issue_number is not None else None
     if issue_number is not None:
         session.mem.record_human_input_context(

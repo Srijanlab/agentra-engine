@@ -188,6 +188,12 @@ def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_r
     add_comment(repo_url, issue_number, body)
 
 
+def escalate_existing_issue(repo_url: str, issue_number: int, run_id: str, full_diagnosis: str, labels: list[str]) -> None:
+    """Escalates directly on the issue already tracking this work -- comments the blocking question and adds `labels` (typically just the needs_human label) -- instead of filing a separate needs_human issue for work that already has a home (confirmed live: issues #79, #80, #81, same interrupted item, three separate escalation issues, when the question should have just landed on the tracking issue itself)."""
+    add_comment(repo_url, issue_number, f"Blocked, needs human input (run {run_id}):\n\n{full_diagnosis}")
+    add_labels(repo_url, issue_number, labels)
+
+
 def close_issue(
     repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
 ) -> None:

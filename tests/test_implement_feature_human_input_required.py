@@ -87,6 +87,9 @@ def _human_input_required_result(**overrides) -> AgentResult:
 
 
 def test_implement_feature_human_input_required_escalates_via_shared_helper(tmp_path, monkeypatch):
+    """With a tracking issue (#17, via resolves_id), the blocking question lands directly on
+    that issue -- never a separate needs_human issue (confirmed live: issues #79, #80, #81,
+    same interrupted item, three separate escalation issues)."""
     _patch_registry(monkeypatch)
     slack_calls: list = []
     _patch_slack_and_urls(monkeypatch, slack_calls)
@@ -101,9 +104,15 @@ def test_implement_feature_human_input_required_escalates_via_shared_helper(tmp_
 
     def fake_record_known_bug(run_id, severity, diagnosis, proposed_fix, **k):
         known_bug_calls.append((severity, diagnosis, k))
-        return 99  # the needs_human issue number
+        return 99  # only used if this call is ever reached -- it shouldn't be
+
+    escalate_existing_calls = []
+
+    def fake_escalate_existing_issue(issue_number, run_id, full_diagnosis):
+        escalate_existing_calls.append((issue_number, full_diagnosis))
 
     monkeypatch.setattr(session.mem, "record_known_bug", fake_record_known_bug)
+    monkeypatch.setattr(session.mem, "escalate_existing_issue", fake_escalate_existing_issue)
     monkeypatch.setattr(session.mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
     context_calls = []
     monkeypatch.setattr(
@@ -119,20 +128,19 @@ def test_implement_feature_human_input_required_escalates_via_shared_helper(tmp_
     )
 
     assert result.get("is_error") is True
-    # Filed as needs_human, not blocking_agentra (a human answering unblocks it, it's not
-    # an infra-only issue) -- same shape as discover_opportunities' equivalent.
-    assert len(known_bug_calls) == 1
-    _, diagnosis, kwargs = known_bug_calls[0]
-    assert kwargs["needs_human"] is True
+    assert known_bug_calls == []  # never a separate needs_human issue
+    assert len(escalate_existing_calls) == 1
+    issue_number, diagnosis = escalate_existing_calls[0]
+    assert issue_number == 17  # the tracking issue itself
     assert "OAuth or magic links" in diagnosis
     # The structured run record must carry the escalation category too, not
     # just the GitHub issue body -- so it's queryable/chartable by reason.
     assert session.human_input["category"] == "implementation"
 
-    # Resume-correlation data stamped, including the tracking issue (#17).
+    # Resume-correlation data stamped on the tracking issue (#17) itself.
     assert len(context_calls) == 1
-    issue_number, ctx_kwargs = context_calls[0]
-    assert issue_number == 99
+    ctx_issue_number, ctx_kwargs = context_calls[0]
+    assert ctx_issue_number == 17
     assert ctx_kwargs["tracking_issue"] == 17
     assert ctx_kwargs["session_id"] == "sess-abc123"
     assert ctx_kwargs["branch"] == session.feature_branch
@@ -140,13 +148,13 @@ def test_implement_feature_human_input_required_escalates_via_shared_helper(tmp_
     # Slack notified.
     assert len(slack_calls) == 1
     assert "OAuth or magic links" in slack_calls[0]["question"]
-    assert slack_calls[0]["issue_url"] == "https://github.com/acme/app/issues/99"
+    assert slack_calls[0]["issue_url"] == "https://github.com/acme/app/issues/17"
 
     # Run marked waiting_for_human immediately.
     assert session.waiting_for_human is True
-    assert session.human_input["issue_number"] == 99
+    assert session.human_input["issue_number"] == 17
     assert session.hard_stop_reason is not None
-    assert "#99" in session.hard_stop_reason
+    assert "#17" in session.hard_stop_reason
 
 
 def test_implement_feature_human_input_required_does_not_count_as_a_tool_failure(tmp_path, monkeypatch):

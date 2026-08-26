@@ -62,7 +62,7 @@ def _patch_registry(monkeypatch):
     monkeypatch.setattr(registry, "record_run", lambda *a, **k: None)
 
 
-def _patch_escalation_plumbing(monkeypatch, session, known_bug_calls: list, slack_calls: list):
+def _patch_escalation_plumbing(monkeypatch, session, known_bug_calls: list, slack_calls: list, escalate_existing_calls: list | None = None):
     """Mocks everything _escalate_to_human touches so we can assert on the shape
     of the call (category, diagnosis) without hitting real GitHub/Slack."""
     from agentra import urls
@@ -72,7 +72,11 @@ def _patch_escalation_plumbing(monkeypatch, session, known_bug_calls: list, slac
         known_bug_calls.append((severity, diagnosis, k))
         return 77
 
+    def fake_escalate_existing_issue(issue_number, run_id, full_diagnosis):
+        (escalate_existing_calls if escalate_existing_calls is not None else []).append((issue_number, full_diagnosis))
+
     monkeypatch.setattr(session.mem, "record_known_bug", fake_record_known_bug)
+    monkeypatch.setattr(session.mem, "escalate_existing_issue", fake_escalate_existing_issue)
     monkeypatch.setattr(session.mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
     monkeypatch.setattr(session.mem, "record_human_input_context", lambda *a, **k: None)
     monkeypatch.setattr(urls, "dashboard_run_url", lambda run_id, app_name, **k: "https://dash/x")
@@ -305,9 +309,9 @@ def test_a_human_answer_judged_as_proceed_lets_a_material_review_through(tmp_pat
     "proceed", this pass through the gate must be let through -- a rigid tracking-issue-match
     bypass with no judgment would wrongly proceed even on an explicit "no" from the human."""
     _patch_registry(monkeypatch)
-    known_bug_calls, slack_calls = [], []
+    known_bug_calls, slack_calls, escalate_existing_calls = [], [], []
     session = _session(tmp_path, human_answer="Proceed, but keep the compute.tf incident comments.", human_answer_issue=76)
-    _patch_escalation_plumbing(monkeypatch, session, known_bug_calls, slack_calls)
+    _patch_escalation_plumbing(monkeypatch, session, known_bug_calls, slack_calls, escalate_existing_calls)
     _patch_successful_ship(monkeypatch, session)
     judge_calls = _patch_human_answer_judge(monkeypatch, decision="proceed")
 
@@ -339,7 +343,8 @@ def test_a_human_answer_judged_as_proceed_lets_a_material_review_through(tmp_pat
     assert result.get("is_error") is not True
     assert len(impl_calls) == 1
     assert len(judge_calls) == 1
-    assert known_bug_calls == []  # no new needs_human issue filed
+    assert known_bug_calls == []  # no separate needs_human issue filed
+    assert escalate_existing_calls == []  # the gate let this through before any escalation call
     assert session.waiting_for_human is False
     # The answer's guidance still reaches the Implementation Agent's spec (tools.py's own
     # one-shot consumption, unaffected by this gate's separate judge call).
@@ -352,9 +357,9 @@ def test_a_human_answer_judged_as_still_needs_escalation_re_blocks(tmp_path, mon
     unblock implementation just because *a* human_answer happens to be present for this tracking
     issue -- the judge's decision, not the mere presence of an answer, gates this."""
     _patch_registry(monkeypatch)
-    known_bug_calls, slack_calls = [], []
+    known_bug_calls, slack_calls, escalate_existing_calls = [], [], []
     session = _session(tmp_path, human_answer="Not sure, let me think about it.", human_answer_issue=76)
-    _patch_escalation_plumbing(monkeypatch, session, known_bug_calls, slack_calls)
+    _patch_escalation_plumbing(monkeypatch, session, known_bug_calls, slack_calls, escalate_existing_calls)
     judge_calls = _patch_human_answer_judge(monkeypatch, decision="still_needs_escalation", reason="answer is a deferral, not a decision")
 
     async def fake_review_run(repo, objective, feature_brief, codebase_summary):
@@ -385,7 +390,9 @@ def test_a_human_answer_judged_as_still_needs_escalation_re_blocks(tmp_path, mon
     assert result.get("is_error") is True
     assert impl_calls == []
     assert len(judge_calls) == 1
-    assert len(known_bug_calls) == 1  # re-escalated
+    assert known_bug_calls == []  # never a separate needs_human issue
+    assert len(escalate_existing_calls) == 1
+    assert escalate_existing_calls[0][0] == 76  # re-escalated on the tracking issue itself
     assert session.waiting_for_human is True
 
 

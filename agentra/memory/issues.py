@@ -186,6 +186,18 @@ class MemoryIssuesMixin:
         except Exception:
             logger.warning("record_human_answer: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
+    def escalate_existing_issue(self, issue_number: int, run_id: str, full_diagnosis: str) -> None:
+        """Escalates directly on the issue already tracking this work (comments the blocking question, adds the needs_human label) instead of filing a separate needs_human issue -- work that already has a home (a feature/bug issue) should never spawn a duplicate for a blocking question about that same work (confirmed live: issues #79, #80, #81, same interrupted item, three separate escalation issues)."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return
+        try:
+            from agentra.connectors import github_issues
+
+            github_issues.escalate_existing_issue(repo_url, issue_number, run_id, full_diagnosis, [_NEED_HUMAN_LABEL])
+        except Exception:
+            logger.warning("escalate_existing_issue: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
+
     def issue_html_url(self, issue_number: int) -> str | None:
         """The browsable GitHub URL for an issue, or None if this repo has no github.com remote."""
         repo_url = self._repo_url()

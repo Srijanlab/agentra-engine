@@ -220,6 +220,10 @@ class FakeGitHubBackend:
             body += f"\n\nResuming as run {resumed_run_key}."
         self.add_comment(repo_url, issue_number, body)
 
+    def escalate_existing_issue(self, repo_url: str, issue_number: int, run_id: str, full_diagnosis: str, labels: list[str]) -> None:
+        self.add_comment(repo_url, issue_number, f"Blocked, needs human input (run {run_id}):\n\n{full_diagnosis}")
+        self.add_labels(repo_url, issue_number, labels)
+
     def find_unanswered_human_input_comment(self, repo_url: str, issue_number: int) -> str | None:
         comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
         marker_seen = False
@@ -377,6 +381,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "get_human_input_context", backend.get_human_input_context),
         (github_issues, "record_human_answer", backend.record_human_answer),
         (github_issues, "find_unanswered_human_input_comment", backend.find_unanswered_human_input_comment),
+        (github_issues, "escalate_existing_issue", backend.escalate_existing_issue),
         (github_variables, "list_variables", backend.list_variables),
         (github_variables, "set_variable", backend.set_variable),
     ]
