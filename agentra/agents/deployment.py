@@ -640,6 +640,29 @@ def _image_of(container_name: str) -> str | None:
     return inspect.stdout.strip() if inspect.returncode == 0 and inspect.stdout.strip() else None
 
 
+_OLD_CONTAINER_TEARDOWN_DELAY_SECONDS = 5
+
+
+def _defer_old_container_removal(
+    cleanup_image: str, old_container: str, old_image: str | None, sock_gid: str,
+) -> None:
+    """GitHub issue #83: promote_prod_self_hosted's caller runs inside old_container, so removing old_container in-process kills this Python process before it can return an AgentResult and the caller can durably record status="completed" in the registry. Schedules the removal from a short-lived sibling container instead (launched over the same bind-mounted docker.sock) -- a process outside old_container's own namespace, so it isn't killed along with it and survives to finish the teardown after a brief delay."""
+    script = f"sleep {_OLD_CONTAINER_TEARDOWN_DELAY_SECONDS} && docker rm -f {old_container}"
+    if old_image:
+        script += f" && docker rmi {old_image}"
+    subprocess.run(
+        [
+            "docker", "run", "-d", "--rm", "--network", "none",
+            "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            *(["--group-add", sock_gid] if sock_gid else []),
+            "--entrypoint", "sh",
+            cleanup_image,
+            "-c", script,
+        ],
+        capture_output=True, text=True,
+    )
+
+
 def _other_color(color: str) -> str:
     return "green" if color == "blue" else "blue"
 
@@ -771,10 +794,13 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
         )
 
     # The outgoing color's image is never referenced again once its container
+    # is gone. old_container may be this very process's own container (this
+    # process runs *inside* the currently-live color) -- removing it in-process
+    # would kill this process before it can return and the caller can record
+    # status="completed" (GitHub issue #83), so it's deferred to a sibling
+    # container instead of done synchronously here.
     old_image = _image_of(old_container)
-    subprocess.run(["docker", "rm", "-f", old_container], capture_output=True, text=True)
-    if old_image:
-        subprocess.run(["docker", "rmi", old_image], capture_output=True, text=True)
+    _defer_old_container_removal(image_tag, old_container, old_image, sock_gid)
 
     return AgentResult(
         ok=True,

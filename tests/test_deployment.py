@@ -1130,7 +1130,7 @@ def test_teardown_self_hosted_preprod_noops_without_config(tmp_path, monkeypatch
 # -- promote_prod_self_hosted: nginx blue/green flip, no run_agent call ------------
 
 
-def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_the_old_container(tmp_path, monkeypatch):
+def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_defers_the_old_container_removal(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     env = _env(prod_branch="prod")
     config = _self_hosted_config()
@@ -1172,26 +1172,73 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_removes_
     assert push_calls == [env.prod_branch]
 
     run_calls = [c for c in docker_calls if c[:2] == ["docker", "run"]]
-    assert len(run_calls) == 1
-    assert "widget-app-green" in run_calls[0]
-    assert "widget-app-net" in run_calls[0]
-    assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude" in run_calls[0]
-    assert "/mnt/disks/widget-data/agentra-home:/home/agentuser/.agentra" in run_calls[0]
-    assert "/mnt/disks/widget-data/repos:/workspace" in run_calls[0]
-    assert "/var/run/docker.sock:/var/run/docker.sock" in run_calls[0]
+    assert len(run_calls) == 2
+    new_container_run = run_calls[0]
+    assert "widget-app-green" in new_container_run
+    assert "widget-app-net" in new_container_run
+    assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude" in new_container_run
+    assert "/mnt/disks/widget-data/agentra-home:/home/agentuser/.agentra" in new_container_run
+    assert "/mnt/disks/widget-data/repos:/workspace" in new_container_run
+    assert "/var/run/docker.sock:/var/run/docker.sock" in new_container_run
 
     reload_calls = [c for c in docker_calls if "nginx -s reload" in " ".join(c)]
     assert len(reload_calls) == 1
 
+    # The old (currently-live, possibly self) container/image must not be torn
+    # down synchronously in this process (GitHub issue #83) -- doing so here
+    # would race/kill the caller's own status write. Instead a short-lived
+    # sibling container (over the same docker.sock) is scheduled to remove it
+    # after a brief delay.
     remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
-    assert ["docker", "rm", "-f", "widget-app-blue"] in remove_calls
-
-    # The outgoing color's image must be reclaimed too, not just its container --
-    # otherwise every successful promotion leaves one more full image (~GBs)
-    # permanently orphaned (confirmed live: this exact leak filled a VM's disk
-    # to 100%, deadlocking every subsequent autonomous cycle).
+    assert ["docker", "rm", "-f", "widget-app-blue"] not in remove_calls
     rmi_calls = [c for c in docker_calls if c[:2] == ["docker", "rmi"]]
-    assert ["docker", "rmi", "widget-app:oldrun123"] in rmi_calls
+    assert ["docker", "rmi", "widget-app:oldrun123"] not in rmi_calls
+
+    cleanup_run = run_calls[1]
+    assert "/var/run/docker.sock:/var/run/docker.sock" in cleanup_run
+    assert "--entrypoint" in cleanup_run
+    cleanup_script = cleanup_run[-1]
+    assert "docker rm -f widget-app-blue" in cleanup_script
+    assert "docker rmi widget-app:oldrun123" in cleanup_script
+
+
+def test_defer_old_container_removal_launches_a_detached_sibling_that_removes_container_and_image(monkeypatch):
+    docker_calls = []
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        lambda args, **kwargs: docker_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    deployment._defer_old_container_removal("widget-app:new123", "widget-app-blue", "widget-app:oldrun123", "999")
+
+    assert len(docker_calls) == 1
+    call = docker_calls[0]
+    assert call[:3] == ["docker", "run", "-d"]
+    assert "--rm" in call
+    assert "widget-app:new123" in call  # the sibling runs off the already-local, just-verified image
+    assert "--group-add" in call and "999" in call
+    script = call[-1]
+    assert "sleep" in script
+    assert "docker rm -f widget-app-blue" in script
+    assert "docker rmi widget-app:oldrun123" in script
+    # docker rm must come before docker rmi -- the container referencing the
+    # image has to be gone before the image itself can be removed.
+    assert script.index("docker rm -f widget-app-blue") < script.index("docker rmi widget-app:oldrun123")
+
+
+def test_defer_old_container_removal_skips_rmi_when_old_image_is_unknown(monkeypatch):
+    docker_calls = []
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        lambda args, **kwargs: docker_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    deployment._defer_old_container_removal("widget-app:new123", "widget-app-blue", None, "")
+
+    script = docker_calls[0][-1]
+    assert "docker rm -f widget-app-blue" in script
+    assert "docker rmi" not in script
+    assert "--group-add" not in docker_calls[0]
 
 
 def test_promote_prod_self_hosted_aborts_without_flipping_when_new_color_never_becomes_healthy(tmp_path, monkeypatch):
