@@ -259,35 +259,55 @@ def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "check_backlog",
         "Cheap, direct data read -- no sub-agent call, always call this before "
-        "discover_opportunities. Priority order: (1) in-progress multi-part feature, "
-        "(2) known bug, (3) feature request queue, (4) discover_opportunities. "
-        "Bugs labeled need_human are filtered out. A non-null resume_branch means "
-        "work was previously started there; pass it to implement_feature to continue.",
+        "discover_opportunities. Priority order: (1) shipped items pending live testing, "
+        "(2) code-complete items pending merge to pre-prod, (3) in-progress multi-part "
+        "features, (4) known bugs not yet started, (5) feature request queue, "
+        "(6) discover_opportunities. Bugs labeled need_human are filtered out. A non-null "
+        "resume_branch means work was previously started there; pass it to implement_feature "
+        "to continue.",
         {},
     )
     async def check_backlog(_args):
         if stop := session.check_hard_stop():
             return stop
         shipped = [f["feature"] for f in session.mem.shipped_features()]
+        pending_test = _attach_resume_branches(session.mem, session.mem.shipped_pending_test_items())
+        pending_merge = _attach_resume_branches(session.mem, session.mem.code_complete_items())
         in_progress = session.mem.in_progress_features()
         bugs = _attach_resume_branches(session.mem, _actionable_bugs(session.mem.known_bugs()))
         queue = _attach_resume_branches(session.mem, session.mem.feature_queue())
         session.backlog_ids_shown.update(
-            str(item["external_id"]) for item in (*in_progress, *bugs, *queue) if item.get("external_id")
+            str(item["external_id"])
+            for item in (*pending_test, *pending_merge, *in_progress, *bugs, *queue)
+            if item.get("external_id")
         )
-        remaining_after_one = len(in_progress) + len(bugs) + len(queue) - 1
+        remaining_after_one = (
+            len(pending_test) + len(pending_merge) + len(in_progress) + len(bugs) + len(queue) - 1
+        )
         batching_hint = (
             f"\n\n{remaining_after_one} more item(s) will still be waiting after you address one of "
             "these -- if what you're about to build is not a trivial fix, consider implementing "
             "several of them before your first deploy_pre_prod call this run (it deploys/verifies "
             "everything implemented so far together, see its own description), rather than paying "
-            "for a full pre-prod deploy + live verification once per item."
+            "for a full pre-prod deploy + live verification once per item. Do not bundle a large, "
+            "standing, multi-session effort (e.g. one already spanning several prior commits) in "
+            "with an unrelated small fix just because both are waiting -- pick items that are "
+            "actually safe to test/deploy/review together."
             if remaining_after_one > 0 else ""
         )
         text = (
-            f"In-progress multi-part features (resume these first): {json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
-            f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
-            f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
+            "Work through what's already in flight before starting anything new -- in this order:\n"
+            f"1. Shipped, pending live testing (call implement_feature with resolves_id/resume_branch set, "
+            f"then run_local_tests -> deploy_pre_prod -> verify_pre_prod): "
+            f"{json.dumps(pending_test, indent=2) if pending_test else '(none)'}\n\n"
+            f"2. Code complete, pending merge to pre-prod (same resume flow, through deploy_pre_prod): "
+            f"{json.dumps(pending_merge, indent=2) if pending_merge else '(none)'}\n\n"
+            f"3. In-progress multi-part features (resume and finish coding): "
+            f"{json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
+            f"4. Known bugs not yet started (need_human bugs already excluded): "
+            f"{json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
+            f"5. Feature request queue, not yet started: "
+            f"{json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
             f"Already shipped: {shipped or '(none)'}"
             f"{batching_hint}"
         )
@@ -510,6 +530,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             impl = await implementation.run(
                 session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch,
                 resume=resuming, spec=spec_text, session_id=session.session_id,
+                mem=session.mem, run_id=session.run_id,
             )
         except Exception as exc:
             session.record_failure("implement_feature")
@@ -518,6 +539,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := _check_auth_failure(session, "implement_feature", impl):
             return stop
         session.cost_usd += impl.cost_usd
+        if impl.push_failed and session.feature_branch:
+            # GitHub issue #78: the commit is NOT confirmed durable on GitHub -- record a
+            # deterministic, per-branch hard-stop flag for THIS feature branch so deploy_pre_prod
+            # and record_code_complete below refuse to proceed for it, regardless of whether the
+            # orchestrator LLM notices impl.ok=False / the error text in impl.text.
+            session.mark_push_failed(session.feature_branch)
         # Disabled: chaining session.session_id across every sub-agent call in a cycle made
         # later calls resume the whole prior transcript, compounding context (confirmed live:
         # one Implementation Agent turn read 222K cached input tokens). Each call now starts
@@ -592,10 +619,22 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.mem.record_failure_on_issue(tracking_issue, session.run_id, "implementation", impl.text)
             else:
                 session.mem.record_failure(session.run_id, "implementation", impl.text)
+            # A push failure surviving retries is deliberately counted the same as any other
+            # implementation content failure toward MAX_CONSECUTIVE_TOOL_FAILURES (GitHub issue
+            # #78): it's just as much a sign of a real, non-prompt-fixable problem (bad
+            # credentials, repo access revoked, persistent network outage) as repeated bad code,
+            # and retrying identical briefs against it would be equally pointless.
             session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
+        # Defense in depth: even though impl.ok already gates this (implementation.run sets
+        # ok=False when the push fails after retries), check the dedicated per-branch flag
+        # directly too, so record_code_complete can never fire for a branch whose push failed
+        # regardless of how impl.ok ends up being computed later, or on a resumed branch whose
+        # push failure happened in an earlier call this session.
+        if stop := session.check_push_failure(session.feature_branch):
+            return stop
         session.record_success("implement_feature")
-        shipped = session.mem.record_shipped(
+        code_complete = session.mem.record_code_complete(
             feature_name,
             commit_sha=commit_sha,
             run_id=session.run_id,
@@ -606,19 +645,21 @@ def _tools_for(session: OrchestratorSession) -> list:
             known_bug_issue=resolves_id if resolves_origin == "known_bug" else None,
         )
         session.mem.append_documentation(
-            f"Shipped **{feature_name}**"
+            f"Code complete: **{feature_name}**"
             + (f" (commit `{commit_sha[:7]}`)" if commit_sha else "")
             + f": {brief[:300]}"
         )
         if resolves_id and resolves_origin == "known_bug":
-            resolution_note = f"Resolved by agentra: shipped as {feature_name!r} (run {session.run_id})" + (
+            resolution_note = f"Resolved by agentra: code complete as {feature_name!r} (run {session.run_id})" + (
                 f" (commit {commit_sha})" if commit_sha else ""
             )
             session.mem.clear_known_bug(resolves_id, resolution_note)
         session.current_feature = feature_name
 
-        issue_number = shipped["issue_number"] if shipped else None
-        parent_issue_number = shipped["board_issue_number"] if shipped else None
+        issue_number = code_complete["issue_number"] if code_complete else None
+        parent_issue_number = code_complete["board_issue_number"] if code_complete else None
+        if issue_number is not None:
+            session.code_complete_issue_numbers.append(str(issue_number))
         issue_note = f" (issue #{issue_number})" if issue_number else ""
         next_part_hint = (
             f" More parts expected -- call implement_feature again for the next part with "
@@ -632,7 +673,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                 {
                     "type": "text",
                     "text": (
-                        f"Implemented and committed {feature_name!r}{issue_note}. "
+                        f"Code complete: implemented, committed, and pushed {feature_name!r}{issue_note}. "
                         f"Call run_local_tests before deploy_pre_prod.{next_part_hint}"
                     ),
                 }
@@ -657,10 +698,31 @@ def _tools_for(session: OrchestratorSession) -> list:
         # session.session_id = test.session_id or session.session_id  # see implement_feature
         data = test.json_data or {}
         passed = test.ok and data.get("status") != "fail"
+        # The Testing Agent itself can fail to produce a verdict at all (e.g. it hits
+        # its own max_turns budget) -- that's an agent-execution problem, not a failing
+        # test, and test.json_data is None in that case (see run_agent's exception path).
+        # Feeding the raw exception text to the Implementation Agent as "fix these
+        # failing tests" is nonsensical (there is no such code bug); retry the test run
+        # itself instead of asking Implementation to "fix" it.
+        agent_errored = test.json_data is None
 
         attempts = 0
         while not passed and attempts < MAX_SELF_HEAL_ATTEMPTS and session.feature_branch is not None:
             attempts += 1
+            if agent_errored:
+                session.note(
+                    f"run_local_tests: attempt {attempts} produced no verdict ({test.text[:200]!r}); "
+                    "retrying the test run instead of dispatching a bogus fix",
+                    ok=False, cost_usd=test.cost_usd, turns=test.turns,
+                )
+                test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+                if stop := _check_auth_failure(session, "run_local_tests", test):
+                    return stop
+                session.cost_usd += test.cost_usd
+                data = test.json_data or {}
+                passed = test.ok and data.get("status") != "fail"
+                agent_errored = test.json_data is None
+                continue
             failing = data.get("failed_tests") or [test.text[:1000]]
             fix = await implementation.run(
                 session.repo,
@@ -672,10 +734,14 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.feature_branch,
                 resume=True,
                 session_id=session.session_id,
+                mem=session.mem,
+                run_id=session.run_id,
             )
             if stop := _check_auth_failure(session, "run_local_tests", fix):
                 return stop
             session.cost_usd += fix.cost_usd
+            if fix.push_failed and session.feature_branch:
+                session.mark_push_failed(session.feature_branch)
             # session.session_id = fix.session_id or session.session_id  # see implement_feature
             session.note(
                 f"run_local_tests: self-heal attempt {attempts} ok={fix.ok}",
@@ -690,6 +756,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             # session.session_id = test.session_id or session.session_id  # see implement_feature
             data = test.json_data or {}
             passed = test.ok and data.get("status") != "fail"
+            agent_errored = test.json_data is None
 
         session.tests_passed = passed
         detail = f"lint={data.get('lint_status', '?')} typecheck={data.get('typecheck_status', '?')}"
@@ -735,6 +802,9 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Refused: nothing to deploy -- call implement_feature first."}],
                 "is_error": True,
             }
+        if stop := session.check_push_failure(session.feature_branch):
+            session.note("deploy_pre_prod: refused, feature branch failed to push to GitHub", ok=False)
+            return stop
 
         from agentra.agents.git_ops import fetch_ref
 
@@ -764,6 +834,11 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.record_failure("deploy_pre_prod")
             else:
                 session.record_success("deploy_pre_prod")
+                if session.code_complete_issue_numbers:
+                    moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
+                    session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
+                    # No verify_pre_prod call follows a trivial merge, so these never reach
+                    # status:tested -- deliberately not added to shipped_this_cycle_issue_numbers.
             return {
                 "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this change."}],
                 "is_error": not ok,
@@ -820,6 +895,10 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("deploy_pre_prod")
         else:
             session.record_success("deploy_pre_prod")
+            if session.code_complete_issue_numbers:
+                moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
+                session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
+                session.shipped_this_cycle_issue_numbers.extend(moved)
         return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": not ok}
 
     @tool(
@@ -859,6 +938,9 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("verify_pre_prod")
         else:
             session.record_success("verify_pre_prod")
+            if session.shipped_this_cycle_issue_numbers:
+                session.mem.record_tested(session.shipped_this_cycle_issue_numbers, session.run_id)
+                session.shipped_this_cycle_issue_numbers = []
         if session.env.deploy_strategy == "self_hosted_vm":
             # Single-shot, ephemeral sibling -- tear it down once its report is
             deployment.teardown_self_hosted_preprod(session.repo, session.run_id)

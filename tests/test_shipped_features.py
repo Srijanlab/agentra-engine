@@ -1,10 +1,12 @@
-"""Regression tests for Memory.shipped_features()/record_shipped(): a
+"""Regression tests for Memory.shipped_features()/record_code_complete(): a
 shipped feature is an open GitHub 'feature'-labeled issue stamped
-"status:shipped" -- it only actually closes once promoted to production
-(mark_status_done). record_shipped() either marks-shipped the
-feature_queue issue it resolves (resolves_id) or opens-and-marks-shipped a
-fresh one, stamping run_id/commit_sha into the issue body so
-shipped_features() can read them straight back out. Same pattern as
+"status:shipped" or "status:tested" (merged to pre-prod, possibly also
+live-verified) -- it only actually closes once promoted to production
+(mark_status_done). record_code_complete() marks the earlier
+"status:code_complete" stage: either the feature_queue issue it resolves
+(resolves_id) or a fresh one, stamping run_id/commit_sha into the issue
+body so shipped_features() can read them straight back out once a later
+deploy_pre_prod call promotes the label further. Same pattern as
 test_memory_github_backlog.py: real local git repos on disk, github_issues'
 HTTP calls monkeypatched.
 """
@@ -155,7 +157,7 @@ def test_shipped_features_reads_session_id_from_github(tmp_path, monkeypatch):
     assert features[0]["updated_at"] == "2026-08-10T12:00:00Z"
 
 
-def test_record_shipped_creates_and_marks_shipped_a_fresh_issue_for_a_self_initiated_feature(tmp_path, monkeypatch):
+def test_record_code_complete_creates_and_marks_shipped_a_fresh_issue_for_a_self_initiated_feature(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -167,16 +169,16 @@ def test_record_shipped_creates_and_marks_shipped_a_fresh_issue_for_a_self_initi
         created.update(repo_url=repo_url, title=title, body=body, labels=labels)
         return {"number": 99, "title": title, "body": body}
 
-    def _mark_shipped(repo_url, issue_number, comment=None, body_suffix=None):
+    def _mark_code_complete(repo_url, issue_number, comment=None, body_suffix=None):
         marked.update(repo_url=repo_url, issue_number=issue_number, comment=comment, body_suffix=body_suffix)
 
     monkeypatch.setattr(github_issues, "create_issue", _create_issue)
-    monkeypatch.setattr(github_issues, "mark_shipped", _mark_shipped)
+    monkeypatch.setattr(github_issues, "mark_code_complete", _mark_code_complete)
     monkeypatch.setattr(
         github_issues, "close_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not close, only mark shipped"))
     )
 
-    result = mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42")
+    result = mem.record_code_complete("Dark mode", commit_sha="abc1234", run_id="run42")
 
     assert created["title"] == "Dark mode"
     assert created["labels"] == ["feature", "agentra"]
@@ -189,7 +191,7 @@ def test_record_shipped_creates_and_marks_shipped_a_fresh_issue_for_a_self_initi
     assert result == {"issue_number": 99, "board_issue_number": 99}
 
 
-def test_record_shipped_stamps_session_id_when_given(tmp_path, monkeypatch):
+def test_record_code_complete_stamps_session_id_when_given(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -198,16 +200,16 @@ def test_record_shipped_stamps_session_id_when_given(tmp_path, monkeypatch):
     marked = {}
     monkeypatch.setattr(
         github_issues,
-        "mark_shipped",
+        "mark_code_complete",
         lambda repo_url, issue_number, comment=None, body_suffix=None: marked.update(body_suffix=body_suffix),
     )
 
-    mem.record_shipped("Dark mode", commit_sha="abc1234", run_id="run42", session_id="sess-abc")
+    mem.record_code_complete("Dark mode", commit_sha="abc1234", run_id="run42", session_id="sess-abc")
 
     assert "Shipped-Session-ID: sess-abc" in marked["body_suffix"]
 
 
-def test_record_shipped_marks_shipped_the_originating_feature_queue_issue_instead_of_creating_a_new_one(tmp_path, monkeypatch):
+def test_record_code_complete_marks_shipped_the_originating_feature_queue_issue_instead_of_creating_a_new_one(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -217,30 +219,30 @@ def test_record_shipped_marks_shipped_the_originating_feature_queue_issue_instea
     marked = {}
     monkeypatch.setattr(
         github_issues,
-        "mark_shipped",
+        "mark_code_complete",
         lambda repo_url, issue_number, comment=None, body_suffix=None: marked.update(
             issue_number=issue_number, comment=comment, body_suffix=body_suffix
         ),
     )
 
-    result = mem.record_shipped("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
+    result = mem.record_code_complete("Approvals queue UI", commit_sha="def5678", run_id="run7", resolves_id="42")
 
     assert marked["issue_number"] == 42
     assert "Shipped-Run-ID: run7" in marked["body_suffix"]
     assert result == {"issue_number": 42, "board_issue_number": 42}
 
 
-def test_record_shipped_with_known_bug_issue_reuses_it_without_a_second_shipped_comment(tmp_path, monkeypatch):
+def test_record_code_complete_with_known_bug_issue_reuses_it_without_a_second_shipped_comment(tmp_path, monkeypatch):
     """Regression test for issue #33: a known-bug resolution used to have no
-    way to tell record_shipped which issue it belongs to (resolves_id is only
+    way to tell record_code_complete which issue it belongs to (resolves_id is only
     forwarded for resolves_origin=="feature_queue"), so its fallback fuzzy
     similarity check had to guess -- and sometimes missed, creating an
     orphaned duplicate instead of reusing the real tracking issue (#21).
     known_bug_issue fixes this by passing the known issue number through
-    directly. mark_shipped must NOT be called here -- the caller's own
+    directly. mark_code_complete must NOT be called here -- the caller's own
     clear_known_bug() (a separate call, not exercised by this test) already
     stamps status:shipped and posts the resolution comment on that same
-    issue; calling mark_shipped again here would double the comment."""
+    issue; calling mark_code_complete again here would double the comment."""
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -248,15 +250,15 @@ def test_record_shipped_with_known_bug_issue_reuses_it_without_a_second_shipped_
         github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not create a new issue"))
     )
     monkeypatch.setattr(
-        github_issues, "mark_shipped", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not double-post a shipped comment"))
+        github_issues, "mark_code_complete", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not double-post a shipped comment"))
     )
 
-    result = mem.record_shipped("Standup dedup fix", commit_sha="abc1234", run_id="run21", known_bug_issue="21")
+    result = mem.record_code_complete("Standup dedup fix", commit_sha="abc1234", run_id="run21", known_bug_issue="21")
 
     assert result == {"issue_number": 21, "board_issue_number": 21}
 
 
-def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path, monkeypatch):
+def test_record_code_complete_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -272,11 +274,11 @@ def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path,
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
     monkeypatch.setattr(
         github_issues,
-        "mark_shipped",
+        "mark_code_complete",
         lambda repo_url, issue_number, comment=None, body_suffix=None: marked.append(issue_number),
     )
 
-    result = mem.record_shipped("Part two", commit_sha="cafe123", run_id="run9", sub_feature_of="10")
+    result = mem.record_code_complete("Part two", commit_sha="cafe123", run_id="run9", sub_feature_of="10")
 
     assert sub_issue_calls == {"parent_issue_number": 10, "title": "Part two", "labels": ["story", "agentra"]}
     # The sub-issue closes immediately; the PARENT (#10) gets marked shipped
@@ -287,7 +289,7 @@ def test_record_shipped_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path,
     assert result == {"issue_number": 55, "board_issue_number": 10}
 
 
-def test_record_shipped_sub_feature_of_with_more_parts_expected_leaves_the_parent_open_and_unmarked(tmp_path, monkeypatch):
+def test_record_code_complete_sub_feature_of_with_more_parts_expected_leaves_the_parent_open_and_unmarked(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -295,15 +297,15 @@ def test_record_shipped_sub_feature_of_with_more_parts_expected_leaves_the_paren
     closed = []
     marked = []
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
-    monkeypatch.setattr(github_issues, "mark_shipped", lambda repo_url, issue_number, **k: marked.append(issue_number))
+    monkeypatch.setattr(github_issues, "mark_code_complete", lambda repo_url, issue_number, **k: marked.append(issue_number))
 
-    mem.record_shipped("Part two", sub_feature_of="10", more_parts_expected=True)
+    mem.record_code_complete("Part two", sub_feature_of="10", more_parts_expected=True)
 
     assert closed == [55]  # only the sub-issue -- the parent (#10) stays open
     assert marked == []  # not yet fully shipped -- no status:shipped on the parent
 
 
-def test_record_shipped_sub_feature_of_without_more_parts_marks_the_parent_shipped_too(tmp_path, monkeypatch):
+def test_record_code_complete_sub_feature_of_without_more_parts_marks_the_parent_shipped_too(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -313,20 +315,20 @@ def test_record_shipped_sub_feature_of_without_more_parts_marks_the_parent_shipp
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
     monkeypatch.setattr(
         github_issues,
-        "mark_shipped",
+        "mark_code_complete",
         lambda repo_url, issue_number, comment=None, body_suffix=None: marked.append((issue_number, comment)),
     )
 
-    mem.record_shipped("Final part", run_id="run9", sub_feature_of="10", more_parts_expected=False)
+    mem.record_code_complete("Final part", run_id="run9", sub_feature_of="10", more_parts_expected=False)
 
     # Sub-issue closes immediately; the parent gets marked shipped (stays
     # open) -- the whole feature is done, but only production promotion
     # closes it.
     assert closed == [55]
-    assert marked == [(10, "All parts shipped (run run9).")]
+    assert marked == [(10, "All parts code complete (run run9).")]
 
 
-def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp_path, monkeypatch):
+def test_record_code_complete_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -340,9 +342,9 @@ def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp
     closed = []
     marked = []
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
-    monkeypatch.setattr(github_issues, "mark_shipped", lambda repo_url, issue_number, **k: marked.append(issue_number))
+    monkeypatch.setattr(github_issues, "mark_code_complete", lambda repo_url, issue_number, **k: marked.append(issue_number))
 
-    result = mem.record_shipped("Big new feature", run_id="run1", more_parts_expected=True)
+    result = mem.record_code_complete("Big new feature", run_id="run1", more_parts_expected=True)
 
     assert created_issues == ["Big new feature"]  # the fresh parent, never closed
     assert closed == [21]  # only the first part's sub-issue
@@ -350,7 +352,7 @@ def test_record_shipped_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp
     assert result == {"issue_number": 21, "board_issue_number": 20}
 
 
-def test_record_shipped_starts_a_multi_part_feature_using_the_feature_queue_issue_as_parent(tmp_path, monkeypatch):
+def test_record_code_complete_starts_a_multi_part_feature_using_the_feature_queue_issue_as_parent(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -365,16 +367,16 @@ def test_record_shipped_starts_a_multi_part_feature_using_the_feature_queue_issu
     )
     closed = []
     monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
-    monkeypatch.setattr(github_issues, "mark_shipped", lambda repo_url, issue_number, **k: (_ for _ in ()).throw(AssertionError("parent not fully shipped yet")))
+    monkeypatch.setattr(github_issues, "mark_code_complete", lambda repo_url, issue_number, **k: (_ for _ in ()).throw(AssertionError("parent not fully shipped yet")))
 
-    result = mem.record_shipped("Big backlog feature", run_id="run1", resolves_id="7", more_parts_expected=True)
+    result = mem.record_code_complete("Big backlog feature", run_id="run1", resolves_id="7", more_parts_expected=True)
 
     assert sub_issue_calls == {"parent": 7}
     assert closed == [21]  # the sub-issue only -- issue #7 (the feature_queue entry) stays open
     assert result == {"issue_number": 21, "board_issue_number": 7}
 
 
-def test_record_shipped_marks_a_similar_open_bug_shipped_instead_of_orphaning_a_fresh_issue(tmp_path, monkeypatch):
+def test_record_code_complete_marks_a_similar_open_bug_shipped_instead_of_orphaning_a_fresh_issue(tmp_path, monkeypatch):
     # The real bug this fixes: a known-bug fix's caller is supposed to pass
     # resolves_id/resolves_origin, but confirmed live (issues #13/#16,
     # #1/#19, #6/#15) it doesn't always -- leaving the original bug open
@@ -397,17 +399,17 @@ def test_record_shipped_marks_a_similar_open_bug_shipped_instead_of_orphaning_a_
     marked = {}
     monkeypatch.setattr(
         github_issues,
-        "mark_shipped",
+        "mark_code_complete",
         lambda repo_url, issue_number, comment=None, body_suffix=None: marked.update(issue_number=issue_number),
     )
 
-    result = mem.record_shipped("Runs within a loop are listed oldest-first, not newest-first -- fixed", run_id="run1")
+    result = mem.record_code_complete("Runs within a loop are listed oldest-first, not newest-first -- fixed", run_id="run1")
 
     assert marked["issue_number"] == 13
     assert result == {"issue_number": 13, "board_issue_number": 13}
 
 
-def test_record_shipped_still_creates_a_fresh_issue_when_nothing_similar_is_open(tmp_path, monkeypatch):
+def test_record_code_complete_still_creates_a_fresh_issue_when_nothing_similar_is_open(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
 
@@ -418,22 +420,22 @@ def test_record_shipped_still_creates_a_fresh_issue_when_nothing_similar_is_open
     monkeypatch.setattr(
         github_issues, "create_issue", lambda repo_url, title, body, labels=None: created.update(title=title) or {"number": 99}
     )
-    monkeypatch.setattr(github_issues, "mark_shipped", lambda *a, **k: None)
+    monkeypatch.setattr(github_issues, "mark_code_complete", lambda *a, **k: None)
 
-    result = mem.record_shipped("Brand new feature nobody asked for yet", run_id="run1")
+    result = mem.record_code_complete("Brand new feature nobody asked for yet", run_id="run1")
 
     assert created["title"] == "Brand new feature nobody asked for yet"
     assert result == {"issue_number": 99, "board_issue_number": 99}
 
 
-def test_record_shipped_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
+def test_record_code_complete_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo", remote=None)
     mem = Memory(repo)
 
     called = []
     monkeypatch.setattr(github_issues, "create_issue", lambda *a, **k: called.append("create"))
 
-    mem.record_shipped("Dark mode")
+    mem.record_code_complete("Dark mode")
 
     assert called == []
 

@@ -77,7 +77,7 @@ def seed(force: bool = False) -> None:
         mem = Memory(repo)
         mem.set_objective(fixture["objective"])
         for feature, sha in fixture["shipped"]:
-            mem.record_shipped(feature, commit_sha=sha)
+            mem.record_code_complete(feature, commit_sha=sha)
         for i, bug in enumerate(fixture["bugs"]):
             mem.record_known_bug(run_id=f"seed-{name}-{i}", **bug)
         for req in _FEATURE_QUEUE.get(name, []):

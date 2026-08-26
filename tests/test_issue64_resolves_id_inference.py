@@ -1,8 +1,8 @@
 """GitHub issue #64 regression lock-in: issue #61 was filed as a duplicate of
 #60 (rather than closing #60 directly) because implement_feature's brain-side
 tool call mentioned "(GitHub issue #60)" only in the free-text feature_brief,
-never in the resolves_id/resolves_origin arguments record_shipped actually
-reads -- and record_shipped's own text-similarity safety net could never
+never in the resolves_id/resolves_origin arguments record_code_complete actually
+reads -- and record_code_complete's own text-similarity safety net could never
 catch it, since record_failure stamps every bug with the same generic
 diagnosis regardless of the real error. Two independent fixes:
 
@@ -12,7 +12,7 @@ diagnosis regardless of the real error. Two independent fixes:
 2. record_failure's diagnosis now carries the real error's first line, so
    any future similarity-based matching against it has real signal.
 
-This file exercises (1) directly, and end-to-end via record_shipped against
+This file exercises (1) directly, and end-to-end via record_code_complete against
 the fake GitHub backend, proving the #60/#61 scenario now resolves the
 original bug instead of filing a duplicate.
 """
@@ -95,7 +95,7 @@ def test_infer_resolves_from_brief_returns_none_when_no_number_matches_open_back
 def test_end_to_end_resolving_a_bug_referenced_only_in_prose_does_not_file_a_duplicate(tmp_path, monkeypatch):
     """The actual #60/#61 scenario: a fix brief mentions the bug's issue
     number only in prose. Inferring resolves_id/resolves_origin from that and
-    passing it into record_shipped(known_bug_issue=...) must resolve the
+    passing it into record_code_complete(known_bug_issue=...) must resolve the
     original bug, not create a new tracking issue for the same work."""
     github_fake.install(monkeypatch=monkeypatch)
     repo = _make_repo(tmp_path)
@@ -114,7 +114,7 @@ def test_end_to_end_resolving_a_bug_referenced_only_in_prose_does_not_file_a_dup
 
     assert resolves_id == str(bug_number)
 
-    shipped = mem.record_shipped(
+    shipped = mem.record_code_complete(
         brief, commit_sha="deadbeef", run_id="run1",
         known_bug_issue=resolves_id if resolves_origin == "known_bug" else None,
     )

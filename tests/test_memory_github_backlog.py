@@ -307,16 +307,16 @@ def test_record_known_bug_logs_when_github_create_fails(tmp_path, monkeypatch, c
 # ── clear_known_bug() marks the GitHub issue shipped (stays open) when the id is numeric ────────
 
 
-def test_clear_known_bug_marks_the_github_issue_shipped(tmp_path, monkeypatch):
+def test_clear_known_bug_marks_the_github_issue_code_complete(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
     marked = {}
 
-    def fake_mark_shipped(repo_url, issue_number, comment=None):
+    def fake_mark_code_complete(repo_url, issue_number, comment=None):
         marked["issue_number"] = issue_number
         marked["comment"] = comment
 
-    monkeypatch.setattr(github_issues, "mark_shipped", fake_mark_shipped)
+    monkeypatch.setattr(github_issues, "mark_code_complete", fake_mark_code_complete)
 
     mem.clear_known_bug("42")
 
@@ -329,12 +329,12 @@ def test_clear_known_bug_passes_through_a_custom_resolution_note(tmp_path, monke
     marked = {}
 
     monkeypatch.setattr(
-        github_issues, "mark_shipped", lambda repo_url, issue_number, comment=None: marked.update(comment=comment)
+        github_issues, "mark_code_complete", lambda repo_url, issue_number, comment=None: marked.update(comment=comment)
     )
 
-    mem.clear_known_bug("42", "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)")
+    mem.clear_known_bug("42", "Resolved by agentra: code complete as 'Fix pagination' (commit abc1234)")
 
-    assert marked["comment"] == "Resolved by agentra: shipped as 'Fix pagination' (commit abc1234)"
+    assert marked["comment"] == "Resolved by agentra: code complete as 'Fix pagination' (commit abc1234)"
 
 
 def test_clear_known_bug_with_non_numeric_id_does_not_call_github(tmp_path, monkeypatch):

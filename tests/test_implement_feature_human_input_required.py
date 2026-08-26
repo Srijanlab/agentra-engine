@@ -177,7 +177,7 @@ def test_implement_feature_weaves_human_answer_into_the_matching_tracking_issue_
 
     captured_spec = {}
 
-    async def fake_impl_run(repo, objective, brief, cb_summary, env, branch, resume=False, spec="", session_id=None):
+    async def fake_impl_run(repo, objective, brief, cb_summary, env, branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         captured_spec["spec"] = spec
         return AgentResult(ok=True, text="done", json_data={"feature": "Add login", "status": "implemented"}, cost_usd=0.01, turns=2)
 
@@ -185,7 +185,7 @@ def test_implement_feature_weaves_human_answer_into_the_matching_tracking_issue_
     monkeypatch.setattr(session.mem, "get_spec", lambda tracking_issue: {"spec": "Add a login flow.", "acceptance_criteria": ["Users can log in"]})
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_commit", lambda *a, **k: None)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 17, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 17, "board_issue_number": None})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
     asyncio.run(
@@ -210,7 +210,7 @@ def test_implement_feature_does_not_weave_human_answer_into_an_unrelated_trackin
 
     captured_spec = {}
 
-    async def fake_impl_run(repo, objective, brief, cb_summary, env, branch, resume=False, spec="", session_id=None):
+    async def fake_impl_run(repo, objective, brief, cb_summary, env, branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         captured_spec["spec"] = spec
         return AgentResult(ok=True, text="done", json_data={"feature": "Add search", "status": "implemented"}, cost_usd=0.01, turns=2)
 
@@ -218,7 +218,7 @@ def test_implement_feature_does_not_weave_human_answer_into_an_unrelated_trackin
     monkeypatch.setattr(session.mem, "get_spec", lambda tracking_issue: None)
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_commit", lambda *a, **k: None)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 23, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 23, "board_issue_number": None})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
     asyncio.run(

@@ -88,13 +88,13 @@ def test_implement_feature_generates_and_persists_a_new_spec(tmp_path, monkeypat
 
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.requirements, "run", fake_requirements_run)
     monkeypatch.setattr(brain.implementation, "run", fake_implementation_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
@@ -125,12 +125,12 @@ def test_implement_feature_reuses_an_existing_spec_without_calling_requirements_
     )
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_implementation_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
@@ -161,13 +161,13 @@ def test_implement_feature_proceeds_without_a_spec_if_requirements_agent_fails(t
 
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.requirements, "run", failing_requirements_run)
     monkeypatch.setattr(brain.implementation, "run", fake_implementation_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 30, "board_issue_number": 30})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 30, "board_issue_number": 30})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
     result = asyncio.run(

@@ -81,7 +81,7 @@ def _patch_escalation_plumbing(monkeypatch, session, known_bug_calls: list, slac
 
 def _patch_successful_ship(monkeypatch, session):
     """Mocks everything implement_feature's happy path touches past implementation.run."""
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
 
@@ -209,7 +209,7 @@ def test_low_risk_none_impact_proceeds_normally_with_no_escalation(tmp_path, mon
     result = asyncio.run(_tool(session, "implement_feature").handler({"feature_brief": "Tweak the button copy"}))
 
     assert result.get("is_error") is not True
-    assert "Implemented and committed" in result["content"][0]["text"]
+    assert "Code complete" in result["content"][0]["text"]
     assert known_bug_calls == []
     assert slack_calls == []
     assert session.waiting_for_human is False
@@ -329,7 +329,7 @@ def test_design_review_state_does_not_leak_between_two_different_briefs_in_one_c
     # material review already sitting in session.design_reviews.
     result_b = asyncio.run(_tool(session, "implement_feature").handler({"feature_brief": brief_b}))
     assert result_b.get("is_error") is not True
-    assert "Implemented and committed" in result_b["content"][0]["text"]
+    assert "Code complete" in result_b["content"][0]["text"]
     assert len(impl_calls) == 1
     assert impl_calls[0][2] == brief_b
     assert brief_b not in session.design_reviews

@@ -81,6 +81,19 @@ class OrchestratorSession:
     # external_ids of every bug/feature-queue item check_backlog has shown this cycle --
     # implement_feature requires resolves_id/resolves_origin="new" once this is non-empty.
     backlog_ids_shown: set[str] = field(default_factory=set)
+    # issue_numbers stamped status:code_complete by implement_feature this cycle, not yet
+    # merged to pre-prod -- deploy_pre_prod moves these to status:shipped on success and
+    # empties this list into shipped_this_cycle_issue_numbers.
+    code_complete_issue_numbers: list[str] = field(default_factory=list)
+    # issue_numbers stamped status:shipped this cycle (by the deploy_pre_prod call above) --
+    # verify_pre_prod moves these to status:tested on a passing live check.
+    shipped_this_cycle_issue_numbers: list[str] = field(default_factory=list)
+    # GitHub issue #78: feature branches whose post-commit push to GitHub failed even after
+    # retries -- the commit is NOT confirmed durable there. Deterministic, per-branch
+    # hard-stop checked by deploy_pre_prod/record_code_complete (see check_push_failure) so a
+    # feature in this state can never be deployed or stamped "code complete", independent of
+    # whether the orchestrator LLM notices impl.ok=False / the error text in result.text.
+    push_failed_branches: set[str] = field(default_factory=set)
 
     @property
     def app_name(self) -> str:
@@ -133,6 +146,27 @@ class OrchestratorSession:
         # No per-cycle cost cap here: the previous $3.00 hard stop never actually
         if self.hard_stop_reason:
             return {"content": [{"type": "text", "text": self.hard_stop_reason}], "is_error": True}
+        return None
+
+    def mark_push_failed(self, branch: str) -> None:
+        """Record that `branch`'s post-commit push to GitHub failed even after retries -- see check_push_failure."""
+        self.push_failed_branches.add(branch)
+
+    def check_push_failure(self, branch: str | None) -> dict | None:
+        """Same is_error-dict pattern as check_hard_stop, scoped to one feature branch instead of the whole session -- deploy_pre_prod/record_shipped must call this and refuse to proceed for `branch` if it's set (GitHub issue #78)."""
+        if branch is not None and branch in self.push_failed_branches:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Refused: feature branch {branch!r} failed to push to GitHub even after "
+                        "retries -- the commit is not confirmed durable there, so it cannot be "
+                        "deployed or marked shipped. Re-run implement_feature to retry the push, "
+                        "or investigate the underlying git/auth failure."
+                    ),
+                }],
+                "is_error": True,
+            }
         return None
 
     def record_failure(self, tool_name: str) -> None:

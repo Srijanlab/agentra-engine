@@ -14,7 +14,9 @@ from agentra.memory.core import (
     _NEED_HUMAN_LABEL,
     _STATUS_DONE_LABEL,
     _STATUS_IN_PROGRESS_LABEL,
+    _STATUS_PROGRESS_LABELS,
     _STATUS_SHIPPED_LABEL,
+    _STATUS_TESTED_LABEL,
     _github_bug_to_dict,
     _github_closed_bug_to_dict,
     _label_names,
@@ -40,15 +42,19 @@ class MemoryIssuesMixin:
             from agentra.connectors import github_issues
 
             issues = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
-            issues = [i for i in issues if _STATUS_SHIPPED_LABEL not in _label_names(i)]
+            issues = [i for i in issues if not any(label in _label_names(i) for label in _STATUS_PROGRESS_LABELS)]
             return [_github_bug_to_dict(i) for i in issues]
         except Exception:
             logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
             return []
 
     def closed_bugs(self) -> list[dict]:
-        """Resolved bugs — open+status:shipped (fixed, awaiting promotion)
-        or closed (already promoted; status_done True)."""
+        """Resolved bugs — open+status:code_complete/shipped/tested (fixed,
+        somewhere in the pipeline awaiting promotion) or closed (already
+        promoted; status_done True). Includes code_complete on purpose: some
+        resolutions (e.g. clear_resolved_auth_bugs, which has no code to
+        merge/deploy) never progress past it, and should still show as
+        resolved rather than invisible."""
         repo_url = self._repo_url()
         if not repo_url:
             return []
@@ -57,7 +63,7 @@ class MemoryIssuesMixin:
 
             open_shipped = [
                 i for i in github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
-                if _STATUS_SHIPPED_LABEL in _label_names(i)
+                if any(label in _label_names(i) for label in _STATUS_PROGRESS_LABELS if label != _STATUS_DONE_LABEL)
             ]
             closed = github_issues.list_closed_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL])
             return [_github_closed_bug_to_dict(i) for i in open_shipped + closed]
@@ -205,9 +211,9 @@ class MemoryIssuesMixin:
             return None
 
     def clear_known_bug(self, id_: str, resolution_note: str | None = None) -> None:
-        """Marks status:shipped and leaves the issue OPEN (mark_shipped) ..."""
+        """Marks status:code_complete and leaves the issue OPEN (mark_code_complete) ..."""
         if not id_.isdigit():
-            logger.warning("clear_known_bug: %r is not a GitHub issue number, nothing to mark shipped", id_)
+            logger.warning("clear_known_bug: %r is not a GitHub issue number, nothing to mark code-complete", id_)
             return
         repo_url = self._repo_url()
         if not repo_url:
@@ -215,9 +221,9 @@ class MemoryIssuesMixin:
         try:
             from agentra.connectors import github_issues
 
-            github_issues.mark_shipped(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
+            github_issues.mark_code_complete(repo_url, int(id_), comment=resolution_note or "Resolved by agentra.")
         except Exception:
-            logger.warning("clear_known_bug: failed to mark GitHub issue #%s shipped on %s", id_, repo_url, exc_info=True)
+            logger.warning("clear_known_bug: failed to mark GitHub issue #%s code-complete on %s", id_, repo_url, exc_info=True)
 
     def clear_resolved_transient_bugs(self, run_id: str) -> list[str]:
         """Reconciliation sweep (GitHub issue #60 hardening): a bug whose

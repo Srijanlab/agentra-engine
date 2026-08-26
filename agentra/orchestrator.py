@@ -110,18 +110,18 @@ async def run_cycle(
 
         feature_branch = feature_branch_name(env, run_id, feature)
         mem.log(run_id, f"implementation agent: starting on dedicated branch {feature_branch!r}")
-        impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch, session_id=session_id)
+        impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch, session_id=session_id, mem=mem, run_id=run_id)
         session_id = impl.session_id or session_id
         mem.log(run_id, f"implementation agent: ok={impl.ok} turns={impl.turns} cost=${impl.cost_usd:.4f}")
         if not impl.ok:
             mem.record_failure(run_id, "implementation", impl.text)
             return CycleReport(run_id, feature, True, False, False, None, opportunities, "implementation failed; aborting cycle")
-        # record_shipped closes a GitHub 'feature'-labeled issue as the shipped record --
+        # record_code_complete stamps status:code_complete on the GitHub 'feature'-labeled issue --
         resolves_id = top["id"] if top and top.get("origin") == "feature_queue" else None
-        mem.record_shipped(feature, run_id=run_id, resolves_id=resolves_id, session_id=session_id)
-        mem.append_documentation(f"Shipped **{feature}**: {feature_brief[:300]}")
+        mem.record_code_complete(feature, run_id=run_id, resolves_id=resolves_id, session_id=session_id)
+        mem.append_documentation(f"Code complete: **{feature}**: {feature_brief[:300]}")
         if top and top.get("id") and top.get("origin") == "known_bug":
-            resolution_note = f"Resolved by agentra: shipped as {feature!r} (run {run_id})"
+            resolution_note = f"Resolved by agentra: code complete as {feature!r} (run {run_id})"
             mem.clear_known_bug(top["id"], resolution_note)
 
         mem.log(run_id, "testing agent: starting (local)")
@@ -274,7 +274,7 @@ async def run_prod_debug_cycle(
         cb = await codebase.run_cached(repo, mem)
         registry.record_agent_step(repo.name, run_id, "understand_codebase", cb.ok, cb.cost_usd, cb.turns, "understand_codebase: ok=%s" % cb.ok)
         feature_branch = feature_branch_name(env, run_id, f"hotfix-{severity}")
-        impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch, session_id=session_id)
+        impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch, session_id=session_id, mem=mem, run_id=run_id)
         session_id = impl.session_id or session_id
         mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
         registry.record_agent_step(

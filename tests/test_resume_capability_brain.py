@@ -119,7 +119,7 @@ def test_implement_feature_records_in_progress_branch_when_resolving_a_known_bug
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     marker_calls = []
@@ -142,7 +142,7 @@ def test_implement_feature_records_in_progress_branch_on_the_parent_when_continu
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 21, "board_issue_number": 20})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 21, "board_issue_number": 20})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     marker_calls = []
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda issue_number, branch, run_id=None, session_id=None: marker_calls.append((issue_number, branch, run_id)))
@@ -201,7 +201,7 @@ def test_implement_feature_links_the_commit_on_the_tracking_issue(tmp_path, monk
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
@@ -355,7 +355,7 @@ def test_implement_feature_does_not_record_a_marker_for_a_self_initiated_idea(tm
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 30, "board_issue_number": 30})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 30, "board_issue_number": 30})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(
         session.mem, "record_in_progress_branch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called"))
@@ -376,12 +376,12 @@ def test_implement_feature_resume_branch_becomes_the_session_feature_branch(tmp_
     session = _session(tmp_path)
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 13, "board_issue_number": 13})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
@@ -404,12 +404,12 @@ def test_implement_feature_resume_branch_ignored_on_a_later_call_this_run(tmp_pa
     session = _session(tmp_path, feature_branch="dev/already-set")
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 
     monkeypatch.setattr(brain.implementation, "run", fake_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": 20, "board_issue_number": 20})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 20, "board_issue_number": 20})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "record_in_progress_branch", lambda *a, **k: None)
 

@@ -198,6 +198,10 @@ class AgentResult:
     session_id: str | None = None
     # True only for the Claude Code CLI's own "this runner has no valid
     auth_failure: bool = False
+    # True only when implementation.run()'s post-commit git_ops.push_branch call
+    # never succeeded even after retries -- the commit is NOT confirmed durable
+    # on GitHub (see agentra/agents/implementation.py and GitHub issue #78).
+    push_failed: bool = False
 
 
 def extract_json_block(text: str) -> dict[str, Any] | None:

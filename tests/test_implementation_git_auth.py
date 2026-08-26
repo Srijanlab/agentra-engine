@@ -186,11 +186,13 @@ def test_run_pushes_the_feature_branch_after_a_successful_implementation(tmp_pat
     assert (verify / "new_feature.txt").read_text() == "real work\n"
 
 
-def test_run_still_returns_ok_when_the_push_fails(tmp_path, monkeypatch):
-    """A push failure (e.g. a transient network blip) must not turn a
-    successful implementation into a reported failure -- the work is still
-    committed locally either way, same as before this existed; it just
-    won't be resumable if this VM's checkout is lost."""
+def test_run_flips_ok_false_when_the_push_still_fails_after_retries(tmp_path, monkeypatch):
+    """GitHub issue #78: a push failure that survives every retry must turn a
+    successful implementation into a REPORTED failure -- the work is only
+    committed locally, not confirmed durable on GitHub, and the pipeline must
+    not proceed to deploy_pre_prod/record_shipped as if it had landed. Before
+    this fix, result.ok stayed True here and issue #71's commit was
+    permanently lost as a result."""
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", "-b", "beta", str(origin)], check=True, capture_output=True)
     repo = _init_repo_with_branch(tmp_path / "repo", branch="beta")
@@ -208,6 +210,8 @@ def test_run_still_returns_ok_when_the_push_fails(tmp_path, monkeypatch):
         implementation.git_ops, "push_branch",
         lambda *a, **k: (_ for _ in ()).throw(git_ops.GitOpError("simulated push failure")),
     )
+    sleeps = []
+    monkeypatch.setattr(implementation.time, "sleep", lambda seconds: sleeps.append(seconds))
 
     result = asyncio.run(
         implementation.run(
@@ -220,8 +224,116 @@ def test_run_still_returns_ok_when_the_push_fails(tmp_path, monkeypatch):
         )
     )
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.push_failed is True
     assert "Could not push feature branch" in result.text
+    assert "NOT confirmed durable" in result.text
+    # Retried (with backoff) before giving up -- not a bare, un-mockable time.sleep.
+    assert len(sleeps) == implementation.PUSH_RETRY_ATTEMPTS - 1
+    assert all(s > 0 for s in sleeps)
+
+
+def test_run_retries_the_push_and_succeeds_on_a_later_attempt(tmp_path, monkeypatch):
+    """A transient blip (network/token) on the first attempt(s) must not be
+    treated as a durable failure if a retry succeeds."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "beta", str(origin)], check=True, capture_output=True)
+    repo = _init_repo_with_branch(tmp_path / "repo", branch="beta")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "origin", "beta")
+
+    async def fake_run_agent(**kwargs):
+        (repo / "new_feature.txt").write_text("real work\n")
+        _git(repo, "add", "new_feature.txt")
+        _git(repo, "commit", "-m", "implement the thing")
+        return AgentResult(ok=True, text="done", json_data={"status": "implemented"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(implementation, "run_agent", fake_run_agent)
+    real_push_branch = git_ops.push_branch
+    attempts_made = []
+
+    def flaky_push_branch(repo_arg, branch_arg):
+        attempts_made.append(1)
+        if len(attempts_made) < implementation.PUSH_RETRY_ATTEMPTS:
+            raise git_ops.GitOpError("simulated transient push failure")
+        real_push_branch(repo_arg, branch_arg)
+
+    monkeypatch.setattr(implementation.git_ops, "push_branch", flaky_push_branch)
+    sleeps = []
+    monkeypatch.setattr(implementation.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = asyncio.run(
+        implementation.run(
+            repo=repo,
+            objective="obj",
+            feature="a feature",
+            codebase_summary="summary",
+            env=EnvironmentConfig(pre_prod_branch="beta"),
+            feature_branch="feature/push-retries-then-succeeds",
+        )
+    )
+
+    assert result.ok is True
+    assert result.push_failed is False
+    assert len(attempts_made) == implementation.PUSH_RETRY_ATTEMPTS
+    assert len(sleeps) == implementation.PUSH_RETRY_ATTEMPTS - 1
+    verify = tmp_path / "verify"
+    subprocess.run(
+        ["git", "clone", "--branch", "feature/push-retries-then-succeeds", "--single-branch", str(origin), str(verify)],
+        check=True, capture_output=True,
+    )
+    assert (verify / "new_feature.txt").read_text() == "real work\n"
+
+
+def test_run_logs_the_push_failure_via_mem_when_retries_are_exhausted(tmp_path, monkeypatch):
+    """Once retries are exhausted, the failure must be routed through Memory
+    (mem.record_failure -> is_transient_failure classifier) so it's actually
+    visible, instead of only ever buried in result.text."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "beta", str(origin)], check=True, capture_output=True)
+    repo = _init_repo_with_branch(tmp_path / "repo", branch="beta")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "origin", "beta")
+
+    async def fake_run_agent(**kwargs):
+        (repo / "new_feature.txt").write_text("real work\n")
+        _git(repo, "add", "new_feature.txt")
+        _git(repo, "commit", "-m", "implement the thing")
+        return AgentResult(ok=True, text="done", json_data={"status": "implemented"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(implementation, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        implementation.git_ops, "push_branch",
+        lambda *a, **k: (_ for _ in ()).throw(git_ops.GitOpError("simulated push failure")),
+    )
+    monkeypatch.setattr(implementation.time, "sleep", lambda seconds: None)
+
+    class FakeMem:
+        def __init__(self):
+            self.failures = []
+
+        def record_failure(self, run_id, step_name, text, severity="high"):
+            self.failures.append((run_id, step_name, text))
+
+    mem = FakeMem()
+
+    result = asyncio.run(
+        implementation.run(
+            repo=repo,
+            objective="obj",
+            feature="a feature",
+            codebase_summary="summary",
+            env=EnvironmentConfig(pre_prod_branch="beta"),
+            feature_branch="feature/push-fails-logged",
+            mem=mem,
+            run_id="run123",
+        )
+    )
+
+    assert result.ok is False
+    assert len(mem.failures) == 1
+    assert mem.failures[0][0] == "run123"
+    assert "simulated push failure" in mem.failures[0][2]
 
 
 def test_run_refreshes_the_code_graph_at_the_end(tmp_path, monkeypatch):
