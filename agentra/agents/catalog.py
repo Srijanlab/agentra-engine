@@ -93,6 +93,16 @@ AGENT_METADATA: dict[str, AgentMeta] = {
         "tools": _tools("Read", "Glob", "Grep"),
         "capability": "architecture_review",
     },
+    "human_answer_judge": {
+        "skills": [
+            "Reads a human's dashboard/Slack answer to a blocking infra-cost question",
+            "Decides whether the answer authorizes proceeding, or is still unresolved",
+            "Never overrules the human's decision -- only checks whether it was made",
+            "Strictly read-only -- purely advisory to the infra-cost gate",
+        ],
+        "tools": [],
+        "capability": "human_answer_judgment",
+    },
     "implementation": {
         "skills": [
             "Implements the smallest coherent version of one specific feature",

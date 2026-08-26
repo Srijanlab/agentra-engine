@@ -508,13 +508,16 @@ def test_agent_metadata_endpoint_covers_every_roster_entry():
     assert body["agents"] == agents_catalog.AGENT_METADATA
     assert body["permission_model_note"] == agents_catalog.PERMISSION_MODEL_NOTE
 
-    # Every agent must have at least one skill and one tool with a
-    # recognized permission tier -- an empty entry would silently render
-    # as a blank card.
+    # Every agent must have at least one skill -- an empty entry would silently render
+    # as a blank card. Every agent must also have a tool list with recognized permission
+    # tiers, except human_answer_judge, which genuinely has none (a pure text-judgment
+    # call with no Read/Glob/Grep/Bash access) -- an empty list there is accurate, not a
+    # blank-card bug.
     valid_permissions = {"read", "write", "execute", "network", "delegate"}
     for agent_id, meta in body["agents"].items():
         assert meta["skills"], f"{agent_id} has no skills listed"
-        assert meta["tools"], f"{agent_id} has no tools listed"
+        if agent_id != "human_answer_judge":
+            assert meta["tools"], f"{agent_id} has no tools listed"
         assert meta.get("capability"), f"{agent_id} has no capability set"
         for tool in meta["tools"]:
             assert tool["permission"] in valid_permissions

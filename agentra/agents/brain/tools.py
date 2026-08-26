@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from claude_agent_sdk import tool
 
 from agentra import change_risk
-from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, implementation, requirements, testing
+from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, human_answer_judge, implementation, requirements, testing
 from agentra.agents import catalog as agents_catalog
 from agentra.agents.base import AgentResult
 from agentra.agents.brain import infra_cost_gate
@@ -177,8 +177,28 @@ async def _run_design_review(session: OrchestratorSession, feature_brief: str) -
     return await infra_cost_gate.run_design_review(session, feature_brief, check_auth_failure=_check_auth_failure)
 
 
-def _infra_cost_gate(session: OrchestratorSession, feature_brief: str, tracking_issue: int | None) -> dict | None:
-    return infra_cost_gate.gate(session, feature_brief, tracking_issue, escalate_to_human=_escalate_to_human)
+async def _judge_human_answer(
+    session: OrchestratorSession, review: dict, human_answer: str, feature_brief: str
+) -> tuple[dict | None, str, str]:
+    """Runs the Human-Answer Judge Agent and returns (stop, decision, reason). stop is a
+    tool-result dict the caller should return immediately on a Claude Code auth failure;
+    decision/reason default to a fail-safe "still_needs_escalation" if the judge call itself
+    didn't succeed or didn't return a parseable decision."""
+    result = await human_answer_judge.run(session.repo, review, human_answer, feature_brief)
+    if stop := _check_auth_failure(session, "implement_feature", result):
+        return stop, "still_needs_escalation", "judge call hit an auth failure"
+    session.cost_usd += result.cost_usd
+    data = result.json_data or {}
+    decision = data.get("decision") if result.ok else None
+    reason = data.get("reason") or (result.text[:200] if not result.ok else "no reason given")
+    return None, decision or "still_needs_escalation", reason
+
+
+async def _infra_cost_gate(session: OrchestratorSession, feature_brief: str, tracking_issue: int | None) -> dict | None:
+    return await infra_cost_gate.gate(
+        session, feature_brief, tracking_issue,
+        escalate_to_human=_escalate_to_human, judge_human_answer=_judge_human_answer,
+    )
 
 
 def _attach_resume_branches(mem: Memory, entries: list[dict]) -> list[dict]:
@@ -491,9 +511,12 @@ def _tools_for(session: OrchestratorSession) -> list:
             if stop:
                 return stop
 
-        # Deterministic infra-cost gate, part b: a real Python check, not a prompt instruction --
-        # cannot be bypassed by the brain skipping assess_design_impact or by prompt wording.
-        if stop := _infra_cost_gate(session, brief, tracking_issue):
+        # Infra-cost gate, part b: should_block() is a real Python check, not a prompt
+        # instruction -- cannot be bypassed by the brain skipping assess_design_impact or by
+        # prompt wording. Whether a resumed cycle may proceed past a block once a human has
+        # answered is judged by the Human-Answer Judge Agent, not a fixed rule (see
+        # infra_cost_gate.gate's docstring).
+        if stop := await _infra_cost_gate(session, brief, tracking_issue):
             return stop
 
         spec_dict = session.mem.get_spec(tracking_issue) if tracking_issue is not None else None

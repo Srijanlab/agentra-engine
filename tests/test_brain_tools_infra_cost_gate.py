@@ -281,6 +281,114 @@ def test_keyword_heuristic_auto_triggers_a_design_review_before_implementation(t
     assert result.get("is_error") is not True
 
 
+def _patch_human_answer_judge(monkeypatch, *, decision: str, reason: str = "test reason"):
+    calls = []
+
+    async def fake_judge_run(repo, review, human_answer, feature_brief):
+        calls.append((review, human_answer, feature_brief))
+        return AgentResult(
+            ok=True, text="```json\n{}\n```",
+            json_data={"decision": decision, "reason": reason}, cost_usd=0.001, turns=1,
+        )
+
+    monkeypatch.setattr(brain.human_answer_judge, "run", fake_judge_run)
+    return calls
+
+
+def test_a_human_answer_judged_as_proceed_lets_a_material_review_through(tmp_path, monkeypatch):
+    """Confirmed live (issues #79, #80, #81): a brief that inherently touches infra (e.g. it
+    edits deploy/gcp/terraform/compute.tf) keeps satisfying should_block() no matter how much
+    human guidance gets folded into its text on each resume, so without this path the gate
+    re-escalates -- filing a brand new needs_human issue -- every single time, forever. Once
+    session.human_answer_issue matches this call's tracking_issue (a human answered this exact
+    interrupted item earlier this cycle) and the Human-Answer Judge Agent reads that answer as
+    "proceed", this pass through the gate must be let through -- a rigid tracking-issue-match
+    bypass with no judgment would wrongly proceed even on an explicit "no" from the human."""
+    _patch_registry(monkeypatch)
+    known_bug_calls, slack_calls = [], []
+    session = _session(tmp_path, human_answer="Proceed, but keep the compute.tf incident comments.", human_answer_issue=76)
+    _patch_escalation_plumbing(monkeypatch, session, known_bug_calls, slack_calls)
+    _patch_successful_ship(monkeypatch, session)
+    judge_calls = _patch_human_answer_judge(monkeypatch, decision="proceed")
+
+    async def fake_review_run(repo, objective, feature_brief, codebase_summary):
+        return _review_result(
+            json_data={
+                "layers_touched": ["infra", "backend"],
+                "risk_level": "high",
+                "concerns": ["Touches deploy/gcp/terraform/compute.tf"],
+                "recommendation": "proceed_with_caution",
+                "infra_cost_impact": "material",
+            }
+        )
+
+    monkeypatch.setattr(brain.architecture_review, "run", fake_review_run)
+
+    impl_calls = []
+
+    async def fake_impl_run(*a, **k):
+        impl_calls.append((a, k))
+        return AgentResult(ok=True, text="done", json_data={"feature": "Comment sweep"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+
+    brief = "Resume the interrupted codebase-wide comment/docstring sweep touching compute.tf"
+    asyncio.run(_tool(session, "assess_design_impact").handler({"feature_brief": brief}))
+    result = asyncio.run(_tool(session, "implement_feature").handler({"feature_brief": brief, "resolves_id": "76"}))
+
+    assert result.get("is_error") is not True
+    assert len(impl_calls) == 1
+    assert len(judge_calls) == 1
+    assert known_bug_calls == []  # no new needs_human issue filed
+    assert session.waiting_for_human is False
+    # The answer's guidance still reaches the Implementation Agent's spec (tools.py's own
+    # one-shot consumption, unaffected by this gate's separate judge call).
+    spec_arg = impl_calls[0][1]["spec"]
+    assert "compute.tf incident comments" in spec_arg
+
+
+def test_a_human_answer_judged_as_still_needs_escalation_re_blocks(tmp_path, monkeypatch):
+    """The flip side of the test above: an unclear/non-committal human answer must not silently
+    unblock implementation just because *a* human_answer happens to be present for this tracking
+    issue -- the judge's decision, not the mere presence of an answer, gates this."""
+    _patch_registry(monkeypatch)
+    known_bug_calls, slack_calls = [], []
+    session = _session(tmp_path, human_answer="Not sure, let me think about it.", human_answer_issue=76)
+    _patch_escalation_plumbing(monkeypatch, session, known_bug_calls, slack_calls)
+    judge_calls = _patch_human_answer_judge(monkeypatch, decision="still_needs_escalation", reason="answer is a deferral, not a decision")
+
+    async def fake_review_run(repo, objective, feature_brief, codebase_summary):
+        return _review_result(
+            json_data={
+                "layers_touched": ["infra", "backend"],
+                "risk_level": "high",
+                "concerns": ["Touches deploy/gcp/terraform/compute.tf"],
+                "recommendation": "proceed_with_caution",
+                "infra_cost_impact": "material",
+            }
+        )
+
+    monkeypatch.setattr(brain.architecture_review, "run", fake_review_run)
+
+    impl_calls = []
+
+    async def fake_impl_run(*a, **k):
+        impl_calls.append((a, k))
+        return AgentResult(ok=True, text="done", json_data={"feature": "Comment sweep"}, cost_usd=0.01, turns=2)
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+
+    brief = "Resume the interrupted codebase-wide comment/docstring sweep touching compute.tf"
+    asyncio.run(_tool(session, "assess_design_impact").handler({"feature_brief": brief}))
+    result = asyncio.run(_tool(session, "implement_feature").handler({"feature_brief": brief, "resolves_id": "76"}))
+
+    assert result.get("is_error") is True
+    assert impl_calls == []
+    assert len(judge_calls) == 1
+    assert len(known_bug_calls) == 1  # re-escalated
+    assert session.waiting_for_human is True
+
+
 def test_design_review_state_does_not_leak_between_two_different_briefs_in_one_cycle(tmp_path, monkeypatch):
     """Brief A's material review is stored (session.design_reviews) *before* brief B is
     handled, so if the gate incorrectly looked at "any review this cycle" instead of the

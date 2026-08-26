@@ -14,7 +14,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query
 
-from agentra.agents import architecture_review, codebase, codegraph, deployment, discovery, feedback, implementation, requirements, testing
+from agentra.agents import architecture_review, codebase, codegraph, deployment, discovery, feedback, human_answer_judge, implementation, requirements, testing
 from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.brain.tools import _file_incidental_findings, _format_spec, _tools_for, MAX_SELF_HEAL_ATTEMPTS
 from agentra.agents.brain.prompts import SYSTEM_PROMPT

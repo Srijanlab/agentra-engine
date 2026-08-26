@@ -1,11 +1,12 @@
-"""Deterministic (plain Python, not LLM-judged) infra-cost gate -- Part 2/2 of the infra-cost
-gate feature. Kept in its own module (SRP / subfolder organization) rather than growing the
+"""Infra-cost gate -- Part 2/2 of the infra-cost gate feature: a deterministic Python check on
+whether to block, an LLM judge on whether a human's answer authorizes proceeding past that
+block. Kept in its own module (SRP / subfolder organization) rather than growing the
 already-large brain/tools.py further; tools.py wires this into implement_feature/
 assess_design_impact and owns the session/escalation plumbing this depends on."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from agentra.agents import architecture_review
 from agentra.agents.base import AgentResult
@@ -75,24 +76,54 @@ async def run_design_review(
 
 
 EscalateToHuman = Callable[..., "int | None"]
+JudgeHumanAnswer = Callable[..., "Any"]
 
 
-def gate(
+async def gate(
     session: "OrchestratorSession",
     feature_brief: str,
     tracking_issue: "int | None",
     *,
     escalate_to_human: EscalateToHuman,
+    judge_human_answer: JudgeHumanAnswer,
 ) -> "dict | None":
-    """Deterministic Python-level enforcement -- a real `if` check reachable no matter what the
-    brain says or does, mirroring the existing prod-promotion gate and cost-cap circuit breaker
-    elsewhere in this codebase; it cannot be bypassed by the brain skipping assess_design_impact
-    or by prompt wording alone. Returns a tool-result dict to return immediately if blocked, else
-    None (proceed as normal). escalate_to_human is injected to avoid a circular import with
-    tools.py, which owns it."""
+    """should_block() itself stays a deterministic Python `if` check -- reachable no matter what
+    the brain says or does, mirroring the existing prod-promotion gate and cost-cap circuit
+    breaker elsewhere in this codebase; it cannot be bypassed by the brain skipping
+    assess_design_impact or by prompt wording alone. But whether a *resumed* cycle may proceed
+    past a should_block()==True result once a human has already answered is not a fact a fixed
+    rule can judge (a rigid tracking-issue-match bypass proceeded regardless of what the human
+    actually said, including on an explicit "no" -- see the human_answer_judge module for the
+    incident that motivated splitting this): that decision is delegated to the Human-Answer
+    Judge Agent (judge_human_answer), which reads the human's actual answer text. Returns a
+    tool-result dict to return immediately if blocked, else None (proceed as normal).
+    escalate_to_human/judge_human_answer are injected to avoid a circular import with tools.py,
+    which owns them."""
     review = session.design_reviews.get(feature_brief)
     if not review or not should_block(review):
         return None
+    if tracking_issue is not None and session.human_answer_issue == tracking_issue and session.human_answer:
+        # A human has already directly answered a blocking question for this exact interrupted
+        # item earlier this cycle -- without this check, this gate re-evaluates should_block()
+        # from scratch on every resume and re-escalates every time the brief still plausibly
+        # touches infra, which it always will here, no matter how much human guidance gets
+        # folded into the brief text, producing an unbreakable loop (confirmed live: issues #79,
+        # #80, #81, same brief, three separate escalations, zero progress). Deliberately not
+        # clearing session.human_answer here (whichever way the judge decides) so
+        # implement_feature's own consumption (tools.py) still folds the answer's guidance into
+        # the spec it hands to the Implementation Agent.
+        stop, decision, reason = await judge_human_answer(session, review, session.human_answer, feature_brief)
+        if stop:
+            return stop
+        session.note(
+            f"infra_cost_gate: human-answer judge decision={decision!r} for tracking issue "
+            f"#{tracking_issue} -- {reason}",
+            ok=(decision == "proceed"),
+        )
+        if decision == "proceed":
+            return None
+        # decision == "still_needs_escalation" (including a failed/unparseable judge call --
+        # fail safe toward re-escalating rather than silently letting a real concern through).
     escalate_to_human(
         session,
         category="infra_cost",
