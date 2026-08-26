@@ -2,9 +2,15 @@
 the one data type with no durable copy anywhere: .agentra/logs/ is
 gitignored on purpose, and REPOS_ROOT itself is VM-local-only (registry.py)
 -- a run's log was permanently gone the moment its VM/container instance
-rebuilt (which happens on every redeploy). Memory.log() now best-effort
-mirrors each line into Firestore's run_logs collection, and server.py's
-stream_run_logs falls back to that mirror when the local file is missing.
+rebuilt (which happens on every redeploy).
+
+Bug #77: Memory.log() used to do a synchronous Firestore read+write on
+*every* call (every SDK stream event, ~200-300ms), blocking the async agent
+loop. It now only appends to a local per-run buffer; Firestore gets a single
+full-document write via a periodic safety flush (line/time threshold) and
+once more when the run reaches a terminal state (Memory.finalize_run_log).
+server.py's stream_run_logs falls back to that Firestore copy only when the
+local file is missing.
 """
 
 import re
@@ -14,28 +20,125 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from agentra import registry, server
+import agentra.memory as memory_module
 from agentra.memory import Memory
 from agentra.server import _strip_log_timestamp
 
 
-def test_log_mirrors_to_firestore_when_configured(tmp_path, monkeypatch):
+def test_log_always_appends_to_the_local_file(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     fake_db = MagicMock()
     monkeypatch.setattr(registry, "_db", fake_db)
 
     mem = Memory(repo)
-    mem.log("run123", "cycle start")
+    for i in range(5):
+        mem.log("run123", f"line {i}")
+
+    log_path = repo / ".agentra" / "logs" / "run123.log"
+    assert log_path.exists()
+    assert len(log_path.read_text().splitlines()) == 5
+
+
+def test_log_does_not_write_to_firestore_per_call(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_db = MagicMock()
+    monkeypatch.setattr(registry, "_db", fake_db)
+
+    mem = Memory(repo)
+    for i in range(10):
+        mem.log("run123", f"line {i}")
+
+    # No per-line read+write: well under the periodic-flush thresholds, so
+    # Firestore should not have been touched at all yet.
+    fake_db.collection.assert_not_called()
+
+
+def test_finalize_run_log_writes_once_with_the_full_buffered_log(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_db = MagicMock()
+    monkeypatch.setattr(registry, "_db", fake_db)
+
+    mem = Memory(repo)
+    for i in range(10):
+        mem.log("run123", f"line {i}")
+    mem.finalize_run_log("run123")
 
     fake_db.collection.assert_any_call("run_logs")
     doc_ref = fake_db.collection.return_value.document.return_value
     assert doc_ref.set.call_count == 1
-    call_kwargs = doc_ref.set.call_args
-    assert call_kwargs.kwargs.get("merge") is True
-    # Local file still gets written regardless -- Firestore is a mirror,
-    # not a replacement, so a live-tailing dashboard reader on the same
-    # instance keeps working exactly as before.
-    assert (repo / ".agentra" / "logs" / "run123.log").exists()
+    (payload,), kwargs = doc_ref.set.call_args
+    assert kwargs == {}  # a single full overwrite, not a merge/read-modify-write
+    assert len(payload["lines"]) == 10
+    assert payload["lines"][0].endswith("line 0")
+    assert payload["lines"][-1].endswith("line 9")
+
+    # A second finalize on the (now-cleared) buffer is a no-op -- no
+    # duplicate/empty write.
+    mem.finalize_run_log("run123")
+    assert doc_ref.set.call_count == 1
+
+
+def test_finalize_run_log_caps_at_500_lines(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_db = MagicMock()
+    monkeypatch.setattr(registry, "_db", fake_db)
+
+    mem = Memory(repo)
+    for i in range(600):
+        mem.log("run123", f"line {i}")
+    mem.finalize_run_log("run123")
+
+    doc_ref = fake_db.collection.return_value.document.return_value
+    (payload,), _ = doc_ref.set.call_args
+    assert len(payload["lines"]) == 500
+    assert payload["lines"][-1].endswith("line 599")
+
+
+def test_periodic_safety_flush_fires_once_the_line_threshold_is_crossed(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_db = MagicMock()
+    monkeypatch.setattr(registry, "_db", fake_db)
+    monkeypatch.setattr(memory_module, "FIRESTORE_FLUSH_MAX_LINES", 5)
+
+    mem = Memory(repo)
+    for i in range(4):
+        mem.log("run123", f"line {i}")
+    fake_db.collection.assert_not_called()
+
+    mem.log("run123", "line 4")  # crosses the (patched) 5-line threshold
+
+    fake_db.collection.assert_any_call("run_logs")
+    doc_ref = fake_db.collection.return_value.document.return_value
+    assert doc_ref.set.call_count == 1
+    (payload,), _ = doc_ref.set.call_args
+    assert len(payload["lines"]) == 5
+
+
+def test_periodic_safety_flush_fires_once_the_time_threshold_is_crossed(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_db = MagicMock()
+    monkeypatch.setattr(registry, "_db", fake_db)
+    monkeypatch.setattr(memory_module, "FIRESTORE_FLUSH_INTERVAL_SECONDS", 60)
+
+    fake_clock = {"t": 1000.0}
+    monkeypatch.setattr(memory_module.time, "monotonic", lambda: fake_clock["t"])
+
+    mem = Memory(repo)
+    mem.log("run123", "line 0")
+    fake_db.collection.assert_not_called()
+
+    fake_clock["t"] += 61  # crosses the (patched) 60s threshold
+    mem.log("run123", "line 1")
+
+    fake_db.collection.assert_any_call("run_logs")
+    doc_ref = fake_db.collection.return_value.document.return_value
+    assert doc_ref.set.call_count == 1
 
 
 def test_log_does_not_raise_when_firestore_write_fails(tmp_path, monkeypatch):
@@ -47,6 +150,7 @@ def test_log_does_not_raise_when_firestore_write_fails(tmp_path, monkeypatch):
 
     mem = Memory(repo)
     mem.log("run123", "cycle start")  # must not raise
+    mem.finalize_run_log("run123")  # must not raise either
 
     assert (repo / ".agentra" / "logs" / "run123.log").exists()
 
@@ -58,6 +162,7 @@ def test_log_skips_firestore_when_not_configured(tmp_path, monkeypatch):
 
     mem = Memory(repo)
     path = mem.log("run123", "cycle start")  # must not raise
+    mem.finalize_run_log("run123")  # must not raise either
 
     assert path.exists()
 

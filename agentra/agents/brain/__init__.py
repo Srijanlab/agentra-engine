@@ -208,6 +208,31 @@ async def run_autonomous_cycle(
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
+    try:
+        return await _run_autonomous_cycle_body(
+            repo, mem, run_id, objective, env, analytics_summary, feature, skip_deploy,
+            max_turns, human_answer, human_answer_issue,
+        )
+    finally:
+        # Bug #77: single full-document Firestore flush once this run reaches a
+        # terminal state (completed/failed/waiting_for_human) rather than a
+        # per-log-line read+write.
+        mem.finalize_run_log(run_id)
+
+
+async def _run_autonomous_cycle_body(
+    repo: Path,
+    mem: Memory,
+    run_id: str,
+    objective: str,
+    env: EnvironmentConfig,
+    analytics_summary: str,
+    feature: str | None,
+    skip_deploy: bool,
+    max_turns: int,
+    human_answer: str | None,
+    human_answer_issue: int | None,
+) -> AutonomousCycleReport:
     session = OrchestratorSession(
         repo=repo,
         objective=objective,
