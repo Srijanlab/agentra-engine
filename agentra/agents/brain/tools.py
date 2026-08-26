@@ -174,6 +174,32 @@ def _escalate_to_human(
     return issue_number
 
 
+def _notify_shipped_pending(session: OrchestratorSession, verification_result: str) -> None:
+    """Drains session.pending_shipped_notifications, posting exactly one Slack 'shipped'
+    message per entry via connectors/slack.py's notify_shipped -- the single choke point for
+    this notification. Called only from deploy_pre_prod's trivial-merge success branch and
+    verify_pre_prod's pass branch (never from implement_feature/record_code_complete's earlier
+    status:shipped label stamp), so it fires strictly on confirmed pre-prod delivery. Fail-open:
+    a Slack failure (unconfigured, network, API rejection) never raises or blocks the run."""
+    if not session.pending_shipped_notifications:
+        return
+    from agentra.connectors import slack
+
+    pending, session.pending_shipped_notifications = session.pending_shipped_notifications, []
+    for item in pending:
+        board_issue_number = item.get("board_issue_number") or item.get("issue_number")
+        issue_url = session.mem.issue_html_url(board_issue_number) if board_issue_number is not None else None
+        try:
+            slack.notify_shipped(
+                app=session.app_name,
+                feature_title=item.get("title") or "Untitled feature",
+                issue_url=issue_url,
+                verification_result=verification_result,
+            )
+        except Exception:
+            logger.warning("notify_shipped failed for issue #%s", board_issue_number, exc_info=True)
+
+
 # Deterministic infra-cost gate (Part 2/2): keyword heuristic + gate decision logic live in
 # their own module (agents/brain/infra_cost_gate.py) -- these two thin wrappers just supply the
 # session/escalation plumbing that module doesn't own, to avoid a circular import.
@@ -700,6 +726,17 @@ def _tools_for(session: OrchestratorSession) -> list:
         parent_issue_number = code_complete["board_issue_number"] if code_complete else None
         if issue_number is not None:
             session.code_complete_issue_numbers.append(str(issue_number))
+        if code_complete and not more_parts_expected:
+            # Queued for the notify_shipped Slack message, drained once pre-prod delivery is
+            # actually confirmed at deploy_pre_prod's trivial-merge success or verify_pre_prod's
+            # pass -- never here. Skipped entirely when more_parts_expected (an intermediate
+            # part of a multi-part feature): only the final part, which marks the parent shipped,
+            # queues a notification, and it references the parent via board_issue_number.
+            session.pending_shipped_notifications.append({
+                "issue_number": issue_number,
+                "board_issue_number": parent_issue_number,
+                "title": feature_name,
+            })
         issue_note = f" (issue #{issue_number})" if issue_number else ""
         next_part_hint = (
             f" More parts expected -- call implement_feature again for the next part with "
@@ -879,6 +916,13 @@ def _tools_for(session: OrchestratorSession) -> list:
                     session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
                     # No verify_pre_prod call follows a trivial merge, so these never reach
                     # status:tested -- deliberately not added to shipped_this_cycle_issue_numbers.
+                # notify_shipped choke point (a): trivial changes never go through
+                # verify_pre_prod, so this merge succeeding IS confirmed pre-prod delivery.
+                _notify_shipped_pending(
+                    session,
+                    "Merged to pre-prod without a live deploy (trivial change, local tests are "
+                    "sufficient proof).",
+                )
             return {
                 "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this change."}],
                 "is_error": not ok,
@@ -981,6 +1025,13 @@ def _tools_for(session: OrchestratorSession) -> list:
             if session.shipped_this_cycle_issue_numbers:
                 session.mem.record_tested(session.shipped_this_cycle_issue_numbers, session.run_id)
                 session.shipped_this_cycle_issue_numbers = []
+            # notify_shipped choke point (b): a non-trivial change's pre-prod delivery is only
+            # confirmed once live verification actually passes, not at deploy_pre_prod's own
+            # success (that only means the instance is up).
+            verification_result = f"verify_pre_prod passed ({detail})."
+            if session.pre_prod_url:
+                verification_result += f" Preview: {session.pre_prod_url}"
+            _notify_shipped_pending(session, verification_result)
         if session.env.deploy_strategy == "self_hosted_vm":
             # Single-shot, ephemeral sibling -- tear it down once its report is
             deployment.teardown_self_hosted_preprod(session.repo, session.run_id)

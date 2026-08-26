@@ -1,4 +1,4 @@
-"""Outbound-only Slack notifications for human-in-the-loop escalation (GitHub issue #34)."""
+"""Outbound-only Slack notifications: human-in-the-loop escalation (GitHub issue #34) and shipped-to-pre-prod delivery confirmations."""
 
 from __future__ import annotations
 
@@ -77,6 +77,40 @@ def _format_human_input_message(
         "'Needs your input' panel -- this run will resume from exactly where it left off."
     )
     return "\n".join(lines)
+
+
+def _format_shipped_message(
+    *,
+    app: str,
+    feature_title: str,
+    issue_url: str | None,
+    verification_result: str,
+) -> str:
+    header = f":rocket: *{app}* shipped to pre-prod: *{feature_title}*"
+    lines = [header]
+    if issue_url:
+        lines.append(f"<{issue_url}|GitHub issue>")
+    lines.append(verification_result.strip())
+    return "\n".join(lines)
+
+
+def notify_shipped(
+    *,
+    app: str,
+    feature_title: str,
+    issue_url: str | None = None,
+    verification_result: str,
+) -> bool:
+    """Posts a 'shipped to pre-prod' notification to the configured Slack channel, once pre-prod
+    delivery is actually confirmed (trivial merge success, or verify_pre_prod pass) -- never at
+    the earlier status:shipped GitHub label stamp. No-ops (returns False) when Slack isn't
+    configured, and never raises (mirrors notify_human_input_required's fail-open behavior)."""
+    if not is_configured():
+        return False
+    text = _format_shipped_message(
+        app=app, feature_title=feature_title, issue_url=issue_url, verification_result=verification_result,
+    )
+    return _post_message(text)
 
 
 def notify_human_input_required(

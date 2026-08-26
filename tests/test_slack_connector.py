@@ -122,6 +122,90 @@ def test_notify_human_input_required_never_raises_on_network_failure(monkeypatch
     assert result is False
 
 
+def test_notify_shipped_skips_silently_when_unconfigured(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(
+        slack.httpx, "post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call Slack when unconfigured"))
+    )
+
+    result = slack.notify_shipped(app="myapp", feature_title="Dark mode", verification_result="merged.")
+
+    assert result is False
+
+
+def test_notify_shipped_posts_title_link_and_verification_result_when_configured(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
+    monkeypatch.setenv("SLACK_HUMAN_INPUT_CHANNEL", "C0123456789")
+
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True, "ts": "1234.5678"}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr(slack.httpx, "post", _fake_post)
+
+    result = slack.notify_shipped(
+        app="myapp",
+        feature_title="Dark mode",
+        issue_url="https://github.com/acme/myapp/issues/42",
+        verification_result="verify_pre_prod passed (reachable=True feature_verified=True). Preview: https://preview.example.com",
+    )
+
+    assert result is True
+    assert captured["url"] == slack.SLACK_API_POST_MESSAGE
+    assert captured["json"]["channel"] == "C0123456789"
+    text = captured["json"]["text"]
+    assert "Dark mode" in text
+    assert "https://github.com/acme/myapp/issues/42" in text
+    assert "verify_pre_prod passed" in text
+    assert "https://preview.example.com" in text
+
+
+def test_notify_shipped_works_without_an_issue_url(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
+    monkeypatch.setenv("SLACK_HUMAN_INPUT_CHANNEL", "C0123456789")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(slack.httpx, "post", lambda *a, **k: _FakeResponse())
+
+    result = slack.notify_shipped(app="myapp", feature_title="Dark mode", verification_result="merged trivially.")
+
+    assert result is True
+
+
+def test_notify_shipped_never_raises_on_network_failure(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
+    monkeypatch.setenv("SLACK_HUMAN_INPUT_CHANNEL", "C0123456789")
+
+    def _raise(*a, **k):
+        raise ConnectionError("network is down")
+
+    monkeypatch.setattr(slack.httpx, "post", _raise)
+
+    result = slack.notify_shipped(app="myapp", feature_title="Dark mode", verification_result="merged.")
+
+    assert result is False
+
+
 def test_notify_human_input_required_escalated_message_is_distinguishable(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")

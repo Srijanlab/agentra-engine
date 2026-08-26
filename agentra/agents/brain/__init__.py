@@ -94,6 +94,12 @@ class OrchestratorSession:
     # feature in this state can never be deployed or stamped "code complete", independent of
     # whether the orchestrator LLM notices impl.ok=False / the error text in result.text.
     push_failed_branches: set[str] = field(default_factory=set)
+    # Shipped-but-not-yet-Slack-notified items, populated by implement_feature each time
+    # record_code_complete succeeds for a final part (not an intermediate multi-part one) --
+    # each entry: {issue_number, board_issue_number, title}. Drained (and cleared) at the two
+    # notify_shipped choke points in tools.py: deploy_pre_prod's trivial-merge success and
+    # verify_pre_prod's pass, never at the earlier status:shipped label stamp itself.
+    pending_shipped_notifications: list[dict] = field(default_factory=list)
 
     @property
     def app_name(self) -> str:
