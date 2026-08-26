@@ -78,6 +78,9 @@ class OrchestratorSession:
     auth_failure_this_cycle: bool = False
     # Set True the moment the top-level orchestrator query() call actually
     orchestrator_result_received: bool = False
+    # external_ids of every bug/feature-queue item check_backlog has shown this cycle --
+    # implement_feature requires resolves_id/resolves_origin="new" once this is non-empty.
+    backlog_ids_shown: set[str] = field(default_factory=set)
 
     @property
     def app_name(self) -> str:

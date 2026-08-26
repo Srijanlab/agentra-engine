@@ -272,6 +272,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         in_progress = session.mem.in_progress_features()
         bugs = _attach_resume_branches(session.mem, _actionable_bugs(session.mem.known_bugs()))
         queue = _attach_resume_branches(session.mem, session.mem.feature_queue())
+        session.backlog_ids_shown.update(
+            str(item["external_id"]) for item in (*in_progress, *bugs, *queue) if item.get("external_id")
+        )
         remaining_after_one = len(in_progress) + len(bugs) + len(queue) - 1
         batching_hint = (
             f"\n\n{remaining_after_one} more item(s) will still be waiting after you address one of "
@@ -400,10 +403,13 @@ def _tools_for(session: OrchestratorSession) -> list:
 
     @tool(
         "implement_feature",
-        "Build a specific feature or fix a bug on a branch. Set resolves_id/resolves_origin "
-        "if resolving an issue. For multi-part features, set more_parts_expected=true on all "
-        "calls except the last, and pass sub_feature_of on subsequent parts. Set resume_branch "
-        "if resuming work from check_backlog.",
+        "Build a specific feature or fix a bug on a branch. Required once check_backlog has "
+        "shown any bugs/feature-queue items this cycle: either set resolves_id (its external_id) "
+        "+ resolves_origin ('known_bug' or 'feature_queue') to point at the exact item this brief "
+        "resolves, or set resolves_origin='new' to declare this brief is deliberately not one of "
+        "them. For multi-part features, set more_parts_expected=true on all calls except the "
+        "last, and pass sub_feature_of on subsequent parts. Set resume_branch if resuming work "
+        "from check_backlog.",
         {
             "feature_brief": str,
             "resolves_origin": str,
@@ -425,8 +431,8 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.feature_branch = resume_branch if resume_branch else feature_branch_name(session.env, session.run_id, brief)
         resolves_origin = args.get("resolves_origin") or ""
         resolves_id = args.get("resolves_id") or ""
-        if not resolves_id:
-            resolves_id, resolves_origin = _infer_resolves_from_brief(session.mem, brief) or ("", "")
+        if not resolves_id and resolves_origin != "new":
+            resolves_id, resolves_origin = _infer_resolves_from_brief(session.mem, brief) or ("", resolves_origin)
         sub_feature_of = args.get("sub_feature_of") or ""
         more_parts_expected = bool(args.get("more_parts_expected"))
         tracking_issue = None
@@ -434,6 +440,18 @@ def _tools_for(session: OrchestratorSession) -> list:
             tracking_issue = int(resolves_id)
         elif sub_feature_of and sub_feature_of.isdigit():
             tracking_issue = int(sub_feature_of)
+
+        if not resolves_id and session.backlog_ids_shown and resolves_origin != "new":
+            return {
+                "content": [{"type": "text", "text": (
+                    "check_backlog showed open bug/feature-queue items this cycle, but this call "
+                    "set neither resolves_id (pointing at one of them) nor resolves_origin='new' "
+                    "(declaring this brief isn't one of them). Set one and call implement_feature "
+                    "again -- otherwise shipping this risks filing a duplicate issue instead of "
+                    "resolving the existing one."
+                )}],
+                "is_error": True,
+            }
 
         if resuming and tracking_issue is not None and session.session_id is None:
             session.session_id = session.mem.resume_session_id_for(str(tracking_issue))
