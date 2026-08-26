@@ -278,14 +278,56 @@ def test_check_backlog_surfaces_all_five_buckets_in_priority_order(tmp_path, mon
     assert text.index("Shipped feature") < text.index("Code-complete feature")
     assert text.index("Code-complete feature") < text.index("A real bug")
     assert text.index("A real bug") < text.index("A feature request")
-    # need_human bugs are excluded from the bugs bucket specifically (bucket 4) --
-    # isolate that section rather than asserting global text absence, since the
-    # fake backend's OR-based label matching makes a "bug"+"agentra"-labeled issue
-    # also match feature_queue()'s query, an unrelated pre-existing fake-only quirk.
-    bugs_section = text[text.index("4. Known bugs"):text.index("5. Feature request queue")]
+    # need_human bugs are excluded from the bugs bucket specifically (bucket 5).
+    bugs_section = text[text.index("5. Known bugs"):text.index("6. Feature request queue")]
     assert "Needs a human bug" not in bugs_section
 
     assert str(shipped_issue["number"]) in session.backlog_ids_shown
     assert str(code_complete_issue["number"]) in session.backlog_ids_shown
     assert str(bug_issue["number"]) in session.backlog_ids_shown
     assert str(queue_issue["number"]) in session.backlog_ids_shown
+
+
+def test_check_backlog_ranks_in_progress_single_part_items_above_bugs_and_queue(tmp_path, monkeypatch):
+    """GitHub issue #87: a single-part bug/feature already stamped status:in-progress (real
+    work started -- a branch, prior attempts) must not rank alongside never-touched backlog
+    items. It gets its own bucket (4), above known bugs (5) and the feature queue (6), and is
+    excluded from both of those so it isn't listed twice."""
+    github_fake.install(monkeypatch=monkeypatch)
+    repo = _make_repo(tmp_path)
+    mem = Memory(repo)
+    repo_url = mem._repo_url()
+    session = _session(mem)
+    _patch_registry(monkeypatch)
+
+    in_progress_bug = github_issues.create_issue(repo_url, "An in-progress bug", "body", labels=["bug", "agentra"])
+    mem.record_in_progress_branch(in_progress_bug["number"], "dev/in-progress-bug-branch")
+
+    in_progress_feature = github_issues.create_issue(repo_url, "An in-progress feature", "body", labels=["feature", "agentra"])
+    mem.record_in_progress_branch(in_progress_feature["number"], "dev/in-progress-feature-branch")
+
+    fresh_bug = github_issues.create_issue(repo_url, "A fresh untouched bug", "body", labels=["bug", "agentra"])
+    fresh_feature = github_issues.create_issue(repo_url, "A fresh untouched feature", "body", labels=["feature", "agentra"])
+
+    result = asyncio.run(_tool(session, "check_backlog").handler({}))
+    text = result["content"][0]["text"]
+
+    assert text.index("An in-progress bug") < text.index("5. Known bugs")
+    assert text.index("An in-progress feature") < text.index("5. Known bugs")
+
+    bucket_4 = text[text.index("4. In-progress single-part"):text.index("5. Known bugs")]
+    assert "An in-progress bug" in bucket_4
+    assert "An in-progress feature" in bucket_4
+    assert "dev/in-progress-bug-branch" in bucket_4
+
+    # Not double-listed in their native buckets.
+    bugs_section = text[text.index("5. Known bugs"):text.index("6. Feature request queue")]
+    assert "An in-progress bug" not in bugs_section
+    assert "A fresh untouched bug" in bugs_section
+
+    queue_section = text[text.index("6. Feature request queue"):text.index("Already shipped")]
+    assert "An in-progress feature" not in queue_section
+    assert "A fresh untouched feature" in queue_section
+
+    assert str(in_progress_bug["number"]) in session.backlog_ids_shown
+    assert str(in_progress_feature["number"]) in session.backlog_ids_shown

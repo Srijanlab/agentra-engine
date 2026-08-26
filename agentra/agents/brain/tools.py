@@ -285,8 +285,9 @@ def _tools_for(session: OrchestratorSession) -> list:
         "Cheap, direct data read -- no sub-agent call, always call this before "
         "discover_opportunities. Priority order: (1) shipped items pending live testing, "
         "(2) code-complete items pending merge to pre-prod, (3) in-progress multi-part "
-        "features, (4) known bugs not yet started, (5) feature request queue, "
-        "(6) discover_opportunities. Bugs labeled need_human are filtered out. A non-null "
+        "features, (4) in-progress single-part bugs/features (status:in-progress, real work "
+        "already started), (5) known bugs not yet started, (6) feature request queue, "
+        "(7) discover_opportunities. Bugs labeled need_human are filtered out. A non-null "
         "resume_branch means work was previously started there; pass it to implement_feature "
         "to continue.",
         {},
@@ -298,15 +299,24 @@ def _tools_for(session: OrchestratorSession) -> list:
         pending_test = _attach_resume_branches(session.mem, session.mem.shipped_pending_test_items())
         pending_merge = _attach_resume_branches(session.mem, session.mem.code_complete_items())
         in_progress = session.mem.in_progress_features()
+        # GitHub issue #87: a single-part bug/feature already stamped status:in-progress (a
+        # branch, prior implement_feature attempts) used to rank no higher than a never-touched
+        # backlog item, since neither known_bugs() nor feature_queue() special-cases this label
+        # -- filtered back out of those two below so nothing is listed twice.
+        flagged_in_progress = _attach_resume_branches(session.mem, session.mem.in_progress_items())
+        flagged_ids = {item["external_id"] for item in flagged_in_progress if item.get("external_id")}
         bugs = _attach_resume_branches(session.mem, _actionable_bugs(session.mem.known_bugs()))
+        bugs = [b for b in bugs if b.get("external_id") not in flagged_ids]
         queue = _attach_resume_branches(session.mem, session.mem.feature_queue())
+        queue = [f for f in queue if f.get("external_id") not in flagged_ids]
         session.backlog_ids_shown.update(
             str(item["external_id"])
-            for item in (*pending_test, *pending_merge, *in_progress, *bugs, *queue)
+            for item in (*pending_test, *pending_merge, *in_progress, *flagged_in_progress, *bugs, *queue)
             if item.get("external_id")
         )
         remaining_after_one = (
-            len(pending_test) + len(pending_merge) + len(in_progress) + len(bugs) + len(queue) - 1
+            len(pending_test) + len(pending_merge) + len(in_progress) + len(flagged_in_progress)
+            + len(bugs) + len(queue) - 1
         )
         batching_hint = (
             f"\n\n{remaining_after_one} more item(s) will still be waiting after you address one of "
@@ -328,9 +338,12 @@ def _tools_for(session: OrchestratorSession) -> list:
             f"{json.dumps(pending_merge, indent=2) if pending_merge else '(none)'}\n\n"
             f"3. In-progress multi-part features (resume and finish coding): "
             f"{json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
-            f"4. Known bugs not yet started (need_human bugs already excluded): "
+            f"4. In-progress single-part bugs/features (real work already started -- resume this "
+            f"branch, do not start fresh): "
+            f"{json.dumps(flagged_in_progress, indent=2) if flagged_in_progress else '(none)'}\n\n"
+            f"5. Known bugs not yet started (need_human bugs already excluded): "
             f"{json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
-            f"5. Feature request queue, not yet started: "
+            f"6. Feature request queue, not yet started: "
             f"{json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
             f"Already shipped: {shipped or '(none)'}"
             f"{batching_hint}"

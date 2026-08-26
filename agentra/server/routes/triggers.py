@@ -74,6 +74,12 @@ def _record_production_release(repo: Path, run_id: str) -> list[str]:
         name = feature["feature"]
         mem.record_released(name, release_run_id=run_id, commit_sha=prod_sha or feature.get("commit_sha"))
         newly_released.append(name)
+
+    # Every shipped feature not yet marked status:done -- not just the newly-released ones
+    # above. A feature already sitting in the local released.json ledger from a prior run (its
+    # promotion happened before this label existed, or a previous status write failed) still
+    # needs its GitHub label caught up here, same reasoning as the closed_bugs() sweep below.
+    for feature in mem.shipped_features():
         if not feature.get("status_done") and feature.get("external_id", "").isdigit():
             mem.mark_status_done(int(feature["external_id"]))
 

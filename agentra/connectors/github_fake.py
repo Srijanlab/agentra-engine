@@ -80,13 +80,13 @@ class FakeGitHubBackend:
     def list_open_issues(self, repo_url: str, labels: list[str] | None = None) -> list[dict]:
         results = [i for i in self.issues[repo_url].values() if i["state"] == "open"]
         if labels:
-            results = [i for i in results if any(label in i["labels"] for label in labels)]
+            results = [i for i in results if all(label in i["labels"] for label in labels)]
         return [dict(i) for i in results]
 
     def list_closed_issues(self, repo_url: str, labels: list[str] | None = None, limit: int = 5) -> list[dict]:
         results = [i for i in self.issues[repo_url].values() if i["state"] == "closed"]
         if labels:
-            results = [i for i in results if any(label in i["labels"] for label in labels)]
+            results = [i for i in results if all(label in i["labels"] for label in labels)]
         results.sort(key=lambda i: i.get("closed_at") or "", reverse=True)
         return [dict(i) for i in results[:limit]]
 
@@ -97,7 +97,7 @@ class FakeGitHubBackend:
             if i["state"] == "open" and i.get("sub_issue_numbers") and "status:shipped" not in i["labels"]
         ]
         if labels:
-            results = [i for i in results if any(label in i["labels"] for label in labels)]
+            results = [i for i in results if all(label in i["labels"] for label in labels)]
         return [
             {
                 "number": i["number"],
@@ -125,10 +125,12 @@ class FakeGitHubBackend:
     _IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
     _IN_PROGRESS_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
 
-    def record_in_progress_branch(self, repo_url: str, issue_number: int, branch: str, run_id: str | None = None) -> None:
+    def record_in_progress_branch(self, repo_url: str, issue_number: int, branch: str, run_id: str | None = None, session_id: str | None = None) -> None:
         body = f"In-Progress-Branch: {branch}"
         if run_id:
             body += f"\nRun-ID: {run_id}"
+        if session_id:
+            body += f"\nSession-ID: {session_id}"
         self.add_comment(repo_url, issue_number, body)
 
     def get_in_progress_branch(self, repo_url: str, issue_number: int) -> str | None:

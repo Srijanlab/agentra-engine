@@ -11,6 +11,7 @@ from agentra.memory.core import (
     _AGENTRA_LABEL,
     _BLOCKING_AGENTRA_LABEL,
     _BUG_LABEL,
+    _FEATURE_LABEL,
     _NEED_HUMAN_LABEL,
     _STATUS_DONE_LABEL,
     _STATUS_IN_PROGRESS_LABEL,
@@ -19,6 +20,7 @@ from agentra.memory.core import (
     _STATUS_TESTED_LABEL,
     _github_bug_to_dict,
     _github_closed_bug_to_dict,
+    _github_feature_to_dict,
     _label_names,
     cannot_be_fixed_by_agentra,
     is_login_required_failure,
@@ -46,6 +48,31 @@ class MemoryIssuesMixin:
             return [_github_bug_to_dict(i) for i in issues]
         except Exception:
             logger.error("known_bugs: GitHub Issues unavailable for %s -- bug backlog is unreadable until it recovers", repo_url, exc_info=True)
+            return []
+
+    def in_progress_items(self) -> list[dict]:
+        """Open bug- or feature-labeled issues carrying status:in-progress -- real work already
+        in flight (a branch, prior implement_feature attempts), regardless of whether it's a
+        multi-part sub-issue feature (see features.py::in_progress_features for that narrower,
+        separate concept -- GitHub's native sub-issue linking). GitHub issue #87: these used to
+        rank no higher than never-touched backlog items, since neither known_bugs() nor
+        feature_queue() special-cases status:in-progress."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            logger.error("in_progress_items: %s has no github.com remote -- no in-progress backlog is visible", self.repo)
+            return []
+        try:
+            from agentra.connectors import github_issues
+
+            bugs = github_issues.list_open_issues(repo_url, labels=[_BUG_LABEL, _AGENTRA_LABEL, _STATUS_IN_PROGRESS_LABEL])
+            bugs = [i for i in bugs if _NEED_HUMAN_LABEL not in _label_names(i)]
+            features = github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL, _STATUS_IN_PROGRESS_LABEL])
+            return (
+                [{**_github_bug_to_dict(i), "kind": "bug"} for i in bugs]
+                + [{**_github_feature_to_dict(i), "kind": "feature"} for i in features]
+            )
+        except Exception:
+            logger.error("in_progress_items: GitHub Issues unavailable for %s -- in-progress backlog is unreadable until it recovers", repo_url, exc_info=True)
             return []
 
     def closed_bugs(self) -> list[dict]:
