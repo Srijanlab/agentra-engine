@@ -1,3 +1,7 @@
+## Production promotion (self-hosted VM)
+
+Never call `deployment.promote_prod_self_hosted`/`promote_prod` directly (e.g. via `docker exec agentra-<color> python3 -c ...`). Use the real `POST /apps/{app_name}/promote` endpoint (agentra/server/routes/triggers.py) -- it takes the per-app lock, skips if a cycle is already running, and records a proper Firestore run. A raw direct call bypasses all of that and can race a concurrent autonomous cycle.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

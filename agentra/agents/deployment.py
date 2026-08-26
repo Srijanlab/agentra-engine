@@ -380,6 +380,29 @@ def _reclaim_build_disk_space() -> None:
     subprocess.run(["docker", "image", "prune", "-f"], capture_output=True, text=True)
 
 
+def _inherit_env(container_name: str | None, keys: list[str]) -> list[str]:
+    """`-e KEY=VALUE` docker-run args for just `keys`, copied from `container_name`'s own live env (its actual GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY, not a fresh secret fetch) -- same inheritance pattern promote_prod_self_hosted uses for the full env, just scoped to a named subset."""
+    if not container_name:
+        return []
+    inspect = subprocess.run(
+        ["docker", "inspect", container_name, "--format", "{{json .Config.Env}}"],
+        capture_output=True, text=True,
+    )
+    if inspect.returncode != 0:
+        return []
+    try:
+        entries = json.loads(inspect.stdout)
+    except json.JSONDecodeError:
+        return []
+    wanted = set(keys)
+    env_args = []
+    for entry in entries:
+        key, _, value = entry.partition("=")
+        if key in wanted:
+            env_args += ["-e", f"{key}={value}"]
+    return env_args
+
+
 async def deploy_pre_prod_self_hosted(
     repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str
 ) -> AgentResult:
@@ -434,6 +457,13 @@ async def deploy_pre_prod_self_hosted(
     env_args = []
     if config.firestore_project:
         env_args = ["-e", f"AGENTRA_FIRESTORE_PROJECT={config.firestore_project}"]
+    # Without these, this dashboard has no GitHub App configured at all -- every pre-prod
+    # deploy lands on the "Connect GitHub to get started" gate with zero registered-app data
+    # to verify against, regardless of what the change under test actually touches (confirmed
+    # live: a fully successful pre-prod deploy still showed the connect screen, not real data).
+    # Read-only from this process's own live container, same trust boundary agentra's own
+    # production containers already run under -- not a new secret fetch or a wider grant.
+    env_args += _inherit_env(own_container, ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"])
     run = subprocess.run(
         [
             "docker", "run", "-d", "--name", container_name,

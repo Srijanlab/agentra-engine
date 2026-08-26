@@ -512,6 +512,54 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
     assert gateway_calls == [["docker", "network", "inspect", "widget-app-net", "--format", "{{(index .IPAM.Config 0).Gateway}}"]]
 
 
+def test_deploy_pre_prod_self_hosted_passes_through_the_github_app_credentials(tmp_path, monkeypatch):
+    """Without these, the pre-prod dashboard has no GitHub App configured at all -- every
+    pre-prod deploy lands on the "Connect GitHub to get started" gate with zero registered-app
+    data to verify against, no matter what the change under test touches (confirmed live: a
+    fully successful pre-prod deploy still showed the connect screen, not real data). Inherited
+    read-only from this process's own live (currently-active blue/green) container -- the same
+    trust boundary agentra's own production containers already run under, not a new secret
+    fetch or a wider grant. Unrelated env entries on the source container (ALARM_WEBHOOK_PASSWORD
+    here) must NOT leak into the pre-prod container -- only the two GitHub App keys."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    pull_calls, push_calls, docker_calls = [], [], []
+    monkeypatch.setattr(git_ops, "pull_latest", _guarded_pull_latest(pull_calls, env.pre_prod_branch))
+    monkeypatch.setattr(git_ops, "push_branch", _guarded_push_branch(push_calls, env.pre_prod_branch))
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        _fake_docker_run(
+            docker_calls,
+            inspect_env=[
+                "GITHUB_APP_ID=12345",
+                "GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----fake-----END-----",
+                "ALARM_WEBHOOK_PASSWORD=super-secret-unrelated",
+            ],
+        ),
+    )
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is True
+    run_cmd = next(c for c in docker_calls if c[:2] == ["docker", "run"])
+    assert "GITHUB_APP_ID=12345" in run_cmd
+    assert "GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----fake-----END-----" in run_cmd
+    assert not any("ALARM_WEBHOOK_PASSWORD" in arg for arg in run_cmd)
+
+    # Inherited from this process's own currently-active container, not a hardcoded name.
+    env_inspect_calls = [
+        c for c in docker_calls
+        if c[:2] == ["docker", "inspect"] and "{{json .Config.Env}}" in c
+    ]
+    assert env_inspect_calls == [["docker", "inspect", "widget-app-blue", "--format", "{{json .Config.Env}}"]]
+
+
 def test_deploy_pre_prod_self_hosted_returns_a_url_reachable_via_a_plain_socket_connection(tmp_path, monkeypatch):
     """The regression this issue asked for: assert the URL handed to
     verification is actually reachable via a plain socket connection in the
