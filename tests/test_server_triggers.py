@@ -284,8 +284,9 @@ def test_promote_background_records_released_features(tmp_path, monkeypatch):
     repo = _register_tmp_app(tmp_path)
     environments.save(repo, environments.EnvironmentConfig(prod_branch="production"))
     mem = Memory(repo)
-    mem.record_shipped("Ready to ship dashboard", commit_sha="abc1234")
-    mem.record_shipped("Already released feature", commit_sha="def5678")
+    ready = mem.record_code_complete("Ready to ship dashboard", commit_sha="abc1234")
+    already = mem.record_code_complete("Already released feature", commit_sha="def5678")
+    mem.record_shipped_to_preprod([str(ready["issue_number"]), str(already["issue_number"])])
     mem.record_released("Already released feature", release_run_id="prior-run", commit_sha="beef999")
 
     calls = []
@@ -364,7 +365,7 @@ def test_get_app_surfaces_in_progress_multi_part_features(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path)
     mem = Memory(repo)
 
-    mem.record_shipped("Big feature", run_id="run1", more_parts_expected=True)
+    mem.record_code_complete("Big feature", run_id="run1", more_parts_expected=True)
 
     response = TestClient(server.app).get("/apps/myapp")
 

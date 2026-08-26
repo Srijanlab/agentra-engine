@@ -324,7 +324,8 @@ def test_ensure_labels_creates_only_the_missing_ones(monkeypatch):
     github_issues.ensure_labels("https://github.com/acme/app.git")
 
     assert sorted(created) == [
-        "agentra", "blocking_agentra", "discovery", "feature", "need_human", "status:done", "status:in-progress", "status:shipped",
+        "agentra", "blocking_agentra", "discovery", "feature", "need_human", "status:code_complete", "status:done",
+        "status:in-progress", "status:shipped", "status:tested",
     ]
 
 

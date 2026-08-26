@@ -249,3 +249,53 @@ def mark_shipped(repo_url: str, issue_number: int, comment: str | None = None, b
             timeout=15,
         ).raise_for_status()
     add_labels(repo_url, issue_number, ["status:shipped"])
+
+
+def mark_code_complete(repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None) -> None:
+    """First stage of the shipping pipeline: coding is done and pushed to its remote feature branch, not yet merged anywhere. Leaves the issue OPEN."""
+    import httpx
+    from agentra.connectors.github_issues import _headers, _owner_repo_or_raise
+    from agentra.connectors.github_app import GITHUB_API
+
+    owner_repo = _owner_repo_or_raise(repo_url)
+    headers = _headers(repo_url)
+    if comment:
+        httpx.post(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}/comments",
+            headers=headers,
+            json={"body": comment},
+            timeout=15,
+        ).raise_for_status()
+    if body_suffix:
+        get_resp = httpx.get(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}", headers=headers, timeout=15
+        )
+        get_resp.raise_for_status()
+        current_body = get_resp.json().get("body") or ""
+        httpx.patch(
+            f"{GITHUB_API}/repos/{owner_repo}/issues/{issue_number}",
+            headers=headers,
+            json={"body": current_body.rstrip() + "\n\n" + body_suffix},
+            timeout=15,
+        ).raise_for_status()
+    add_labels(repo_url, issue_number, ["status:code_complete"])
+
+
+def mark_shipped_to_preprod(repo_url: str, issue_number: int, comment: str | None = None) -> None:
+    """Second stage: the code-complete branch has been merged into pre-prod/beta. Transitions status:code_complete -> status:shipped."""
+    from agentra.connectors.github_issues import remove_label
+
+    if comment:
+        add_comment(repo_url, issue_number, comment)
+    remove_label(repo_url, issue_number, "status:code_complete")
+    add_labels(repo_url, issue_number, ["status:shipped"])
+
+
+def mark_tested(repo_url: str, issue_number: int, comment: str | None = None) -> None:
+    """Third stage: verify_pre_prod passed against the live pre-prod deployment. Transitions status:shipped -> status:tested."""
+    from agentra.connectors.github_issues import remove_label
+
+    if comment:
+        add_comment(repo_url, issue_number, comment)
+    remove_label(repo_url, issue_number, "status:shipped")
+    add_labels(repo_url, issue_number, ["status:tested"])

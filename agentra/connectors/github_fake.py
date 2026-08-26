@@ -304,6 +304,35 @@ class FakeGitHubBackend:
             self._save()
         self.add_labels(repo_url, issue_number, ["status:shipped"])
 
+    def mark_code_complete(
+        self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
+    ) -> None:
+        if issue_number not in self.issues[repo_url]:
+            return
+        if comment:
+            self.add_comment(repo_url, issue_number, comment)
+        if body_suffix:
+            issue = self.issues[repo_url][issue_number]
+            issue["body"] = (issue.get("body") or "").rstrip() + "\n\n" + body_suffix
+            self._save()
+        self.add_labels(repo_url, issue_number, ["status:code_complete"])
+
+    def mark_shipped_to_preprod(self, repo_url: str, issue_number: int, comment: str | None = None) -> None:
+        if issue_number not in self.issues[repo_url]:
+            return
+        if comment:
+            self.add_comment(repo_url, issue_number, comment)
+        self.remove_label(repo_url, issue_number, "status:code_complete")
+        self.add_labels(repo_url, issue_number, ["status:shipped"])
+
+    def mark_tested(self, repo_url: str, issue_number: int, comment: str | None = None) -> None:
+        if issue_number not in self.issues[repo_url]:
+            return
+        if comment:
+            self.add_comment(repo_url, issue_number, comment)
+        self.remove_label(repo_url, issue_number, "status:shipped")
+        self.add_labels(repo_url, issue_number, ["status:tested"])
+
     def list_variables(self, repo_url: str) -> dict[str, str]:
         return dict(self.variables[repo_url])
 
@@ -327,6 +356,9 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_in_progress_features", backend.list_in_progress_features),
         (github_issues, "close_issue", backend.close_issue),
         (github_issues, "mark_shipped", backend.mark_shipped),
+        (github_issues, "mark_code_complete", backend.mark_code_complete),
+        (github_issues, "mark_shipped_to_preprod", backend.mark_shipped_to_preprod),
+        (github_issues, "mark_tested", backend.mark_tested),
         (github_issues, "add_comment", backend.add_comment),
         (github_issues, "list_comments", backend.list_comments),
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),

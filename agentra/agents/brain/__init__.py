@@ -81,6 +81,13 @@ class OrchestratorSession:
     # external_ids of every bug/feature-queue item check_backlog has shown this cycle --
     # implement_feature requires resolves_id/resolves_origin="new" once this is non-empty.
     backlog_ids_shown: set[str] = field(default_factory=set)
+    # issue_numbers stamped status:code_complete by implement_feature this cycle, not yet
+    # merged to pre-prod -- deploy_pre_prod moves these to status:shipped on success and
+    # empties this list into shipped_this_cycle_issue_numbers.
+    code_complete_issue_numbers: list[str] = field(default_factory=list)
+    # issue_numbers stamped status:shipped this cycle (by the deploy_pre_prod call above) --
+    # verify_pre_prod moves these to status:tested on a passing live check.
+    shipped_this_cycle_issue_numbers: list[str] = field(default_factory=list)
 
     @property
     def app_name(self) -> str:

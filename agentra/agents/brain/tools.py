@@ -259,35 +259,55 @@ def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "check_backlog",
         "Cheap, direct data read -- no sub-agent call, always call this before "
-        "discover_opportunities. Priority order: (1) in-progress multi-part feature, "
-        "(2) known bug, (3) feature request queue, (4) discover_opportunities. "
-        "Bugs labeled need_human are filtered out. A non-null resume_branch means "
-        "work was previously started there; pass it to implement_feature to continue.",
+        "discover_opportunities. Priority order: (1) shipped items pending live testing, "
+        "(2) code-complete items pending merge to pre-prod, (3) in-progress multi-part "
+        "features, (4) known bugs not yet started, (5) feature request queue, "
+        "(6) discover_opportunities. Bugs labeled need_human are filtered out. A non-null "
+        "resume_branch means work was previously started there; pass it to implement_feature "
+        "to continue.",
         {},
     )
     async def check_backlog(_args):
         if stop := session.check_hard_stop():
             return stop
         shipped = [f["feature"] for f in session.mem.shipped_features()]
+        pending_test = _attach_resume_branches(session.mem, session.mem.shipped_pending_test_items())
+        pending_merge = _attach_resume_branches(session.mem, session.mem.code_complete_items())
         in_progress = session.mem.in_progress_features()
         bugs = _attach_resume_branches(session.mem, _actionable_bugs(session.mem.known_bugs()))
         queue = _attach_resume_branches(session.mem, session.mem.feature_queue())
         session.backlog_ids_shown.update(
-            str(item["external_id"]) for item in (*in_progress, *bugs, *queue) if item.get("external_id")
+            str(item["external_id"])
+            for item in (*pending_test, *pending_merge, *in_progress, *bugs, *queue)
+            if item.get("external_id")
         )
-        remaining_after_one = len(in_progress) + len(bugs) + len(queue) - 1
+        remaining_after_one = (
+            len(pending_test) + len(pending_merge) + len(in_progress) + len(bugs) + len(queue) - 1
+        )
         batching_hint = (
             f"\n\n{remaining_after_one} more item(s) will still be waiting after you address one of "
             "these -- if what you're about to build is not a trivial fix, consider implementing "
             "several of them before your first deploy_pre_prod call this run (it deploys/verifies "
             "everything implemented so far together, see its own description), rather than paying "
-            "for a full pre-prod deploy + live verification once per item."
+            "for a full pre-prod deploy + live verification once per item. Do not bundle a large, "
+            "standing, multi-session effort (e.g. one already spanning several prior commits) in "
+            "with an unrelated small fix just because both are waiting -- pick items that are "
+            "actually safe to test/deploy/review together."
             if remaining_after_one > 0 else ""
         )
         text = (
-            f"In-progress multi-part features (resume these first): {json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
-            f"Known bugs awaiting a fix: {json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
-            f"Feature request queue: {json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
+            "Work through what's already in flight before starting anything new -- in this order:\n"
+            f"1. Shipped, pending live testing (call implement_feature with resolves_id/resume_branch set, "
+            f"then run_local_tests -> deploy_pre_prod -> verify_pre_prod): "
+            f"{json.dumps(pending_test, indent=2) if pending_test else '(none)'}\n\n"
+            f"2. Code complete, pending merge to pre-prod (same resume flow, through deploy_pre_prod): "
+            f"{json.dumps(pending_merge, indent=2) if pending_merge else '(none)'}\n\n"
+            f"3. In-progress multi-part features (resume and finish coding): "
+            f"{json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
+            f"4. Known bugs not yet started (need_human bugs already excluded): "
+            f"{json.dumps(bugs, indent=2) if bugs else '(none)'}\n\n"
+            f"5. Feature request queue, not yet started: "
+            f"{json.dumps(queue, indent=2) if queue else '(none)'}\n\n"
             f"Already shipped: {shipped or '(none)'}"
             f"{batching_hint}"
         )
@@ -594,8 +614,21 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.mem.record_failure(session.run_id, "implementation", impl.text)
             session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
+        if impl.pushed is False:
+            # Code exists only as a local commit in this ephemeral container -- must not be
+            # marked code_complete (GitHub issue #75/#78: that label means "pushed", and an
+            # unpushed commit is one container swap away from being permanently lost).
+            if tracking_issue is not None:
+                session.mem.record_failure_on_issue(tracking_issue, session.run_id, "implementation", impl.text)
+            else:
+                session.mem.record_failure(session.run_id, "implementation", impl.text)
+            session.record_failure("implement_feature")
+            return {
+                "content": [{"type": "text", "text": f"Implementation succeeded but could not push the feature branch -- not marking code-complete: {impl.text[-1000:]}"}],
+                "is_error": True,
+            }
         session.record_success("implement_feature")
-        shipped = session.mem.record_shipped(
+        code_complete = session.mem.record_code_complete(
             feature_name,
             commit_sha=commit_sha,
             run_id=session.run_id,
@@ -606,19 +639,21 @@ def _tools_for(session: OrchestratorSession) -> list:
             known_bug_issue=resolves_id if resolves_origin == "known_bug" else None,
         )
         session.mem.append_documentation(
-            f"Shipped **{feature_name}**"
+            f"Code complete: **{feature_name}**"
             + (f" (commit `{commit_sha[:7]}`)" if commit_sha else "")
             + f": {brief[:300]}"
         )
         if resolves_id and resolves_origin == "known_bug":
-            resolution_note = f"Resolved by agentra: shipped as {feature_name!r} (run {session.run_id})" + (
+            resolution_note = f"Resolved by agentra: code complete as {feature_name!r} (run {session.run_id})" + (
                 f" (commit {commit_sha})" if commit_sha else ""
             )
             session.mem.clear_known_bug(resolves_id, resolution_note)
         session.current_feature = feature_name
 
-        issue_number = shipped["issue_number"] if shipped else None
-        parent_issue_number = shipped["board_issue_number"] if shipped else None
+        issue_number = code_complete["issue_number"] if code_complete else None
+        parent_issue_number = code_complete["board_issue_number"] if code_complete else None
+        if issue_number is not None:
+            session.code_complete_issue_numbers.append(str(issue_number))
         issue_note = f" (issue #{issue_number})" if issue_number else ""
         next_part_hint = (
             f" More parts expected -- call implement_feature again for the next part with "
@@ -632,7 +667,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                 {
                     "type": "text",
                     "text": (
-                        f"Implemented and committed {feature_name!r}{issue_note}. "
+                        f"Code complete: implemented, committed, and pushed {feature_name!r}{issue_note}. "
                         f"Call run_local_tests before deploy_pre_prod.{next_part_hint}"
                     ),
                 }
@@ -786,6 +821,11 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.record_failure("deploy_pre_prod")
             else:
                 session.record_success("deploy_pre_prod")
+                if session.code_complete_issue_numbers:
+                    moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
+                    session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
+                    # No verify_pre_prod call follows a trivial merge, so these never reach
+                    # status:tested -- deliberately not added to shipped_this_cycle_issue_numbers.
             return {
                 "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this change."}],
                 "is_error": not ok,
@@ -842,6 +882,10 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("deploy_pre_prod")
         else:
             session.record_success("deploy_pre_prod")
+            if session.code_complete_issue_numbers:
+                moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
+                session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
+                session.shipped_this_cycle_issue_numbers.extend(moved)
         return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": not ok}
 
     @tool(
@@ -881,6 +925,9 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.record_failure("verify_pre_prod")
         else:
             session.record_success("verify_pre_prod")
+            if session.shipped_this_cycle_issue_numbers:
+                session.mem.record_tested(session.shipped_this_cycle_issue_numbers, session.run_id)
+                session.shipped_this_cycle_issue_numbers = []
         if session.env.deploy_strategy == "self_hosted_vm":
             # Single-shot, ephemeral sibling -- tear it down once its report is
             deployment.teardown_self_hosted_preprod(session.repo, session.run_id)

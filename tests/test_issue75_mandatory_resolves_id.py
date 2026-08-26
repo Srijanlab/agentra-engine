@@ -104,7 +104,7 @@ def test_implement_feature_allowed_with_explicit_new_origin(tmp_path, monkeypatc
     session = _session(tmp_path, mem)
     _patch_registry(monkeypatch)
     monkeypatch.setattr(brain.implementation, "run", _fake_impl_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
     asyncio.run(_tool(session, "check_backlog").handler({}))
@@ -127,7 +127,7 @@ def test_implement_feature_allowed_when_resolves_id_points_at_shown_bug(tmp_path
     session = _session(tmp_path, mem)
     _patch_registry(monkeypatch)
     monkeypatch.setattr(brain.implementation, "run", _fake_impl_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": bug["number"], "board_issue_number": bug["number"]})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": bug["number"], "board_issue_number": bug["number"]})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
     monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
 
@@ -148,7 +148,7 @@ def test_implement_feature_not_gated_when_backlog_was_empty(tmp_path, monkeypatc
     session = _session(tmp_path, mem)
     _patch_registry(monkeypatch)
     monkeypatch.setattr(brain.implementation, "run", _fake_impl_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
     asyncio.run(_tool(session, "check_backlog").handler({}))
@@ -166,7 +166,7 @@ def test_implement_feature_not_gated_when_check_backlog_never_called(tmp_path, m
     session = _session(tmp_path, mem)
     _patch_registry(monkeypatch)
     monkeypatch.setattr(brain.implementation, "run", _fake_impl_run)
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": None, "board_issue_number": None})
     monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
 
     result = asyncio.run(_tool(session, "implement_feature").handler({"feature_brief": "Freshly discovered feature"}))

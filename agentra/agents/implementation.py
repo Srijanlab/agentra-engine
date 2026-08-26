@@ -199,10 +199,15 @@ Implement this feature now, following the loop in your system prompt."""
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
         result.text += f"\n\n[agentra] Safety-net commit failed: {stderr}"
 
-    # Push the feature branch now, regardless of what happens next this cycle
+    # Push the feature branch now, regardless of what happens next this cycle.
+    # result.pushed gates status:code_complete (GitHub issue #75/#78) -- code
+    # that only exists in a local commit must not be marked code-complete, since
+    # this repo checkout is ephemeral (destroyed on the next container swap).
     try:
         git_ops.push_branch(repo, feature_branch)
+        result.pushed = True
     except git_ops.GitOpError as exc:
+        result.pushed = False
         result.text += f"\n\n[agentra] Could not push feature branch {feature_branch!r} (work is committed locally only, not recoverable after a redeploy): {exc}"
 
     # End-of-run graph refresh: whatever code changed above (commit_if_dirty's

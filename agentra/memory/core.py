@@ -23,8 +23,15 @@ _DISCOVERY_LABEL = "discovery"
 _NEED_HUMAN_LABEL = "need_human"
 _BLOCKING_AGENTRA_LABEL = "blocking_agentra"
 _STATUS_IN_PROGRESS_LABEL = "status:in-progress"
+_STATUS_CODE_COMPLETE_LABEL = "status:code_complete"
 _STATUS_SHIPPED_LABEL = "status:shipped"
+_STATUS_TESTED_LABEL = "status:tested"
 _STATUS_DONE_LABEL = "status:done"
+# Forward-progress labels -- an issue carrying any of these is no longer
+# "not started" backlog, regardless of which stage it's at.
+_STATUS_PROGRESS_LABELS = (
+    _STATUS_CODE_COMPLETE_LABEL, _STATUS_SHIPPED_LABEL, _STATUS_TESTED_LABEL, _STATUS_DONE_LABEL,
+)
 _OBJECTIVE_VARIABLE = "AGENTRA_OBJECTIVE"
 
 # A shipped feature/bug fix has run_id/commit_sha stamped into the issue body
