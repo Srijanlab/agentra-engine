@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import subprocess
+import time
 from pathlib import Path
 
 from agentra.memory.core import (
@@ -21,6 +22,14 @@ from agentra.memory.settings import MemorySettingsMixin
 
 logger = logging.getLogger(__name__)
 
+# Bug #77: a per-line Firestore read+write (blocking the async agent loop
+# every ~200-300ms during SDK streaming) was replaced with an in-memory
+# per-run buffer that is flushed to Firestore as a single full-document
+# write only periodically and once at run completion.
+FIRESTORE_FLUSH_MAX_LINES = 200
+FIRESTORE_FLUSH_INTERVAL_SECONDS = 300
+FIRESTORE_MAX_LINES = 500
+
 
 class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
     """Repo-scoped memory."""
@@ -33,6 +42,8 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
         self.released_path = self.root / "released.json"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
         self.codebase_spec_commit_path = self.root / "codebase_spec_commit.json"
+        self._log_buffers: dict[str, list[str]] = {}
+        self._log_buffer_meta: dict[str, dict[str, float]] = {}
         for category in CATEGORIES:
             (self.memory_root / category).mkdir(parents=True, exist_ok=True)
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -55,44 +66,50 @@ class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
         path = self.log_root / f"{run_id}.log"
         self.log_root.mkdir(parents=True, exist_ok=True)
         timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+        line = f"[{timestamp}] {content}"
         with path.open("a") as f:
-            f.write(f"[{timestamp}] {content}\n")
-        self._log_to_firestore(run_id, timestamp, content)
+            f.write(line + "\n")
+        self._buffer_log_line(run_id, line)
         return path
 
-    def _log_to_firestore(self, run_id: str, timestamp: str, content: str) -> None:
-        """Per-run logs were the one data type with no durable copy anywhere — .agentra/logs/ is gitignored (verbose, not audit-trail material) and REPOS_ROOT is VM-local-only, so a run's log was permanently gone the moment its VM rebuilt."""
+    def _buffer_log_line(self, run_id: str, line: str) -> None:
+        """Appends to the run's in-memory buffer and triggers a periodic Firestore safety flush at a bounded cadence (default: every 200 lines or 5 minutes, whichever comes first) instead of on every call."""
+        self._log_buffers.setdefault(run_id, []).append(line)
+        meta = self._log_buffer_meta.setdefault(
+            run_id, {"lines_since_flush": 0, "last_flush": time.monotonic()}
+        )
+        meta["lines_since_flush"] += 1
+        due_by_lines = meta["lines_since_flush"] >= FIRESTORE_FLUSH_MAX_LINES
+        due_by_time = (time.monotonic() - meta["last_flush"]) >= FIRESTORE_FLUSH_INTERVAL_SECONDS
+        if due_by_lines or due_by_time:
+            self._flush_run_log_to_firestore(run_id)
+
+    def finalize_run_log(self, run_id: str) -> None:
+        """Best-effort final Firestore durability flush for `run_id`, called once a run reaches a terminal state (completed, failed, or waiting_for_human)."""
+        self._flush_run_log_to_firestore(run_id)
+        self._log_buffers.pop(run_id, None)
+        self._log_buffer_meta.pop(run_id, None)
+
+    def _flush_run_log_to_firestore(self, run_id: str) -> None:
+        """Per-run logs were the one data type with no durable copy anywhere — .agentra/logs/ is gitignored (verbose, not audit-trail material) and REPOS_ROOT is VM-local-only, so a run's log was permanently gone the moment its VM rebuilt. Writes the buffered lines as a single full-document overwrite (no per-line read-modify-write)."""
+        meta = self._log_buffer_meta.get(run_id)
         try:
+            lines = self._log_buffers.get(run_id) or []
+            if not lines:
+                return
             from agentra import registry
-            from google.cloud import firestore as gcf
 
             db = registry.firestore_client()
             if db is None:
                 return
-            new_line = f"[{timestamp}] {content}"
-            # Check document size before writing to avoid exceeding Firestore's
-            try:
-                doc_ref = db.collection("run_logs").document(run_id)
-                current = doc_ref.get()
-                if current.exists:
-                    lines = current.get("lines") or []
-                    # Rough estimate: assume avg line ~100 bytes; if total lines
-                    if len(lines) > 500:
-                        lines = lines[-500:]
-                    lines.append(new_line)
-                    doc_ref.set({"lines": lines}, merge=True)
-                else:
-                    doc_ref.set({"lines": [new_line]}, merge=True)
-            except Exception as e:
-                # Fall back to ArrayUnion if size check fails
-                try:
-                    db.collection("run_logs").document(run_id).set(
-                        {"lines": gcf.ArrayUnion([new_line])}, merge=True
-                    )
-                except Exception:
-                    logger.warning("log: failed to mirror run %s log line to Firestore", run_id, exc_info=True)
+            tail = lines[-FIRESTORE_MAX_LINES:]
+            db.collection("run_logs").document(run_id).set({"lines": tail})
         except Exception:
-            logger.warning("log: failed to mirror run %s log line to Firestore", run_id, exc_info=True)
+            logger.warning("log: failed to flush run %s log to Firestore", run_id, exc_info=True)
+        finally:
+            if meta is not None:
+                meta["lines_since_flush"] = 0
+                meta["last_flush"] = time.monotonic()
 
     def record_safety_denial(self, run_id: str, tool_name: str, pattern: str, detail: str) -> Path:
         """Durable audit trail for agents/safety.py's guarded_pre_tool_use: every blocked tool call gets a '[safety]'-tagged line in the run's log."""
