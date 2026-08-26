@@ -120,14 +120,55 @@ def commit_and_push(repo: Path, branch: str, message: str, paths: list[str] | No
     return True
 
 
+_NON_FAST_FORWARD_MARKERS = ("non-fast-forward", "fetch first", "[rejected]", "updates were rejected")
+
+
+def _looks_like_non_fast_forward_rejection(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _NON_FAST_FORWARD_MARKERS)
+
+
 def push_branch(repo: Path, branch: str) -> None:
-    """Push the local `branch` to origin."""
+    """Push the local `branch` to origin. If origin/`branch` has moved since this checkout last synced with it (a concurrent push elsewhere -- GitHub issue #88), pulls the new remote tip into the local branch and retries the push once, rather than immediately failing on the first non-fast-forward rejection."""
+    auth = _extra_auth_args(_origin_url(repo))
     try:
-        auth = _extra_auth_args(_origin_url(repo))
+        subprocess.run(
+            ["git", "-C", str(repo), *auth, "push", "origin", branch],
+            check=True, capture_output=True, text=True,
+        )
+        return
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        if not _looks_like_non_fast_forward_rejection(stderr):
+            raise GitOpError(f"push_branch({branch!r}) failed: {stderr}") from exc
+
+    # Merge (not rebase) the new remote tip into the local branch -- some
+    # callers (e.g. deployment.py's _merge_and_push) push a branch whose tip
+    # is itself a merge commit, and rebasing a merge commit onto a new base
+    # has surprising, history-reshaping semantics; a plain merge integrates
+    # cleanly regardless of what shape the local branch's history is.
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo), *auth, "fetch", "origin", f"+{branch}:refs/remotes/origin/{branch}"],
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "--no-edit", f"origin/{branch}"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True, text=True)
+        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        raise GitOpError(
+            f"push_branch({branch!r}): origin moved and merging its new tip in failed "
+            f"(likely a real conflict, not just a stale ref): {stderr}"
+        ) from exc
+
+    try:
         subprocess.run(
             ["git", "-C", str(repo), *auth, "push", "origin", branch],
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
-        raise GitOpError(f"push_branch({branch!r}) failed: {stderr}") from exc
+        raise GitOpError(f"push_branch({branch!r}) failed even after merging origin's new tip in: {stderr}") from exc

@@ -104,19 +104,54 @@ def test_push_branch_pushes_local_commit_to_origin(tmp_path):
     assert _git(origin, "rev-parse", "feature").stdout.strip() == sha
 
 
-def test_push_branch_raises_giterror_on_non_fast_forward_rejection(tmp_path):
+def test_push_branch_recovers_from_a_non_fast_forward_rejection_by_pulling_and_retrying(tmp_path):
+    """GitHub issue #88: a concurrent push from elsewhere making `work`'s
+    branch stale must not be a hard failure by itself -- push_branch should
+    pull the new remote tip in and retry once before giving up, so a run
+    isn't spuriously killed just because something else touched the branch
+    in between."""
     origin = _seed_origin(tmp_path)
     work = _clone(origin, tmp_path / "work")
     other = _clone(origin, tmp_path / "other")
 
     # Someone else pushes to main first, so `work`'s main is now stale.
-    _commit_file(other, "other.txt", "o\n", "other change")
+    other_sha = _commit_file(other, "other.txt", "o\n", "other change")
     _git(other, "push", "origin", "main")
 
-    _commit_file(work, "work.txt", "w\n", "conflicting local change")
+    work_sha = _commit_file(work, "work.txt", "w\n", "non-conflicting local change")
+
+    git_ops.push_branch(work, "main")
+
+    # Both the concurrent remote commit and this branch's own commit made it
+    # to origin -- neither was lost or silently dropped.
+    origin_tip = _git(origin, "rev-parse", "main").stdout.strip()
+    assert _git(origin, "rev-parse", "main").stdout.strip() == _head_sha(work)
+    ancestors = _git(work, "log", "--pretty=%H", origin_tip).stdout.split()
+    assert other_sha in ancestors
+    assert work_sha in ancestors
+
+
+def test_push_branch_raises_giterror_when_the_remote_change_actually_conflicts(tmp_path):
+    """A stale branch that pulls in the new remote tip only recovers
+    automatically when it's a clean merge -- a genuine content conflict must
+    still surface as a GitOpError with the working tree left clean, not be
+    silently papered over."""
+    origin = _seed_origin(tmp_path)
+    work = _clone(origin, tmp_path / "work")
+    other = _clone(origin, tmp_path / "other")
+
+    _commit_file(other, "README.md", "their change\n", "other change")
+    _git(other, "push", "origin", "main")
+
+    _commit_file(work, "README.md", "my conflicting change\n", "conflicting local change")
 
     with pytest.raises(git_ops.GitOpError):
         git_ops.push_branch(work, "main")
+
+    # Left clean, not mid-merge -- nothing was pushed.
+    status = _git(work, "status", "--porcelain").stdout
+    assert status.strip() == ""
+    assert _git(origin, "rev-parse", "main").stdout.strip() != _head_sha(work)
 
 
 # -- fetch_ref ------------------------------------------------------------------
@@ -270,14 +305,31 @@ def test_commit_and_push_only_considers_dirty_state_under_given_paths(tmp_path):
     assert changed is False
 
 
-def test_commit_and_push_raises_giterror_when_push_is_rejected(tmp_path):
+def test_commit_and_push_recovers_from_non_fast_forward_rejection_via_push_branchs_retry(tmp_path):
     origin = _seed_origin(tmp_path)
     work = _clone(origin, tmp_path / "work")
     other = _clone(origin, tmp_path / "other")
-    _commit_file(other, "o.txt", "o\n", "other change")
+    other_sha = _commit_file(other, "o.txt", "o\n", "other change")
     _git(other, "push", "origin", "main")
 
     (work / "README.md").write_text("dirty\n")
+
+    changed = git_ops.commit_and_push(work, "main", "will still push after a pull-retry", ["README.md"])
+
+    assert changed is True
+    origin_tip = _git(origin, "rev-parse", "main").stdout.strip()
+    assert origin_tip == _head_sha(work)
+    assert other_sha in _git(work, "log", "--pretty=%H", origin_tip).stdout.split()
+
+
+def test_commit_and_push_raises_giterror_when_push_is_rejected_by_a_real_conflict(tmp_path):
+    origin = _seed_origin(tmp_path)
+    work = _clone(origin, tmp_path / "work")
+    other = _clone(origin, tmp_path / "other")
+    _commit_file(other, "README.md", "their change\n", "other change")
+    _git(other, "push", "origin", "main")
+
+    (work / "README.md").write_text("my conflicting change\n")
 
     with pytest.raises(git_ops.GitOpError):
         git_ops.commit_and_push(work, "main", "will fail to push", ["README.md"])
