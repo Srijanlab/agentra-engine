@@ -47,7 +47,7 @@ def test_note_still_reports_the_unprefixed_action_to_the_registry(tmp_path, monk
     action text/resolved agent name, unaffected by this."""
     captured = {}
 
-    def fake_record_agent_step(app_name, run_id, agent, ok, cost_usd, turns, action):
+    def fake_record_agent_step(app_name, run_id, agent, ok, cost_usd, turns, action, **kwargs):
         captured.update(app_name=app_name, run_id=run_id, agent=agent, action=action)
 
     monkeypatch.setattr(registry, "record_agent_step", fake_record_agent_step)
