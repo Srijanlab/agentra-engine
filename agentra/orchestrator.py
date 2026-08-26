@@ -53,6 +53,21 @@ async def run_cycle(
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = uuid.uuid4().hex[:8]
+    try:
+        return await _run_cycle_body(repo, mem, run_id, objective, feature, analytics_summary, skip_deploy)
+    finally:
+        mem.finalize_run_log(run_id)
+
+
+async def _run_cycle_body(
+    repo: Path,
+    mem: Memory,
+    run_id: str,
+    objective: str,
+    feature: str | None,
+    analytics_summary: str,
+    skip_deploy: bool,
+) -> "CycleReport":
     with run_log_scope(lambda line: mem.log(run_id, line)):
         mem.log(run_id, f"cycle start | objective={objective!r} feature={feature!r}")
         env = _load_env(repo, mem, run_id)
@@ -197,6 +212,13 @@ async def run_promote(repo: Path, run_id: str | None = None) -> dict:
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
+    try:
+        return await _run_promote_body(repo, mem, run_id)
+    finally:
+        mem.finalize_run_log(run_id)
+
+
+async def _run_promote_body(repo: Path, mem: Memory, run_id: str) -> dict:
     with run_log_scope(lambda line: mem.log(run_id, line)):
         env = _load_env(repo, mem, run_id)
         pending = mem.pending_promotion_features()
@@ -241,6 +263,15 @@ async def run_prod_debug_cycle(
     repo = repo.resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
+    try:
+        return await _run_prod_debug_cycle_body(repo, mem, run_id, objective, symptom)
+    finally:
+        mem.finalize_run_log(run_id)
+
+
+async def _run_prod_debug_cycle_body(
+    repo: Path, mem: Memory, run_id: str, objective: str, symptom: str | None
+) -> ProdDebugReport:
     with run_log_scope(lambda line: mem.log(run_id, line)):
         mem.log(run_id, f"prod-debug start | symptom={symptom!r}")
         env = _load_env(repo, mem, run_id)
