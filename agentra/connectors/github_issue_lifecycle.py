@@ -252,10 +252,12 @@ def mark_shipped(repo_url: str, issue_number: int, comment: str | None = None, b
 
 
 def mark_code_complete(repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None) -> None:
-    """First stage of the shipping pipeline: coding is done and pushed to its remote feature branch, not yet merged anywhere. Leaves the issue OPEN."""
+    """First stage of the shipping pipeline: coding is done and pushed to its remote feature branch, not yet merged anywhere. Leaves the issue OPEN. Clears status:in-progress -- add_labels alone is additive and would otherwise leave both labels on the issue simultaneously (confirmed live on issue #78 itself)."""
     import httpx
-    from agentra.connectors.github_issues import _headers, _owner_repo_or_raise
+    from agentra.connectors.github_issues import _headers, _owner_repo_or_raise, remove_label
     from agentra.connectors.github_app import GITHUB_API
+
+    remove_label(repo_url, issue_number, "status:in-progress")
 
     owner_repo = _owner_repo_or_raise(repo_url)
     headers = _headers(repo_url)

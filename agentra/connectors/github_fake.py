@@ -315,6 +315,7 @@ class FakeGitHubBackend:
             issue = self.issues[repo_url][issue_number]
             issue["body"] = (issue.get("body") or "").rstrip() + "\n\n" + body_suffix
             self._save()
+        self.remove_label(repo_url, issue_number, "status:in-progress")
         self.add_labels(repo_url, issue_number, ["status:code_complete"])
 
     def mark_shipped_to_preprod(self, repo_url: str, issue_number: int, comment: str | None = None) -> None:

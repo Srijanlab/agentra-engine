@@ -1,6 +1,6 @@
 """GitHub issue #78: agents/brain/tools.py must not let a feature whose
 push_branch() call failed (even after retries) reach deploy_pre_prod or be
-stamped record_shipped -- a deterministic, per-branch flag
+stamped record_code_complete -- a deterministic, per-branch flag
 (OrchestratorSession.push_failed_branches / check_push_failure), not
 LLM-orchestrator vigilance over result.text, is what enforces this.
 
@@ -67,7 +67,7 @@ def _no_slack(monkeypatch):
 
 def test_implement_feature_reports_failure_and_marks_the_branch_when_push_fails(tmp_path, monkeypatch):
     """impl.ok=False (set by implementation.run() itself once retries are
-    exhausted) must route this to failure handling, not record_shipped, and
+    exhausted) must route this to failure handling, not record_code_complete, and
     the branch must be recorded as push-failed for later gating."""
     _patch_registry(monkeypatch)
     session = _session(tmp_path)
@@ -81,7 +81,7 @@ def test_implement_feature_reports_failure_and_marks_the_branch_when_push_fails(
     monkeypatch.setattr(brain.requirements, "run", fake_requirements_run)
     monkeypatch.setattr(brain.implementation, "run", fake_implementation_run)
     shipped_calls = []
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: shipped_calls.append(a) or None)
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: shipped_calls.append(a) or None)
     failure_calls = []
     monkeypatch.setattr(session.mem, "record_failure", lambda *a, **k: failure_calls.append(a))
 
@@ -96,10 +96,10 @@ def test_implement_feature_reports_failure_and_marks_the_branch_when_push_fails(
     assert session.tool_failure_counts.get("implement_feature", 0) == 1
 
 
-def test_implement_feature_refuses_record_shipped_even_if_ok_is_somehow_true(tmp_path, monkeypatch):
+def test_implement_feature_refuses_record_code_complete_even_if_ok_is_somehow_true(tmp_path, monkeypatch):
     """Defense in depth: even if impl.ok ends up True for a result that still
     reports push_failed=True, the dedicated per-branch flag (not impl.ok
-    alone) must block record_shipped."""
+    alone) must block record_code_complete."""
     _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
@@ -112,7 +112,7 @@ def test_implement_feature_refuses_record_shipped_even_if_ok_is_somehow_true(tmp
     monkeypatch.setattr(brain.requirements, "run", fake_requirements_run)
     monkeypatch.setattr(brain.implementation, "run", fake_implementation_run)
     shipped_calls = []
-    monkeypatch.setattr(session.mem, "record_shipped", lambda *a, **k: shipped_calls.append(a) or None)
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: shipped_calls.append(a) or None)
 
     result = asyncio.run(_tool(session, "implement_feature").handler({"feature_brief": "Add login", "resolves_origin": "new"}))
 

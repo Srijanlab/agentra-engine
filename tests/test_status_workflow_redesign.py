@@ -105,7 +105,7 @@ def test_implement_feature_does_not_mark_code_complete_when_push_fails(tmp_path,
     _patch_registry(monkeypatch)
 
     async def fake_impl_run(*a, **k):
-        return AgentResult(ok=True, text="implemented but push failed", json_data={"feature": "X"}, cost_usd=0.01, turns=1, pushed=False)
+        return AgentResult(ok=True, text="implemented but push failed", json_data={"feature": "X"}, cost_usd=0.01, turns=1, push_failed=True)
 
     monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
     record_calls = []
@@ -127,7 +127,7 @@ def test_implement_feature_marks_code_complete_when_push_succeeds(tmp_path, monk
     _patch_registry(monkeypatch)
 
     async def fake_impl_run(*a, **k):
-        return AgentResult(ok=True, text="done", json_data={"feature": "X"}, cost_usd=0.01, turns=1, pushed=True)
+        return AgentResult(ok=True, text="done", json_data={"feature": "X"}, cost_usd=0.01, turns=1)
 
     monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
     monkeypatch.setattr(mem, "record_code_complete", lambda *a, **k: {"issue_number": 7, "board_issue_number": 7})
