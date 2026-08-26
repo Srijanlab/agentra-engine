@@ -155,12 +155,24 @@ def reconcile_waiting_for_human() -> list[dict]:
 
 
 def record_agent_step(
-    app: str, run_id: str, agent: str, ok: bool | None, cost_usd: float, turns: int | None, summary: str
+    app: str, run_id: str, agent: str, ok: bool | None, cost_usd: float, turns: int | None, summary: str,
+    *,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
 ) -> None:
+    """Token fields (GitHub issue #74) are optional/keyword-only so existing
+    callers that only know cost_usd/turns (e.g. orchestrator.py's fixed
+    pipeline) don't need updating -- None means "not reported for this
+    step", not "zero tokens used"."""
     record = {
         "app": app, "run_id": run_id, "agent": agent, "ok": ok,
         "cost_usd": cost_usd, "turns": turns, "summary": summary,
         "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
     }
     if core._db is not None:
         core._db.collection("agent_steps").add(record)

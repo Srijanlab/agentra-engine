@@ -15,7 +15,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query
 
 from agentra.agents import architecture_review, codebase, codegraph, deployment, discovery, feedback, human_answer_judge, implementation, requirements, testing
-from agentra.agents.base import log_claude_message, run_log_scope, single_prompt_stream
+from agentra.agents.base import _sum_model_usage, log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.brain.tools import _file_incidental_findings, _format_spec, _tools_for, MAX_SELF_HEAL_ATTEMPTS
 from agentra.agents.brain.prompts import SYSTEM_PROMPT
 from agentra.agents.safety import make_hooks
@@ -131,7 +131,9 @@ class OrchestratorSession:
         registry.record_run(self.run_id, status="waiting_for_human", human_input=self.human_input)
 
     def note(
-        self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None
+        self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None,
+        input_tokens: int | None = None, output_tokens: int | None = None,
+        cache_read_input_tokens: int | None = None, cache_creation_input_tokens: int | None = None,
     ) -> None:
         self.actions.append(action)
         # "[Orchestrator]" prefix, matching base.py's log_claude_message convention
@@ -140,7 +142,11 @@ class OrchestratorSession:
         from agentra import registry
 
         resolved_agent = agent or action.split(":", 1)[0].split("[", 1)[0].strip()
-        registry.record_agent_step(self.app_name, self.run_id, resolved_agent, ok, cost_usd, turns, action)
+        registry.record_agent_step(
+            self.app_name, self.run_id, resolved_agent, ok, cost_usd, turns, action,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cache_read_input_tokens=cache_read_input_tokens, cache_creation_input_tokens=cache_creation_input_tokens,
+        )
 
     def check_hard_stop(self) -> dict | None:
         # No per-cycle cost cap here: the previous $3.00 hard stop never actually
@@ -364,8 +370,23 @@ async def _run_autonomous_cycle_body(
                     log_claude_message(message, lambda line: mem.log(run_id, f"[Orchestrator] {line}"))
                     if isinstance(message, ResultMessage):
                         final_text = message.result or ""
-                        session.cost_usd += message.total_cost_usd or 0.0
+                        turn_cost = message.total_cost_usd or 0.0
+                        session.cost_usd += turn_cost
                         session.orchestrator_result_received = True
+                        # GitHub issue #74: this cost is real spend by the
+                        # orchestrator's own reasoning, not a sub-agent's --
+                        # record it as its own agent_steps entry (agent="cycle")
+                        # instead of only folding it into the invisible
+                        # session.cost_usd run aggregate, so the dashboard's
+                        # per-agent cost breakdown stops showing $0.00 for
+                        # "Orchestrator" despite real spend happening here.
+                        session.note(
+                            f"orchestrator reasoning: ok={not message.is_error} "
+                            f"turns={message.num_turns} cost=${turn_cost:.4f}",
+                            agent="cycle", ok=not message.is_error,
+                            cost_usd=turn_cost, turns=message.num_turns,
+                            **_sum_model_usage(message.model_usage),
+                        )
         except Exception as exc:
             # GitHub issue #42: this is the exact spot a prior cycle crashed
             if is_login_required_failure(str(exc)):

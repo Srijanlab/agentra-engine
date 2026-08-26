@@ -177,6 +177,22 @@ def log_claude_message(message: Any, logger: RunLogger | None = None) -> None:
         sink(line)
 
 
+def _sum_model_usage(model_usage: dict[str, Any] | None) -> dict[str, int]:
+    """Collapses ResultMessage.model_usage's per-model breakdown (usually one
+    model, but a turn can span more than one) into the 4 token counters
+    AgentResult exposes (GitHub issue #74)."""
+    totals = {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+    }
+    for usage in (model_usage or {}).values():
+        totals["input_tokens"] += usage.get("inputTokens") or 0
+        totals["output_tokens"] += usage.get("outputTokens") or 0
+        totals["cache_read_input_tokens"] += usage.get("cacheReadInputTokens") or 0
+        totals["cache_creation_input_tokens"] += usage.get("cacheCreationInputTokens") or 0
+    return totals
+
+
 async def single_prompt_stream(prompt: str) -> AsyncIterator[dict[str, Any]]:
     """can_use_tool requires streaming input; wrap a plain string prompt as one."""
     yield {
@@ -202,6 +218,14 @@ class AgentResult:
     # never succeeded even after retries -- the commit is NOT confirmed durable
     # on GitHub (see agentra/agents/implementation.py and GitHub issue #78).
     push_failed: bool = False
+    # Token usage for this turn, summed across every model used (see
+    # _sum_model_usage) -- 0 for any AgentResult built without a real
+    # ResultMessage (e.g. an early-return error path before the SDK call
+    # even happened). GitHub issue #74.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
 
 
 def extract_json_block(text: str) -> dict[str, Any] | None:
@@ -318,6 +342,7 @@ async def run_agent(
         cost_usd=result_msg.total_cost_usd or 0.0,
         turns=result_msg.num_turns,
         session_id=result_msg.session_id,
+        **_sum_model_usage(result_msg.model_usage),
     )
     return res
 
@@ -382,4 +407,5 @@ async def stream_chat_turn(
         "cost_usd": result_msg.total_cost_usd or 0.0,
         "turns": result_msg.num_turns,
         "session_id": result_msg.session_id,
+        **_sum_model_usage(result_msg.model_usage),
     }
