@@ -376,7 +376,7 @@ def test_implement_feature_resume_branch_becomes_the_session_feature_branch(tmp_
     session = _session(tmp_path)
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 
@@ -404,7 +404,7 @@ def test_implement_feature_resume_branch_ignored_on_a_later_call_this_run(tmp_pa
     session = _session(tmp_path, feature_branch="dev/already-set")
     calls = []
 
-    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         calls.append((feature_branch, resume))
         return _fake_impl_result()
 

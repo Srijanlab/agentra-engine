@@ -88,7 +88,7 @@ def test_implement_feature_generates_and_persists_a_new_spec(tmp_path, monkeypat
 
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
@@ -125,7 +125,7 @@ def test_implement_feature_reuses_an_existing_spec_without_calling_requirements_
     )
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 
@@ -161,7 +161,7 @@ def test_implement_feature_proceeds_without_a_spec_if_requirements_agent_fails(t
 
     impl_calls = []
 
-    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None):
+    async def fake_implementation_run(repo, objective, brief, cb_summary, env, feature_branch, resume=False, spec="", session_id=None, mem=None, run_id=None):
         impl_calls.append(spec)
         return _fake_impl_result()
 

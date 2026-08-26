@@ -110,7 +110,7 @@ async def run_cycle(
 
         feature_branch = feature_branch_name(env, run_id, feature)
         mem.log(run_id, f"implementation agent: starting on dedicated branch {feature_branch!r}")
-        impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch, session_id=session_id)
+        impl = await implementation.run(repo, objective, feature_brief, cb.text, env, feature_branch, session_id=session_id, mem=mem, run_id=run_id)
         session_id = impl.session_id or session_id
         mem.log(run_id, f"implementation agent: ok={impl.ok} turns={impl.turns} cost=${impl.cost_usd:.4f}")
         if not impl.ok:
@@ -274,7 +274,7 @@ async def run_prod_debug_cycle(
         cb = await codebase.run_cached(repo, mem)
         registry.record_agent_step(repo.name, run_id, "understand_codebase", cb.ok, cb.cost_usd, cb.turns, "understand_codebase: ok=%s" % cb.ok)
         feature_branch = feature_branch_name(env, run_id, f"hotfix-{severity}")
-        impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch, session_id=session_id)
+        impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch, session_id=session_id, mem=mem, run_id=run_id)
         session_id = impl.session_id or session_id
         mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
         registry.record_agent_step(

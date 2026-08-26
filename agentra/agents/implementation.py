@@ -1,11 +1,20 @@
 """Implementation Agent."""
 
 import subprocess
+import time
 from pathlib import Path
+from typing import Callable
 
 from agentra.agents import codegraph, git_ops
 from agentra.agents.base import AgentResult, run_agent
 from agentra.environments import EnvironmentConfig
+from agentra.memory import Memory
+
+# GitHub issue #78: transient network/token issues pushing the feature branch are
+# known in this environment (see issue #77's findings) -- retry with backoff before
+# giving up, rather than failing (or silently "succeeding") on the first blip.
+PUSH_RETRY_ATTEMPTS = 3
+PUSH_RETRY_BACKOFF_SECONDS = 5.0
 
 SYSTEM_PROMPT = """You are the Implementation Agent in an autonomous product \
 engineering system. You are given a codebase summary and a specific feature \
@@ -101,6 +110,29 @@ def _checkout_feature_branch(repo: Path, feature_branch: str, pre_prod_branch: s
     return False
 
 
+def _push_with_retry(
+    repo: Path,
+    feature_branch: str,
+    *,
+    attempts: int = PUSH_RETRY_ATTEMPTS,
+    sleep: Callable[[float], None] | None = None,
+) -> git_ops.GitOpError | None:
+    """Push `feature_branch`, retrying with backoff on GitOpError. `sleep` defaults to
+    time.sleep looked up dynamically (not bound as a default value) so tests can mock
+    implementation.time.sleep and stay fast, or pass their own callable directly. Returns
+    the last GitOpError if every attempt failed, else None."""
+    last_exc: git_ops.GitOpError | None = None
+    for attempt in range(attempts):
+        try:
+            git_ops.push_branch(repo, feature_branch)
+            return None
+        except git_ops.GitOpError as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                (sleep or time.sleep)(PUSH_RETRY_BACKOFF_SECONDS * (attempt + 1))
+    return last_exc
+
+
 def _commit_if_dirty(repo: Path, feature: str) -> bool:
     """Safety net for the agent finishing its turn without committing (observed in
     practice, see module docstring). Returns True if a commit was made here."""
@@ -128,8 +160,13 @@ async def run(
     resume: bool = False,
     spec: str = "",
     session_id: str | None = None,
+    mem: Memory | None = None,
+    run_id: str | None = None,
 ) -> AgentResult:
-    """resume (bool) continues an interrupted call's git branch (see..."""
+    """resume (bool) continues an interrupted call's git branch (see...
+
+    mem/run_id (both optional, from the calling OrchestratorSession) are used only to
+    log a durably-visible failure if the branch still can't be pushed after retries."""
     try:
         resumed = _checkout_feature_branch(repo, feature_branch, env.pre_prod_branch, resume=resume)
     except git_ops.GitOpError as exc:
@@ -199,16 +236,23 @@ Implement this feature now, following the loop in your system prompt."""
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
         result.text += f"\n\n[agentra] Safety-net commit failed: {stderr}"
 
-    # Push the feature branch now, regardless of what happens next this cycle.
-    # result.pushed gates status:code_complete (GitHub issue #75/#78) -- code
-    # that only exists in a local commit must not be marked code-complete, since
-    # this repo checkout is ephemeral (destroyed on the next container swap).
-    try:
-        git_ops.push_branch(repo, feature_branch)
-        result.pushed = True
-    except git_ops.GitOpError as exc:
-        result.pushed = False
-        result.text += f"\n\n[agentra] Could not push feature branch {feature_branch!r} (work is committed locally only, not recoverable after a redeploy): {exc}"
+    # Push the feature branch now, regardless of what happens next this cycle -- retried
+    # with backoff since transient network/token issues are known here (issue #77), but
+    # if it still fails the commit is NOT confirmed durable on GitHub and this run must
+    # say so (issue #78: this used to be swallowed into result.text with ok left True,
+    # which let the pipeline proceed to deploy/record_code_complete as if nothing was
+    # wrong, permanently losing issue #71's commit).
+    push_error = _push_with_retry(repo, feature_branch)
+    if push_error is not None:
+        result.ok = False
+        result.push_failed = True
+        result.text += (
+            f"\n\n[agentra] Could not push feature branch {feature_branch!r} to GitHub after "
+            f"{PUSH_RETRY_ATTEMPTS} attempts (work is committed locally only, NOT confirmed "
+            f"durable on GitHub): {push_error}"
+        )
+        if mem is not None:
+            mem.record_failure(run_id or feature_branch, "implementation-push", str(push_error))
 
     # End-of-run graph refresh: whatever code changed above (commit_if_dirty's
     codegraph.refresh(repo)

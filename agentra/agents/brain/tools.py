@@ -530,6 +530,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             impl = await implementation.run(
                 session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch,
                 resume=resuming, spec=spec_text, session_id=session.session_id,
+                mem=session.mem, run_id=session.run_id,
             )
         except Exception as exc:
             session.record_failure("implement_feature")
@@ -538,6 +539,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := _check_auth_failure(session, "implement_feature", impl):
             return stop
         session.cost_usd += impl.cost_usd
+        if impl.push_failed and session.feature_branch:
+            # GitHub issue #78: the commit is NOT confirmed durable on GitHub -- record a
+            # deterministic, per-branch hard-stop flag for THIS feature branch so deploy_pre_prod
+            # and record_code_complete below refuse to proceed for it, regardless of whether the
+            # orchestrator LLM notices impl.ok=False / the error text in impl.text.
+            session.mark_push_failed(session.feature_branch)
         # Disabled: chaining session.session_id across every sub-agent call in a cycle made
         # later calls resume the whole prior transcript, compounding context (confirmed live:
         # one Implementation Agent turn read 222K cached input tokens). Each call now starts
@@ -612,21 +619,20 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.mem.record_failure_on_issue(tracking_issue, session.run_id, "implementation", impl.text)
             else:
                 session.mem.record_failure(session.run_id, "implementation", impl.text)
+            # A push failure surviving retries is deliberately counted the same as any other
+            # implementation content failure toward MAX_CONSECUTIVE_TOOL_FAILURES (GitHub issue
+            # #78): it's just as much a sign of a real, non-prompt-fixable problem (bad
+            # credentials, repo access revoked, persistent network outage) as repeated bad code,
+            # and retrying identical briefs against it would be equally pointless.
             session.record_failure("implement_feature")
             return {"content": [{"type": "text", "text": f"Implementation failed: {impl.text[:2000]}"}], "is_error": True}
-        if impl.pushed is False:
-            # Code exists only as a local commit in this ephemeral container -- must not be
-            # marked code_complete (GitHub issue #75/#78: that label means "pushed", and an
-            # unpushed commit is one container swap away from being permanently lost).
-            if tracking_issue is not None:
-                session.mem.record_failure_on_issue(tracking_issue, session.run_id, "implementation", impl.text)
-            else:
-                session.mem.record_failure(session.run_id, "implementation", impl.text)
-            session.record_failure("implement_feature")
-            return {
-                "content": [{"type": "text", "text": f"Implementation succeeded but could not push the feature branch -- not marking code-complete: {impl.text[-1000:]}"}],
-                "is_error": True,
-            }
+        # Defense in depth: even though impl.ok already gates this (implementation.run sets
+        # ok=False when the push fails after retries), check the dedicated per-branch flag
+        # directly too, so record_code_complete can never fire for a branch whose push failed
+        # regardless of how impl.ok ends up being computed later, or on a resumed branch whose
+        # push failure happened in an earlier call this session.
+        if stop := session.check_push_failure(session.feature_branch):
+            return stop
         session.record_success("implement_feature")
         code_complete = session.mem.record_code_complete(
             feature_name,
@@ -728,10 +734,14 @@ def _tools_for(session: OrchestratorSession) -> list:
                 session.feature_branch,
                 resume=True,
                 session_id=session.session_id,
+                mem=session.mem,
+                run_id=session.run_id,
             )
             if stop := _check_auth_failure(session, "run_local_tests", fix):
                 return stop
             session.cost_usd += fix.cost_usd
+            if fix.push_failed and session.feature_branch:
+                session.mark_push_failed(session.feature_branch)
             # session.session_id = fix.session_id or session.session_id  # see implement_feature
             session.note(
                 f"run_local_tests: self-heal attempt {attempts} ok={fix.ok}",
@@ -792,6 +802,9 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": "Refused: nothing to deploy -- call implement_feature first."}],
                 "is_error": True,
             }
+        if stop := session.check_push_failure(session.feature_branch):
+            session.note("deploy_pre_prod: refused, feature branch failed to push to GitHub", ok=False)
+            return stop
 
         from agentra.agents.git_ops import fetch_ref
 
