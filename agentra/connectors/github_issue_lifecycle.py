@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from agentra.connectors.github_issues import add_comment, add_labels, list_comments
+from agentra.connectors.github_issues import add_comment, add_labels, list_comments, list_open_issues
 
 
 _IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
@@ -45,6 +45,21 @@ def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
         match = _IN_PROGRESS_BRANCH_RE.search(comment.get("body") or "")
         if match:
             return match.group(1)
+    return None
+
+
+def find_tracking_issue_for_branch(repo_url: str, branch: str, agentra_label: str) -> int | None:
+    """The open issue (bug or feature) already tracking `branch` via its own In-Progress-Branch
+    marker, or None. GitHub issue #97 (and #85/#89 before it): record_code_complete's
+    more_parts_expected path created a brand-new parent tracking issue every time it was called
+    without an explicit resolves_id, even when the branch being committed was already tracked by
+    an existing issue -- confirmed live (issue #92's real work landed under a new #97 instead).
+    This is the structural check (branch identity, not fuzzy text similarity) that lets
+    record_code_complete reuse the real tracking issue instead. Bounded by the number of
+    currently-open agentra-managed issues, checked only on this comparatively rare path."""
+    for issue in list_open_issues(repo_url, labels=[agentra_label]):
+        if get_in_progress_branch(repo_url, issue["number"]) == branch:
+            return issue["number"]
     return None
 
 

@@ -418,6 +418,7 @@ from agentra.connectors.github_issue_lifecycle import (  # noqa: E402
     mark_shipped_to_preprod,
     mark_tested,
     escalate_existing_issue,
+    find_tracking_issue_for_branch,
     record_commit,
     record_human_answer,
     record_human_input_context,
@@ -457,4 +458,5 @@ __all__ = [
     "record_spec",
     "get_spec",
     "escalate_existing_issue",
+    "find_tracking_issue_for_branch",
 ]

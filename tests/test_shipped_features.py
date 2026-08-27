@@ -352,6 +352,67 @@ def test_record_code_complete_starts_a_multi_part_feature_with_a_fresh_open_pare
     assert result == {"issue_number": 21, "board_issue_number": 20}
 
 
+def test_record_code_complete_reuses_the_existing_tracking_issue_for_the_branch(tmp_path, monkeypatch):
+    """GitHub issue #97 (and #85/#89 before it): a resumed implement_feature call that doesn't
+    pass resolves_id back used to always create a brand-new parent tracking issue here, orphaning
+    the real one -- confirmed live, issue #92's actual fix landed under a new #97 instead of #92
+    itself. Once find_tracking_issue_for_branch finds the branch already tracked by an existing
+    issue, that issue must be reused as the parent instead."""
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues, "create_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reuse the existing tracking issue, not create a new one"))
+    )
+    monkeypatch.setattr(
+        github_issues, "find_tracking_issue_for_branch",
+        lambda repo_url, branch, agentra_label: 92 if branch == "dev/cbe6d88b-fix-networking" else None,
+    )
+    sub_issue_calls = {}
+    monkeypatch.setattr(
+        github_issues, "create_sub_issue",
+        lambda repo_url, parent, title, body, labels=None: sub_issue_calls.update(parent=parent) or {"number": 97, "title": title},
+    )
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+    monkeypatch.setattr(github_issues, "mark_code_complete", lambda repo_url, issue_number, **k: (_ for _ in ()).throw(AssertionError("parent not fully shipped yet")))
+
+    result = mem.record_code_complete(
+        "Fix #92: self-hosted production promotion race", run_id="run1",
+        more_parts_expected=True, branch="dev/cbe6d88b-fix-networking",
+    )
+
+    assert sub_issue_calls == {"parent": 92}
+    assert closed == [97]  # only the sub-issue -- #92 itself stays open, not orphaned
+    assert result == {"issue_number": 97, "board_issue_number": 92}
+
+
+def test_record_code_complete_creates_a_fresh_parent_when_the_branch_is_genuinely_untracked(tmp_path, monkeypatch):
+    """The flip side: a branch that find_tracking_issue_for_branch can't match to any existing
+    issue is genuinely new work -- must still create a fresh parent, not silently fail or block."""
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    created_issues = []
+    monkeypatch.setattr(
+        github_issues, "create_issue",
+        lambda repo_url, title, body, labels=None: created_issues.append(title) or {"number": 30, "title": title},
+    )
+    monkeypatch.setattr(github_issues, "find_tracking_issue_for_branch", lambda repo_url, branch, agentra_label: None)
+    monkeypatch.setattr(github_issues, "create_sub_issue", lambda repo_url, parent, title, body, labels=None: {"number": 31, "title": title})
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+
+    result = mem.record_code_complete(
+        "Brand new multi-part feature", run_id="run1",
+        more_parts_expected=True, branch="dev/genuinely-new-branch",
+    )
+
+    assert created_issues == ["Brand new multi-part feature"]
+    assert closed == [31]
+    assert result == {"issue_number": 31, "board_issue_number": 30}
+
+
 def test_record_code_complete_starts_a_multi_part_feature_using_the_feature_queue_issue_as_parent(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)

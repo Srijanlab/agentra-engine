@@ -141,6 +141,12 @@ class FakeGitHubBackend:
                 return match.group(1)
         return None
 
+    def find_tracking_issue_for_branch(self, repo_url: str, branch: str, agentra_label: str) -> int | None:
+        for issue in self.list_open_issues(repo_url, labels=[agentra_label]):
+            if self.get_in_progress_branch(repo_url, issue["number"]) == branch:
+                return issue["number"]
+        return None
+
     def get_in_progress_run_id(self, repo_url: str, issue_number: int) -> str | None:
         comments = self.issues[repo_url].get(issue_number, {}).get("comments", [])
         for comment in reversed(comments):
@@ -370,6 +376,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_comments", backend.list_comments),
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),
         (github_issues, "get_in_progress_branch", backend.get_in_progress_branch),
+        (github_issues, "find_tracking_issue_for_branch", backend.find_tracking_issue_for_branch),
         (github_issues, "get_in_progress_run_id", backend.get_in_progress_run_id),
         (github_issues, "get_in_progress_session_id", backend.get_in_progress_session_id),
         (github_issues, "record_spec", backend.record_spec),

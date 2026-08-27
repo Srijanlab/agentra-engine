@@ -709,6 +709,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             more_parts_expected=more_parts_expected,
             session_id=session.session_id,
             known_bug_issue=resolves_id if resolves_origin == "known_bug" else None,
+            branch=session.feature_branch,
         )
         session.mem.append_documentation(
             f"Code complete: **{feature_name}**"
