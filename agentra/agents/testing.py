@@ -141,7 +141,12 @@ Run the full local test/QA pass now, following your system prompt."""
         resume=session_id,
     )
     if mem is not None and result.ok and result.json_data:
-        # architecture/testing-notes.md: a live, agent-maintained snapshot
+        # architecture/local-test-summary.md: a live, agent-maintained snapshot --
+        # GitHub issue #84: this used to share architecture/testing-notes.md with
+        # the human-authored "Testing Notes" app setting (server/routes/apps.py),
+        # so every local-test pass silently clobbered whatever a human had written
+        # there. Machine-generated summary now gets its own key; testing-notes
+        # stays exclusively human-owned.
         data = result.json_data
         lines = [
             f"Lint: {data.get('lint_status', 'unknown')}",
@@ -149,7 +154,7 @@ Run the full local test/QA pass now, following your system prompt."""
         ]
         if data.get("notes"):
             lines.append(f"Notes: {data['notes']}")
-        mem.write("architecture", "testing-notes", "\n".join(lines))
+        mem.write("architecture", "local-test-summary", "\n".join(lines))
     return result
 
 

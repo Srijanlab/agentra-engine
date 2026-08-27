@@ -290,6 +290,11 @@ async def get_app(name: str) -> dict:
         "alarm_enabled": env_config.alarm_enabled,
         "documentation_notes": mem.read("architecture", "documentation"),
         "testing_notes": mem.read("architecture", "testing-notes"),
+        # GitHub issue #84: the Testing Agent's auto-generated local-test summary now
+        # lives under its own key (agents/testing.py::run_local), separate from the
+        # human-authored testing_notes above -- read-only here, agent-written only,
+        # same as codebase/design steering entries.
+        "local_test_summary": mem.read("architecture", "local-test-summary"),
     }
 
 
