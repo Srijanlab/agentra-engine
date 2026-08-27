@@ -78,6 +78,28 @@ def get_in_progress_run_id(repo_url: str, issue_number: int) -> str | None:
     return None
 
 
+def list_run_ids_for_issue(repo_url: str, issue_number: int) -> list[str]:
+    """Every distinct run_id that has ever worked this issue (one per In-Progress-Branch
+    marker with a Run-ID line), newest-first -- the 1:N history get_in_progress_run_id's
+    single most-recent value doesn't capture, since a single issue routinely gets resumed
+    across several separate runs (session limits, interrupted pushes, etc.)."""
+    comments = list_comments(repo_url, issue_number)
+    seen: set[str] = set()
+    run_ids: list[str] = []
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if not _IN_PROGRESS_BRANCH_RE.search(body):
+            continue
+        match = _IN_PROGRESS_RUN_ID_RE.search(body)
+        if not match:
+            continue
+        run_id = match.group(1)
+        if run_id not in seen:
+            seen.add(run_id)
+            run_ids.append(run_id)
+    return run_ids
+
+
 def get_in_progress_session_id(repo_url: str, issue_number: int) -> str | None:
     """The Claude session_id alongside the most recent in-progress-branch marker, or None."""
     comments = list_comments(repo_url, issue_number)

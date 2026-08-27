@@ -85,6 +85,29 @@ def test_backlog_board_buckets_not_started_in_progress_and_code_complete(tmp_pat
     code_complete_titles = {i["diagnosis"] for i in body["code_complete"]}
     assert "A code-complete bug" in code_complete_titles
 
+    not_started_bug = next(b for b in body["not_started"]["bugs"] if b["diagnosis"] == "A fresh bug")
+    assert not_started_bug["run_ids"] == []
+
+    in_progress_item = next(i for i in body["in_progress"]["single_part"] if i["diagnosis"] == "An in-progress bug")
+    assert in_progress_item["run_ids"] == []  # record_in_progress_branch called with no run_id above
+
+
+def test_backlog_board_lists_every_run_that_has_worked_an_issue_newest_first(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    repo_url = Memory(repo)._repo_url()
+    mem = Memory(repo)
+
+    issue = github_issues.create_issue(repo_url, "Resumed across runs", "body", labels=["bug", "agentra"])
+    mem.record_in_progress_branch(issue["number"], "dev/resumed-branch", run_id="run-1")
+    mem.record_in_progress_branch(issue["number"], "dev/resumed-branch", run_id="run-2")
+
+    client = TestClient(server.app)
+    response = client.get("/apps/myapp/backlog-board")
+    assert response.status_code == 200
+    item = next(i for i in response.json()["in_progress"]["single_part"] if i["diagnosis"] == "Resumed across runs")
+    assert item["run_ids"] == ["run-2", "run-1"]
+
 
 def test_ready_to_review_attaches_test_report_when_one_exists(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
@@ -117,4 +140,6 @@ def test_ready_to_review_attaches_test_report_when_one_exists(tmp_path, monkeypa
 
     assert items["A tested feature"]["test_report"]["status"] == "pass"
     assert items["A tested feature"]["test_report"]["test_cases"][0]["criterion"] == "x"
+    assert items["A tested feature"]["run_ids"] == ["run-abc"]
     assert items["Tested with no report"]["test_report"] is None
+    assert items["Tested with no report"]["run_ids"] == ["run-missing"]
