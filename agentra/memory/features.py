@@ -65,6 +65,10 @@ class MemoryFeaturesMixin:
         """Bugs/features stamped status:shipped (merged to pre-prod, not yet live-verified) -- excludes status:tested, which is a later stage."""
         return self._items_at_stage(_STATUS_SHIPPED_LABEL)
 
+    def tested_items(self) -> list[dict]:
+        """Bugs/features stamped status:tested -- live-verified against pre-prod, one Promote away from production. The dashboard's "Ready to Review" tab."""
+        return self._items_at_stage(_STATUS_TESTED_LABEL)
+
     def feature_queue(self) -> list[dict]:
         """Open 'feature'-labeled issues not yet started on -- excludes ones
         already stamped with any forward-progress status label (code_complete
