@@ -77,7 +77,9 @@ async def dashboard() -> FileResponse | dict:
 
 
 @app.get("/health")
+@app.get("/healthz")
 async def health() -> dict:
+    """GitHub #113: /healthz is a pure alias so probes using either convention succeed."""
     return {"status": "ok", "apps_registered": len(registry.list_apps())}
 
 
