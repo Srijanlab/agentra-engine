@@ -10,6 +10,7 @@ from agentra.registry import core
 from agentra.registry.core import (
     firestore_client,
     get_app_repo,
+    get_slack_channel,
     is_paused,
     list_apps,
     pause,
@@ -17,6 +18,7 @@ from agentra.registry.core import (
     register_app,
     remove_app,
     resume,
+    set_slack_channel,
 )
 from agentra.registry.inbox import (
     DispatchSummary,
@@ -74,6 +76,7 @@ __all__ = [
     "firestore_client",
     "get_app_repo",
     "get_run",
+    "get_slack_channel",
     "is_paused",
     "last_run_at",
     "list_agent_steps",
@@ -91,6 +94,7 @@ __all__ = [
     "register_app",
     "remove_app",
     "resume",
+    "set_slack_channel",
     "dispatch_once",
     "submit_request",
 ]

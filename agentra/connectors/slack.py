@@ -16,13 +16,16 @@ _CHANNEL_ENV = "SLACK_HUMAN_INPUT_CHANNEL"
 
 
 def is_configured() -> bool:
-    return bool(os.environ.get(_BOT_TOKEN_ENV)) and bool(os.environ.get(_CHANNEL_ENV))
+    """Bot token is the hard requirement -- a channel can come from a per-app override
+    (registry.get_slack_channel) instead of the global env var, so that alone isn't required."""
+    return bool(os.environ.get(_BOT_TOKEN_ENV))
 
 
-def _post_message(text: str) -> bool:
-    """Raw chat.postMessage call."""
+def _post_message(text: str, channel: str | None = None) -> bool:
+    """Raw chat.postMessage call. `channel` overrides the global SLACK_HUMAN_INPUT_CHANNEL env
+    var when given (a per-app channel, see registry.get_slack_channel)."""
     token = os.environ.get(_BOT_TOKEN_ENV)
-    channel = os.environ.get(_CHANNEL_ENV)
+    channel = channel or os.environ.get(_CHANNEL_ENV)
     if not token or not channel:
         return False
     try:
@@ -100,17 +103,20 @@ def notify_shipped(
     feature_title: str,
     issue_url: str | None = None,
     verification_result: str,
+    channel: str | None = None,
 ) -> bool:
-    """Posts a 'shipped to pre-prod' notification to the configured Slack channel, once pre-prod
-    delivery is actually confirmed (trivial merge success, or verify_pre_prod pass) -- never at
-    the earlier status:shipped GitHub label stamp. No-ops (returns False) when Slack isn't
-    configured, and never raises (mirrors notify_human_input_required's fail-open behavior)."""
+    """Posts a 'shipped to pre-prod' notification, once pre-prod delivery is actually confirmed
+    (trivial merge success, or verify_pre_prod pass) -- never at the earlier status:shipped
+    GitHub label stamp. `channel` is the app's own Slack channel (registry.get_slack_channel),
+    falling back to the global SLACK_HUMAN_INPUT_CHANNEL env var when unset. No-ops (returns
+    False) when Slack isn't configured or no channel resolves, and never raises (mirrors
+    notify_human_input_required's fail-open behavior)."""
     if not is_configured():
         return False
     text = _format_shipped_message(
         app=app, feature_title=feature_title, issue_url=issue_url, verification_result=verification_result,
     )
-    return _post_message(text)
+    return _post_message(text, channel=channel)
 
 
 def notify_human_input_required(
@@ -123,12 +129,15 @@ def notify_human_input_required(
     branch: str | None = None,
     session_id: str | None = None,
     escalated: bool = False,
+    channel: str | None = None,
 ) -> bool:
-    """Posts a HUMAN_INPUT_REQUIRED notification to the configured Slack channel."""
+    """Posts a HUMAN_INPUT_REQUIRED notification. `channel` is the app's own Slack channel
+    (registry.get_slack_channel), falling back to the global SLACK_HUMAN_INPUT_CHANNEL env var
+    when unset."""
     if not is_configured():
         return False
     text = _format_human_input_message(
         app=app, run_id=run_id, question=question, issue_url=issue_url, dashboard_url=dashboard_url,
         branch=branch, session_id=session_id, escalated=escalated,
     )
-    return _post_message(text)
+    return _post_message(text, channel=channel)

@@ -98,6 +98,26 @@ def remove_app(name: str) -> bool:
     return True
 
 
+def set_slack_channel(name: str, channel_id: str | None) -> None:
+    """Per-app Slack channel override for notify_shipped/notify_human_input_required, stored
+    directly on the app's registry entry (Firestore apps/{name}, or the local apps.json
+    fallback) -- distinct from EnvironmentConfig (GitHub Variables) and Memory (git-committed
+    notes), since this is registry-level routing config, not deploy or app-content config."""
+    if _db is not None:
+        _db.collection("apps").document(name).set({"slack_channel_id": channel_id}, merge=True)
+        return
+    apps = _local_apps()
+    if name in apps:
+        apps[name]["slack_channel_id"] = channel_id
+        _local_save_apps(apps)
+
+
+def get_slack_channel(name: str) -> str | None:
+    """The per-app Slack channel set via set_slack_channel, or None if unset -- callers fall
+    back to the global SLACK_HUMAN_INPUT_CHANNEL env var (connectors/slack.py)."""
+    return (list_apps().get(name) or {}).get("slack_channel_id")
+
+
 def _remote_head_sha(repo_url: str, branch: str) -> str | None:
     # git_ops.remote_head_sha, not a bare `git ls-remote` -- this used to run
     from agentra.agents.git_ops import remote_head_sha

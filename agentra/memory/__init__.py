@@ -17,6 +17,7 @@ from agentra.memory.core import (
     cannot_be_fixed_by_agentra,
 )
 from agentra.memory.features import MemoryFeaturesMixin
+from agentra.memory.issue_lifecycle import MemoryIssueLifecycleMixin
 from agentra.memory.issues import MemoryIssuesMixin
 from agentra.memory.settings import MemorySettingsMixin
 
@@ -31,7 +32,7 @@ FIRESTORE_FLUSH_INTERVAL_SECONDS = 300
 FIRESTORE_MAX_LINES = 500
 
 
-class Memory(MemoryIssuesMixin, MemoryFeaturesMixin, MemorySettingsMixin):
+class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, MemorySettingsMixin):
     """Repo-scoped memory."""
 
     def __init__(self, repo: Path) -> None:

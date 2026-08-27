@@ -65,6 +65,10 @@ class MemoryFeaturesMixin:
         """Bugs/features stamped status:shipped (merged to pre-prod, not yet live-verified) -- excludes status:tested, which is a later stage."""
         return self._items_at_stage(_STATUS_SHIPPED_LABEL)
 
+    def tested_items(self) -> list[dict]:
+        """Bugs/features stamped status:tested -- live-verified against pre-prod, one Promote away from production. The dashboard's "Ready to Review" tab."""
+        return self._items_at_stage(_STATUS_TESTED_LABEL)
+
     def feature_queue(self) -> list[dict]:
         """Open 'feature'-labeled issues not yet started on -- excludes ones
         already stamped with any forward-progress status label (code_complete
@@ -137,6 +141,7 @@ class MemoryFeaturesMixin:
         more_parts_expected: bool = False,
         session_id: str | None = None,
         known_bug_issue: str | None = None,
+        branch: str | None = None,
     ) -> dict | None:
         """Records code-complete work (implemented, committed, pushed -- not yet merged anywhere) as an open 'feature'-labeled issue stamped 'status:code_complete' — the same ledger feature_queue()/code_complete_features() etc. read, so each stage is just an issue's own state/labels."""
         repo_url = self._repo_url()
@@ -170,6 +175,14 @@ class MemoryFeaturesMixin:
             elif more_parts_expected:
                 if resolves_id and resolves_id.isdigit():
                     parent_number = int(resolves_id)
+                elif branch and (existing := github_issues.find_tracking_issue_for_branch(repo_url, branch, _AGENTRA_LABEL)) is not None:
+                    # GitHub issue #97 (and #85/#89 before it): a resumed implement_feature call
+                    # that doesn't pass resolves_id back used to always create a brand-new parent
+                    # tracking issue here, orphaning the real one -- confirmed live, issue #92's
+                    # actual fix landed under a new #97 instead of #92 itself. `branch` is a
+                    # structural identity check (which issue's In-Progress-Branch marker already
+                    # names this exact branch), not fuzzy text similarity.
+                    parent_number = existing
                 else:
                     parent_issue = github_issues.create_issue(repo_url, feature, "Tracks a multi-part feature; stays open until every part has shipped.", labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
                     parent_number = parent_issue["number"]

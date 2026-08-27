@@ -31,6 +31,7 @@ class RegisterAppPayload(BaseModel):
     alarm_enabled: bool | None = None
     documentation_notes: str | None = None
     testing_notes: str | None = None
+    slack_channel_id: str | None = None
 
 
 class UpdateAppPayload(BaseModel):
@@ -44,6 +45,7 @@ class UpdateAppPayload(BaseModel):
     alarm_enabled: bool | None = None
     documentation_notes: str | None = None
     testing_notes: str | None = None
+    slack_channel_id: str | None = None
 
 
 class BacklogRequestPayload(BaseModel):
@@ -208,6 +210,8 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
+    if payload.slack_channel_id is not None:
+        registry.set_slack_channel(payload.name, payload.slack_channel_id)
 
     try:
         from agentra.connectors import github_issues
@@ -295,6 +299,7 @@ async def get_app(name: str) -> dict:
         # human-authored testing_notes above -- read-only here, agent-written only,
         # same as codebase/design steering entries.
         "local_test_summary": mem.read("architecture", "local-test-summary"),
+        "slack_channel_id": info.get("slack_channel_id"),
     }
 
 
@@ -325,6 +330,8 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
         detect_defaults=False,
         commit_message="agentra: update app configuration",
     )
+    if payload.slack_channel_id is not None:
+        registry.set_slack_channel(name, payload.slack_channel_id)
     _server_log("update", f"app={name!r} configuration updated" + (f" -- push failed: {push_warning}" if push_warning else ""))
     result = {"updated": True, "name": name}
     if push_warning:

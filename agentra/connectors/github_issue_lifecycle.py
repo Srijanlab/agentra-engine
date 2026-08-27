@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from agentra.connectors.github_issues import add_comment, add_labels, list_comments
+from agentra.connectors.github_issues import add_comment, add_labels, list_comments, list_open_issues
 
 
 _IN_PROGRESS_BRANCH_RE = re.compile(r"^In-Progress-Branch: (\S+)$", re.MULTILINE)
@@ -48,6 +48,21 @@ def get_in_progress_branch(repo_url: str, issue_number: int) -> str | None:
     return None
 
 
+def find_tracking_issue_for_branch(repo_url: str, branch: str, agentra_label: str) -> int | None:
+    """The open issue (bug or feature) already tracking `branch` via its own In-Progress-Branch
+    marker, or None. GitHub issue #97 (and #85/#89 before it): record_code_complete's
+    more_parts_expected path created a brand-new parent tracking issue every time it was called
+    without an explicit resolves_id, even when the branch being committed was already tracked by
+    an existing issue -- confirmed live (issue #92's real work landed under a new #97 instead).
+    This is the structural check (branch identity, not fuzzy text similarity) that lets
+    record_code_complete reuse the real tracking issue instead. Bounded by the number of
+    currently-open agentra-managed issues, checked only on this comparatively rare path."""
+    for issue in list_open_issues(repo_url, labels=[agentra_label]):
+        if get_in_progress_branch(repo_url, issue["number"]) == branch:
+            return issue["number"]
+    return None
+
+
 def get_in_progress_run_id(repo_url: str, issue_number: int) -> str | None:
     """The run_id alongside the most recent in-progress-branch marker, or None.
     A marker recorded before this field existed has no run_id line."""
@@ -61,6 +76,28 @@ def get_in_progress_run_id(repo_url: str, issue_number: int) -> str | None:
             return match.group(1)
         return None  # marker exists but has no run_id
     return None
+
+
+def list_run_ids_for_issue(repo_url: str, issue_number: int) -> list[str]:
+    """Every distinct run_id that has ever worked this issue (one per In-Progress-Branch
+    marker with a Run-ID line), newest-first -- the 1:N history get_in_progress_run_id's
+    single most-recent value doesn't capture, since a single issue routinely gets resumed
+    across several separate runs (session limits, interrupted pushes, etc.)."""
+    comments = list_comments(repo_url, issue_number)
+    seen: set[str] = set()
+    run_ids: list[str] = []
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if not _IN_PROGRESS_BRANCH_RE.search(body):
+            continue
+        match = _IN_PROGRESS_RUN_ID_RE.search(body)
+        if not match:
+            continue
+        run_id = match.group(1)
+        if run_id not in seen:
+            seen.add(run_id)
+            run_ids.append(run_id)
+    return run_ids
 
 
 def get_in_progress_session_id(repo_url: str, issue_number: int) -> str | None:

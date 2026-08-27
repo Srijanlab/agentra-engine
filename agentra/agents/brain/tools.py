@@ -156,7 +156,7 @@ def _escalate_to_human(
             issue_number, app=session.app_name, run_id=session.run_id, question=question,
             branch=branch, session_id=session_id, tracking_issue=tracking_issue,
         )
-    from agentra import urls
+    from agentra import registry, urls
     from agentra.connectors import slack
 
     slack.notify_human_input_required(
@@ -167,6 +167,7 @@ def _escalate_to_human(
         dashboard_url=urls.dashboard_run_url(session.run_id, session.app_name),
         branch=branch,
         session_id=session_id,
+        channel=registry.get_slack_channel(session.app_name),
     )
     session.mark_waiting_for_human(
         issue_number=issue_number, issue_url=issue_url, question=question, branch=branch, category=category,
@@ -183,8 +184,10 @@ def _notify_shipped_pending(session: OrchestratorSession, verification_result: s
     a Slack failure (unconfigured, network, API rejection) never raises or blocks the run."""
     if not session.pending_shipped_notifications:
         return
+    from agentra import registry
     from agentra.connectors import slack
 
+    channel = registry.get_slack_channel(session.app_name)
     pending, session.pending_shipped_notifications = session.pending_shipped_notifications, []
     for item in pending:
         board_issue_number = item.get("board_issue_number") or item.get("issue_number")
@@ -195,6 +198,7 @@ def _notify_shipped_pending(session: OrchestratorSession, verification_result: s
                 feature_title=item.get("title") or "Untitled feature",
                 issue_url=issue_url,
                 verification_result=verification_result,
+                channel=channel,
             )
         except Exception:
             logger.warning("notify_shipped failed for issue #%s", board_issue_number, exc_info=True)
@@ -709,6 +713,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             more_parts_expected=more_parts_expected,
             session_id=session.session_id,
             known_bug_issue=resolves_id if resolves_origin == "known_bug" else None,
+            branch=session.feature_branch,
         )
         session.mem.append_documentation(
             f"Code complete: **{feature_name}**"
