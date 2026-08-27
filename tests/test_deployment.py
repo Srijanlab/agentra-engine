@@ -1130,7 +1130,7 @@ def test_teardown_self_hosted_preprod_noops_without_config(tmp_path, monkeypatch
 # -- promote_prod_self_hosted: nginx blue/green flip, no run_agent call ------------
 
 
-def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_defers_the_old_container_removal(tmp_path, monkeypatch):
+def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_reports_teardown_info_without_deferring_it_inline(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     env = _env(prod_branch="prod")
     config = _self_hosted_config()
@@ -1171,8 +1171,14 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_defers_t
     assert pull_calls == [env.prod_branch]
     assert push_calls == [env.prod_branch]
 
+    # GitHub issue #92: only the new container is ever launched inline here --
+    # no sibling teardown container gets started as a side effect of this call
+    # anymore (that used to race the caller's own status write when enough
+    # post-promotion bookkeeping made it take longer than the sibling's fixed
+    # delay). promote_prod_self_hosted now only *reports* what a caller needs
+    # to schedule that teardown later, via result.json_data["teardown"].
     run_calls = [c for c in docker_calls if c[:2] == ["docker", "run"]]
-    assert len(run_calls) == 2
+    assert len(run_calls) == 1
     new_container_run = run_calls[0]
     assert "widget-app-green" in new_container_run
     assert "widget-app-net" in new_container_run
@@ -1185,21 +1191,64 @@ def test_promote_prod_self_hosted_flips_nginx_to_the_inactive_color_and_defers_t
     assert len(reload_calls) == 1
 
     # The old (currently-live, possibly self) container/image must not be torn
-    # down synchronously in this process (GitHub issue #83) -- doing so here
-    # would race/kill the caller's own status write. Instead a short-lived
-    # sibling container (over the same docker.sock) is scheduled to remove it
-    # after a brief delay.
+    # down synchronously in this process (GitHub issue #83), nor scheduled via
+    # a sibling container synchronously either (GitHub issue #92) -- doing
+    # either here would race/kill the caller's own status write.
     remove_calls = [c for c in docker_calls if c[:3] == ["docker", "rm", "-f"]]
     assert ["docker", "rm", "-f", "widget-app-blue"] not in remove_calls
     rmi_calls = [c for c in docker_calls if c[:2] == ["docker", "rmi"]]
     assert ["docker", "rmi", "widget-app:oldrun123"] not in rmi_calls
 
-    cleanup_run = run_calls[1]
-    assert "/var/run/docker.sock:/var/run/docker.sock" in cleanup_run
-    assert "--entrypoint" in cleanup_run
-    cleanup_script = cleanup_run[-1]
-    assert "docker rm -f widget-app-blue" in cleanup_script
-    assert "docker rmi widget-app:oldrun123" in cleanup_script
+    teardown = result.json_data["teardown"]
+    assert teardown["cleanup_image"] == "widget-app:run456"
+    assert teardown["old_container"] == "widget-app-blue"
+    assert teardown["old_image"] == "widget-app:oldrun123"
+    assert teardown["sock_gid"] == "999"
+
+
+def test_trigger_deferred_teardown_launches_the_sibling_from_promote_prod_self_hosteds_reported_info(monkeypatch):
+    """GitHub issue #92: the sibling-launching side effect promote_prod_self_hosted used to
+    perform inline now lives entirely in trigger_deferred_teardown, driven off the json_data
+    it hands back -- called separately, and only once a caller's own status write has landed."""
+    docker_calls = []
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        lambda args, **kwargs: docker_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    deployment.trigger_deferred_teardown({
+        "status": "deployed",
+        "teardown": {
+            "cleanup_image": "widget-app:run456",
+            "old_container": "widget-app-blue",
+            "old_image": "widget-app:oldrun123",
+            "sock_gid": "999",
+            "delay_seconds": 5,
+        },
+    })
+
+    assert len(docker_calls) == 1
+    call = docker_calls[0]
+    assert call[:3] == ["docker", "run", "-d"]
+    script = call[-1]
+    assert "docker rm -f widget-app-blue" in script
+    assert "docker rmi widget-app:oldrun123" in script
+
+
+def test_trigger_deferred_teardown_is_a_noop_without_teardown_info(monkeypatch):
+    """Covers both a non-self-hosted deploy strategy's json_data (no 'teardown' key at all)
+    and a failed/no-op promotion (json_data=None) -- neither should ever launch a sibling."""
+    docker_calls = []
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        lambda args, **kwargs: docker_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    deployment.trigger_deferred_teardown(None)
+    deployment.trigger_deferred_teardown({"status": "failed"})
+    deployment.trigger_deferred_teardown({"status": "deployed", "notes": "vercel_firebase, no teardown info"})
+
+    assert docker_calls == []
 
 
 def test_defer_old_container_removal_launches_a_detached_sibling_that_removes_container_and_image(monkeypatch):
