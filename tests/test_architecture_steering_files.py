@@ -1,10 +1,17 @@
-"""Tests for the four "steering files" (architecture/{codebase,design,
-testing-notes,documentation}.md) each being kept live by their responsible
-agent -- Codebase Agent already owned codebase.md; this adds design.md
-(from the same scan, no extra cost) and Testing Agent owning
-testing-notes.md. Both are overwritten fresh each real run, same
+"""Tests for the "steering files" (architecture/{codebase,design,
+local-test-summary,documentation}.md) each being kept live by their
+responsible agent -- Codebase Agent already owned codebase.md; this adds
+design.md (from the same scan, no extra cost) and Testing Agent owning
+local-test-summary.md. Both are overwritten fresh each real run, same
 freshness semantics as codebase.md already had -- not an accumulating
 log (contrast with memory.py's append_documentation()).
+
+GitHub issue #84: local-test-summary.md (the Testing Agent's
+machine-generated lint/typecheck summary) used to share
+architecture/testing-notes.md with the human-authored "Testing Notes"
+app setting (server/routes/apps.py), so every local-test run silently
+clobbered whatever a human had written there. They're now separate keys;
+testing-notes stays exclusively human-owned and is never touched here.
 """
 
 import asyncio
@@ -57,7 +64,7 @@ def test_codebase_agent_skips_design_md_when_field_absent(tmp_path, monkeypatch)
     assert mem.read("architecture", "design") is None
 
 
-def test_testing_agent_writes_testing_notes_on_success(tmp_path, monkeypatch):
+def test_testing_agent_writes_local_test_summary_on_success(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     mem = Memory(repo)
@@ -72,7 +79,7 @@ def test_testing_agent_writes_testing_notes_on_success(tmp_path, monkeypatch):
 
     asyncio.run(testing.run_local(repo, "codebase summary", mem))
 
-    notes = mem.read("architecture", "testing-notes")
+    notes = mem.read("architecture", "local-test-summary")
     assert "Lint: pass" in notes
     assert "Typecheck: not_configured" in notes
     assert "No e2e configured." in notes
@@ -100,4 +107,33 @@ def test_testing_agent_does_not_write_notes_on_a_failed_run(tmp_path, monkeypatc
 
     asyncio.run(testing.run_local(repo, "codebase summary", mem))
 
-    assert mem.read("architecture", "testing-notes") is None
+    assert mem.read("architecture", "local-test-summary") is None
+
+
+def test_run_local_tests_does_not_overwrite_a_humans_testing_notes(tmp_path, monkeypatch):
+    """GitHub issue #84 regression: a human-authored testing_notes value (written via the
+    Register/Edit App modals -> server/routes/apps.py::_apply_app_config, same
+    mem.write("architecture", "testing-notes", ...) call) must survive a run_local_tests
+    pass unchanged -- the machine-generated summary now lands in its own
+    architecture/local-test-summary key instead of clobbering it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mem = Memory(repo)
+    mem.write("architecture", "testing-notes", "human notes: run the manual smoke checklist too")
+
+    fake_result = AgentResult(
+        ok=True,
+        text="...",
+        json_data={"status": "pass", "lint_status": "pass", "typecheck_status": "pass", "notes": "All green."},
+        cost_usd=0.02,
+        turns=5,
+    )
+    monkeypatch.setattr(testing, "run_agent", AsyncMock(return_value=fake_result))
+
+    asyncio.run(testing.run_local(repo, "codebase summary", mem))
+
+    assert mem.read("architecture", "testing-notes") == "human notes: run the manual smoke checklist too"
+    summary = mem.read("architecture", "local-test-summary")
+    assert "Lint: pass" in summary
+    assert "Typecheck: pass" in summary
+    assert "All green." in summary

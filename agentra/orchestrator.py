@@ -33,6 +33,11 @@ class ProdDebugReport:
     fix_attempted: bool
     promoted_to_prod: bool
     diagnosis_text: str
+    # GitHub issue #92: teardown info from the promote strategy's AgentResult.json_data
+    # (self_hosted_vm only; None for vercel_firebase or any non-promoting return path),
+    # threaded through so triggers.py::_run_prod_debug_background can trigger the deferred
+    # outgoing-container teardown only after it durably records this run's terminal status.
+    teardown: dict | None = None
 
 
 def _load_env(repo: Path, mem: Memory, run_id: str) -> EnvironmentConfig:
@@ -249,7 +254,10 @@ async def _run_promote_body(repo: Path, mem: Memory, run_id: str) -> dict:
         mem.log(run_id, f"promote: ok={ok}")
         if not ok:
             mem.record_failure(run_id, "prod-promote", promote.text)
-    return {"run_id": run_id, "ok": ok, "text": promote.text}
+    # GitHub issue #92: pass the teardown info (self_hosted_vm only; absent/None for
+    # vercel_firebase or a failed promotion) through to the caller, so triggers.py can
+    # trigger it strictly after its own terminal status write lands, not before.
+    return {"run_id": run_id, "ok": ok, "text": promote.text, "teardown": (promote.json_data or {}).get("teardown")}
 
 
 async def run_prod_debug_cycle(
@@ -358,4 +366,7 @@ async def _run_prod_debug_cycle_body(
         if not promoted_ok:
             mem.record_failure(run_id, "hotfix-prod-promote", promote.text)
 
-        return ProdDebugReport(run_id, True, severity, True, promoted_ok, diag.text)
+        return ProdDebugReport(
+            run_id, True, severity, True, promoted_ok, diag.text,
+            teardown=(promote.json_data or {}).get("teardown"),
+        )

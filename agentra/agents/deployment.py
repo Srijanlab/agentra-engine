@@ -663,6 +663,22 @@ def _defer_old_container_removal(
     )
 
 
+def trigger_deferred_teardown(json_data: dict | None) -> None:
+    """GitHub issue #92: the actual "launch the teardown sibling" step, decoupled from
+    promote_prod_self_hosted's own return so a caller can invoke it strictly after its own
+    terminal status write has durably landed -- not before, and not gated on how long any
+    intervening bookkeeping (e.g. _record_production_release's per-item GitHub API calls) takes.
+    Reads the teardown info promote_prod_self_hosted stashed in its AgentResult.json_data; a
+    no-op if there's none (non-self-hosted deploy strategy, or a failed/no-op promotion that
+    never flipped colors)."""
+    teardown = (json_data or {}).get("teardown")
+    if not teardown:
+        return
+    _defer_old_container_removal(
+        teardown["cleanup_image"], teardown["old_container"], teardown.get("old_image"), teardown.get("sock_gid", ""),
+    )
+
+
 def _other_color(color: str) -> str:
     return "green" if color == "blue" else "blue"
 
@@ -797,15 +813,32 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
     # is gone. old_container may be this very process's own container (this
     # process runs *inside* the currently-live color) -- removing it in-process
     # would kill this process before it can return and the caller can record
-    # status="completed" (GitHub issue #83), so it's deferred to a sibling
-    # container instead of done synchronously here.
+    # status="completed" (GitHub issue #83). It's not enough to just defer the
+    # removal to a sibling container *launched here*, though: launching that
+    # sibling is itself the thing racing to kill this process, and its 5s
+    # delay was only ever sized to outlive this function's own return, not
+    # whatever bookkeeping (e.g. triggers.py's _record_production_release --
+    # one GitHub API call per pending feature/bug) the caller does with this
+    # AgentResult before it durably records status="completed" (GitHub issue
+    # #92). So the sibling is never launched here at all -- only the info a
+    # caller needs to launch it later, via trigger_deferred_teardown(), once
+    # its own status write has actually landed, is handed back.
     old_image = _image_of(old_container)
-    _defer_old_container_removal(image_tag, old_container, old_image, sock_gid)
 
     return AgentResult(
         ok=True,
         text=f"Promoted {new_container!r} to production (was {current_color}, now {new_color}).",
-        json_data={"status": "deployed", "notes": f"blue/green flip: {current_color} -> {new_color}"},
+        json_data={
+            "status": "deployed",
+            "notes": f"blue/green flip: {current_color} -> {new_color}",
+            "teardown": {
+                "cleanup_image": image_tag,
+                "old_container": old_container,
+                "old_image": old_image,
+                "sock_gid": sock_gid,
+                "delay_seconds": _OLD_CONTAINER_TEARDOWN_DELAY_SECONDS,
+            },
+        },
         cost_usd=0.0, turns=0,
     )
 
