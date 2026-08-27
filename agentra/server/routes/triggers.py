@@ -143,6 +143,8 @@ async def _run_autonomous_background(
 async def _run_prod_debug_background(
     run_key: str, app_name: str, repo: Path, objective: str, symptom: str | None
 ) -> None:
+    from agentra.agents import deployment
+
     lock = _lock_for(app_name)
     async with lock:
         _set_run(run_key, status="running")
@@ -160,6 +162,11 @@ async def _run_prod_debug_background(
                     "promoted_to_prod": report.promoted_to_prod,
                 },
             )
+            # GitHub issue #92: strictly after the status write above has durably
+            # landed -- never before, and never gated on it -- so an outgoing
+            # self-hosted prod container (which may be this very process) only
+            # gets torn down once this run can no longer be left stuck at "running".
+            deployment.trigger_deferred_teardown(getattr(report, "teardown", None))
             _server_log(
                 "alarm",
                 f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} "
@@ -171,6 +178,8 @@ async def _run_prod_debug_background(
 
 
 async def _run_promote_background(run_key: str, app_name: str, repo: Path) -> None:
+    from agentra.agents import deployment
+
     lock = _lock_for(app_name)
     async with lock:
         _set_run(run_key, status="running")
@@ -190,6 +199,13 @@ async def _run_promote_background(run_key: str, app_name: str, repo: Path) -> No
                     "final_message": result["text"][:2000],
                 },
             )
+            # GitHub issue #92: this must be the very last thing done for this run,
+            # strictly after the status write above -- _record_production_release
+            # above can take arbitrarily long (one GitHub API call per pending
+            # feature/bug) without risking the outgoing self-hosted container (which
+            # may be running this very process) getting SIGKILLed before its status
+            # is durably recorded.
+            deployment.trigger_deferred_teardown(result.get("teardown"))
             _server_log(
                 "promote",
                 f"app={app_name!r} run_key={run_key} promoted={result['ok']} released={len(released_features)}",
