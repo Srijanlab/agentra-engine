@@ -157,6 +157,36 @@ def test_implement_feature_human_input_required_escalates_via_shared_helper(tmp_
     assert "#17" in session.hard_stop_reason
 
 
+def test_implement_feature_human_input_required_uses_the_app_s_own_slack_channel(tmp_path, monkeypatch):
+    """GitHub issue #69's "more requirement": every need_human escalation must route to the
+    app's own configured Slack channel (registry.get_slack_channel), not just the global env var."""
+    _patch_registry(monkeypatch)
+    slack_calls: list = []
+    _patch_slack_and_urls(monkeypatch, slack_calls)
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        registry, "get_slack_channel",
+        lambda app_name: "C_APP_CHANNEL" if app_name == session.app_name else None,
+    )
+
+    async def fake_impl_run(*a, **k):
+        return _human_input_required_result()
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+    monkeypatch.setattr(session.mem, "escalate_existing_issue", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
+    monkeypatch.setattr(session.mem, "record_human_input_context", lambda *a, **k: None)
+
+    asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "Add login", "resolves_origin": "known_bug", "resolves_id": "17"}
+        )
+    )
+
+    assert len(slack_calls) == 1
+    assert slack_calls[0]["channel"] == "C_APP_CHANNEL"
+
+
 def test_implement_feature_human_input_required_does_not_count_as_a_tool_failure(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     _patch_slack_and_urls(monkeypatch, [])

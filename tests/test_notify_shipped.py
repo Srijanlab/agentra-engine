@@ -92,6 +92,36 @@ def test_deploy_pre_prod_trivial_merge_success_notifies_once_per_pending_item(tm
     assert session.pending_shipped_notifications == []
 
 
+def test_deploy_pre_prod_trivial_merge_passes_the_app_s_own_slack_channel(tmp_path, monkeypatch):
+    """GitHub issue #69's "more requirement": notifications route to the app's own configured
+    Slack channel (registry.get_slack_channel), not just whatever the global env var says."""
+    _patch_registry(monkeypatch)
+    session = _session(
+        tmp_path,
+        pending_shipped_notifications=[{"issue_number": "5", "board_issue_number": 5, "title": "Fix flaky test"}],
+        code_complete_issue_numbers=["5"],
+    )
+    _patch_issue_url(monkeypatch, session)
+    calls = _capture_notify_shipped(monkeypatch)
+    monkeypatch.setattr(brain.tools.change_risk, "classify_change", lambda *a, **k: "trivial")
+    monkeypatch.setattr(session.mem, "record_shipped_to_preprod", lambda ids, run_id=None: list(ids))
+    monkeypatch.setattr(
+        registry, "get_slack_channel",
+        lambda app_name: "C_APP_CHANNEL" if app_name == session.app_name else None,
+    )
+
+    async def fake_merge(repo, env, feature_branch):
+        return AgentResult(ok=True, text="merged, no deploy", json_data={"status": "skipped_light"}, cost_usd=0.0, turns=0)
+
+    monkeypatch.setattr(brain.deployment, "merge_to_pre_prod_only", fake_merge)
+
+    result = asyncio.run(_tool(session, "deploy_pre_prod").handler({}))
+
+    assert result.get("is_error") is not True
+    assert len(calls) == 1
+    assert calls[0]["channel"] == "C_APP_CHANNEL"
+
+
 def test_deploy_pre_prod_trivial_merge_failure_does_not_notify(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(

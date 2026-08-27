@@ -19,10 +19,12 @@ def test_is_configured_false_when_env_vars_unset(monkeypatch):
     assert slack.is_configured() is False
 
 
-def test_is_configured_false_with_only_one_of_the_two_vars_set(monkeypatch):
+def test_is_configured_true_with_just_the_bot_token_set(monkeypatch):
+    # A channel can come from a per-app override (registry.get_slack_channel)
+    # instead of the global env var -- only the bot token is a hard requirement.
     _clear_env(monkeypatch)
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
-    assert slack.is_configured() is False
+    assert slack.is_configured() is True
 
 
 def test_is_configured_true_with_both_vars_set(monkeypatch):
@@ -30,6 +32,44 @@ def test_is_configured_true_with_both_vars_set(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
     monkeypatch.setenv("SLACK_HUMAN_INPUT_CHANNEL", "C0123456789")
     assert slack.is_configured() is True
+
+
+def test_notify_human_input_required_skips_silently_when_bot_token_set_but_no_channel_resolves(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")  # is_configured() is now True, but no channel at all
+    monkeypatch.setattr(
+        slack.httpx, "post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call Slack with no channel to post to"))
+    )
+
+    result = slack.notify_human_input_required(app="myapp", run_id="run1", question="q")
+
+    assert result is False
+
+
+def test_notify_human_input_required_uses_the_per_app_channel_override_instead_of_the_global_one(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
+    monkeypatch.setenv("SLACK_HUMAN_INPUT_CHANNEL", "C_GLOBAL_DEFAULT")
+
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr(slack.httpx, "post", _fake_post)
+
+    result = slack.notify_human_input_required(app="myapp", run_id="run1", question="q", channel="C_PER_APP")
+
+    assert result is True
+    assert captured["json"]["channel"] == "C_PER_APP"
 
 
 def test_notify_human_input_required_skips_silently_when_unconfigured(monkeypatch):
@@ -189,6 +229,32 @@ def test_notify_shipped_works_without_an_issue_url(monkeypatch):
     result = slack.notify_shipped(app="myapp", feature_title="Dark mode", verification_result="merged trivially.")
 
     assert result is True
+
+
+def test_notify_shipped_uses_the_per_app_channel_override_instead_of_the_global_one(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
+    monkeypatch.setenv("SLACK_HUMAN_INPUT_CHANNEL", "C_GLOBAL_DEFAULT")
+
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr(slack.httpx, "post", _fake_post)
+
+    result = slack.notify_shipped(app="myapp", feature_title="Dark mode", verification_result="merged.", channel="C_PER_APP")
+
+    assert result is True
+    assert captured["json"]["channel"] == "C_PER_APP"
 
 
 def test_notify_shipped_never_raises_on_network_failure(monkeypatch):
