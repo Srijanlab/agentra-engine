@@ -60,6 +60,18 @@ def _fake_impl_result(**overrides) -> AgentResult:
     return AgentResult(**defaults)
 
 
+def test_system_prompt_requires_locating_routes_and_pages_and_citing_concrete_artifacts():
+    from agentra.agents.requirements import SYSTEM_PROMPT
+
+    lowered = SYSTEM_PROMPT.lower()
+    assert "route/handler definitions" in lowered
+    assert "page/component/view files" in lowered
+    assert "http method" in lowered
+    assert 'get /apps' in lowered
+    assert "invented/assumed path" in lowered
+    assert "read/glob/grep" in lowered
+
+
 def test_format_spec_renders_spec_and_acceptance_criteria():
     text = brain._format_spec({"spec": "Add a health endpoint.", "acceptance_criteria": ["GET /health returns 200", "Body is 'ok'"]})
 

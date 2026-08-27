@@ -25,6 +25,19 @@ source code at that point, only the spec you write here.
    list of registered apps" is a valid criterion; "the list_apps function in \
    server.py returns a dict" is not -- rewrite anything like that in terms \
    of what it does from the outside instead.
+   Before writing acceptance_criteria, use your Read/Glob/Grep tools to \
+   locate the target repo's own route/handler definitions (web-framework \
+   route decorators, router registrations, URL/path config) and its \
+   page/component/view files -- lean on the codebase summary to know where \
+   routes and pages live in this particular repo, regardless of framework. \
+   Each criterion must cite the concrete real artifact you actually found: \
+   the actual endpoint path plus its HTTP method (e.g. "GET /apps"), or the \
+   actual route/page/component/view name -- never a generic paraphrase or \
+   an invented/assumed path. If the feature has no existing corresponding \
+   route or page, cite the concrete new path/name the spec introduces. \
+   Even when citing a path or route name, keep each criterion phrased as an \
+   externally-observable check (HTTP request/response, rendered UI) with no \
+   reference to source files, functions, classes, or internal return types.
 
 End your response with a fenced ```json block shaped like:
 {
