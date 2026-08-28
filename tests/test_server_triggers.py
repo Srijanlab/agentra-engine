@@ -10,6 +10,7 @@ from agentra.agents import deployment, git_ops
 from agentra.agents.base import AgentResult
 from agentra.connectors import github_fake
 from agentra.memory import Memory
+from agentra.server.routes import triggers
 
 
 def _close_background_coro(coro):
@@ -315,6 +316,125 @@ def test_promote_background_records_released_features(tmp_path, monkeypatch):
     shipped_by_name = {f["feature"]: f for f in Memory(repo).shipped_features()}
     assert shipped_by_name["Ready to ship dashboard"]["status_done"] is True
     assert shipped_by_name["Already released feature"]["status_done"] is True
+
+
+def test_promote_background_triggers_teardown_only_after_the_status_write_lands_even_when_release_bookkeeping_is_slow(tmp_path, monkeypatch):
+    """GitHub issue #92 (follow-up to #83): promote_prod_self_hosted's outgoing-container
+    teardown must never race _run_promote_background's own terminal status write. Even when
+    _record_production_release (one GitHub API call per pending feature/bug) takes a while --
+    simulated here as "however long it takes", not a real sleep, since ordering is what's
+    being proven, not wall-clock timing -- the status write must land in the registry first,
+    and the teardown trigger must fire strictly after that, never before and never gated on it.
+    """
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    environments.save(repo, environments.EnvironmentConfig(deploy_strategy="self_hosted_vm", prod_branch="production"))
+
+    teardown_info = {
+        "cleanup_image": "widget-app:run1",
+        "old_container": "widget-app-blue",
+        "old_image": "widget-app:oldrun1",
+        "sock_gid": "999",
+        "delay_seconds": 5,
+    }
+
+    async def _fake_self_hosted_promote(_repo, _env, run_id, session_id):
+        return AgentResult(
+            ok=True, text="promoted", json_data={"status": "deployed", "teardown": teardown_info},
+            cost_usd=0.0, turns=0,
+        )
+
+    monkeypatch.setitem(deployment.PROD_STRATEGIES, "self_hosted_vm", _fake_self_hosted_promote)
+
+    run_key = "promote-run-92"
+    events: list[str] = []
+
+    def _slow_record_production_release(_repo, _run_id):
+        # Stands in for many pending features/bugs, each needing its own GitHub API call.
+        events.append("release_bookkeeping_ran")
+        return ["Feature A", "Feature B", "Feature C"]
+
+    monkeypatch.setattr(triggers, "_record_production_release", _slow_record_production_release)
+
+    def _tracking_set_run(_run_key, **fields):
+        if fields.get("status") in ("completed", "failed"):
+            events.append("status_write_landed")
+        registry.record_run(_run_key, **fields)
+
+    monkeypatch.setattr(triggers, "_set_run", _tracking_set_run)
+
+    def _tracking_trigger_deferred_teardown(json_data):
+        events.append("teardown_triggered")
+        assert json_data == teardown_info
+        # Must be durably readable back from the registry by the time teardown fires --
+        # not just "queued to be written before this call returns".
+        assert registry.get_run(run_key)["status"] == "completed"
+
+    monkeypatch.setattr(deployment, "trigger_deferred_teardown", _tracking_trigger_deferred_teardown)
+
+    registry.record_run(run_key, app="myapp", source="promote", status="queued", started_at=time.time())
+
+    asyncio.run(triggers._run_promote_background(run_key, "myapp", repo))
+
+    # Release bookkeeping runs, then (and only then) the status write lands, then (and only
+    # then) teardown is triggered -- never the reverse, regardless of how long bookkeeping took.
+    assert events == ["release_bookkeeping_ran", "status_write_landed", "teardown_triggered"]
+
+    recorded = registry.get_run(run_key)
+    assert recorded["status"] == "completed"
+    assert recorded["result"]["promoted"] is True
+    assert recorded["result"]["released_count"] == 3
+
+
+def test_prod_debug_background_triggers_teardown_only_after_the_status_write_lands(tmp_path, monkeypatch):
+    """Same GitHub issue #92 ordering guarantee, for the auto-remediate hotfix-promotion path
+    (_run_prod_debug_background), which also goes through the self_hosted_vm PROD_STRATEGIES
+    entry via orchestrator.run_prod_debug_cycle -- must not regress into leaking old prod
+    containers now that promote_prod_self_hosted no longer tears them down inline."""
+    _isolate_registry(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+
+    from agentra.orchestrator import ProdDebugReport
+
+    teardown_info = {
+        "cleanup_image": "widget-app:hotfix1",
+        "old_container": "widget-app-green",
+        "old_image": "widget-app:oldhotfix1",
+        "sock_gid": "999",
+        "delay_seconds": 5,
+    }
+
+    async def _fake_run_prod_debug_cycle(_repo, _objective, symptom=None, run_id=None):
+        return ProdDebugReport(
+            run_id=run_id, root_cause_found=True, severity="high", fix_attempted=True,
+            promoted_to_prod=True, diagnosis_text="diagnosed and hotfixed", teardown=teardown_info,
+        )
+
+    monkeypatch.setattr(triggers, "run_prod_debug_cycle", _fake_run_prod_debug_cycle)
+
+    run_key = "prod-debug-run-92"
+    events: list[str] = []
+
+    def _tracking_set_run(_run_key, **fields):
+        if fields.get("status") in ("completed", "failed"):
+            events.append("status_write_landed")
+        registry.record_run(_run_key, **fields)
+
+    monkeypatch.setattr(triggers, "_set_run", _tracking_set_run)
+
+    def _tracking_trigger_deferred_teardown(json_data):
+        events.append("teardown_triggered")
+        assert json_data == teardown_info
+        assert registry.get_run(run_key)["status"] == "completed"
+
+    monkeypatch.setattr(deployment, "trigger_deferred_teardown", _tracking_trigger_deferred_teardown)
+
+    registry.record_run(run_key, app="myapp", source="alarm", status="queued", started_at=time.time())
+
+    asyncio.run(triggers._run_prod_debug_background(run_key, "myapp", repo, "objective", None))
+
+    assert events == ["status_write_landed", "teardown_triggered"]
+    assert registry.get_run(run_key)["status"] == "completed"
 
 
 def test_promote_background_marks_closed_bugs_as_status_done(tmp_path, monkeypatch):

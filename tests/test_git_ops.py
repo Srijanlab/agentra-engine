@@ -132,10 +132,11 @@ def test_push_branch_recovers_from_a_non_fast_forward_rejection_by_pulling_and_r
 
 
 def test_push_branch_raises_giterror_when_the_remote_change_actually_conflicts(tmp_path):
-    """A stale branch that pulls in the new remote tip only recovers
-    automatically when it's a clean merge -- a genuine content conflict must
-    still surface as a GitOpError with the working tree left clean, not be
-    silently papered over."""
+    """GitHub issue #103: a stale branch that pulls in the new remote tip only
+    recovers automatically when it's a clean merge -- a genuine content conflict
+    must still surface as a GitOpError whose message names the branch and makes
+    clear it's a real conflict (an actionable error, not a silent failure), with
+    the working tree left clean, not mid-merge."""
     origin = _seed_origin(tmp_path)
     work = _clone(origin, tmp_path / "work")
     other = _clone(origin, tmp_path / "other")
@@ -145,13 +146,18 @@ def test_push_branch_raises_giterror_when_the_remote_change_actually_conflicts(t
 
     _commit_file(work, "README.md", "my conflicting change\n", "conflicting local change")
 
-    with pytest.raises(git_ops.GitOpError):
+    with pytest.raises(git_ops.GitOpError) as excinfo:
         git_ops.push_branch(work, "main")
+
+    message = str(excinfo.value)
+    assert "main" in message
+    assert "conflict" in message.lower()
 
     # Left clean, not mid-merge -- nothing was pushed.
     status = _git(work, "status", "--porcelain").stdout
     assert status.strip() == ""
     assert _git(origin, "rev-parse", "main").stdout.strip() != _head_sha(work)
+    assert not (work / ".git" / "MERGE_HEAD").exists()
 
 
 # -- fetch_ref ------------------------------------------------------------------

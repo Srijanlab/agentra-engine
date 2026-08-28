@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -53,6 +54,27 @@ class BacklogRequestPayload(BaseModel):
     title: str | None = None
     description: str
     severity: str | None = None
+
+
+def _mask_stale_machine_testing_notes(content: str | None) -> str | None:
+    """GitHub #112: the old run_local wrote its 'Lint:/Typecheck:/Notes:' summary into the
+    human-owned architecture/testing-notes key. Read-time mask only -- if `content` matches
+    that machine shape, return None (as if unset); otherwise return it verbatim. Pure, no writes.
+    Conservative: anything that isn't clearly the machine shape is treated as human text."""
+    if content is None:
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return content
+    non_empty = [ln for ln in stripped.splitlines() if ln.strip()]
+    if len(non_empty) < 2:
+        return content
+    if not re.match(r"^Lint: .+", non_empty[0]) or not re.match(r"^Typecheck: .+", non_empty[1]):
+        return content
+    # Any further content must start with the machine summary's 'Notes:' line.
+    if len(non_empty) > 2 and not non_empty[2].startswith("Notes:"):
+        return content
+    return None
 
 
 def _apply_app_config(
@@ -293,7 +315,12 @@ async def get_app(name: str) -> dict:
         "schedule_hours": env_config.schedule_hours,
         "alarm_enabled": env_config.alarm_enabled,
         "documentation_notes": mem.read("architecture", "documentation"),
-        "testing_notes": mem.read("architecture", "testing-notes"),
+        "testing_notes": _mask_stale_machine_testing_notes(mem.read("architecture", "testing-notes")),
+        # GitHub issue #84: the Testing Agent's auto-generated local-test summary now
+        # lives under its own key (agents/testing.py::run_local), separate from the
+        # human-authored testing_notes above -- read-only here, agent-written only,
+        # same as codebase/design steering entries.
+        "local_test_summary": mem.read("architecture", "local-test-summary"),
         "slack_channel_id": info.get("slack_channel_id"),
     }
 

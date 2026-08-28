@@ -60,6 +60,18 @@ def _fake_impl_result(**overrides) -> AgentResult:
     return AgentResult(**defaults)
 
 
+def test_system_prompt_requires_locating_routes_and_pages_and_citing_concrete_artifacts():
+    from agentra.agents.requirements import SYSTEM_PROMPT
+
+    lowered = SYSTEM_PROMPT.lower()
+    assert "route/handler definitions" in lowered
+    assert "page/component/view files" in lowered
+    assert "http method" in lowered
+    assert 'get /apps' in lowered
+    assert "invented/assumed path" in lowered
+    assert "read/glob/grep" in lowered
+
+
 def test_format_spec_renders_spec_and_acceptance_criteria():
     text = brain._format_spec({"spec": "Add a health endpoint.", "acceptance_criteria": ["GET /health returns 200", "Body is 'ok'"]})
 
@@ -73,6 +85,31 @@ def test_format_spec_handles_no_acceptance_criteria():
 
     assert "Just a description." in text
     assert "Acceptance criteria" not in text
+
+
+def test_endpoint_citation_in_a_criterion_survives_persistence_into_the_formatted_spec():
+    """GitHub #82: a criterion citing a concrete endpoint path + method (or a named
+    route/component) must reach the black-box Testing Agent verbatim -- through the
+    record_spec/get_spec round-trip and _format_spec -- never paraphrased or dropped."""
+    from agentra.connectors import github_fake
+
+    backend = github_fake.FakeGitHubBackend()
+    repo_url = "https://github.com/acme/widget.git"
+    issue = backend.create_issue(repo_url, "Add health endpoint", "body")
+    spec = {
+        "spec": "Add a health endpoint.",
+        "acceptance_criteria": [
+            'GET /api/v2/health returns 200 with JSON {"status": "ok"}',
+            "The <HealthBadge> component on the /status route renders 'Healthy'",
+        ],
+        "open_questions": [],
+    }
+    backend.record_spec(repo_url, issue["number"], spec)
+    round_tripped = backend.get_spec(repo_url, issue["number"])
+
+    text = brain._format_spec(round_tripped)
+    assert 'GET /api/v2/health returns 200 with JSON {"status": "ok"}' in text
+    assert "The <HealthBadge> component on the /status route renders 'Healthy'" in text
 
 
 def test_implement_feature_generates_and_persists_a_new_spec(tmp_path, monkeypatch):
