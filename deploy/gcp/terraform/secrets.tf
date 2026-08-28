@@ -171,3 +171,15 @@ resource "google_secret_manager_secret_iam_member" "github_app_private_key_acces
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
+
+# agentra-slack-bot-token was created outside Terraform (no
+# google_secret_manager_secret resource for it here), so this grant
+# references it by its bare secret_id instead of a resource attribute --
+# compute.tf's docker run fetches it as SLACK_BOT_TOKEN for
+# connectors/slack.py's notify_shipped/notify_human_input_required.
+resource "google_secret_manager_secret_iam_member" "slack_bot_token_access" {
+  project   = var.project_id
+  secret_id = "agentra-slack-bot-token"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
