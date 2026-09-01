@@ -164,7 +164,10 @@ def _escalate_to_human(
     from agentra import registry, urls
     from agentra.connectors import slack
 
-    slack.notify_human_input_required(
+    existing_thread = (
+        registry.slack_thread_for(session.app_name, issue_number) if issue_number is not None else None
+    )
+    thread_ts = slack.notify_human_input_required(
         app=session.app_name,
         run_id=session.run_id,
         question=question,
@@ -173,7 +176,12 @@ def _escalate_to_human(
         branch=branch,
         session_id=session_id,
         channel=registry.get_slack_channel(session.app_name),
+        thread_ts=existing_thread,
     )
+    if thread_ts and issue_number is not None:
+        # GitHub issue #68: routes a human's thread reply back to this run, and keeps
+        # every follow-up round of the conversation in the same Slack thread.
+        registry.record_slack_thread(thread_ts, app=session.app_name, issue_number=issue_number)
     session.mark_waiting_for_human(
         issue_number=issue_number, issue_url=issue_url, question=question, branch=branch, category=category,
     )

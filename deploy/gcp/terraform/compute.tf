@@ -175,6 +175,7 @@ locals {
       -e GITHUB_APP_PRIVATE_KEY="$(gcs agentra-github-app-private-key)" \
       -e ALARM_WEBHOOK_PASSWORD="$(gcs agentra-alarm-webhook-password)" \
       -e SLACK_BOT_TOKEN="$(gcs agentra-slack-bot-token)" \
+      -e SLACK_SIGNING_SECRET="$(gcs agentra-slack-signing-secret 2>/dev/null || true)" \
       "$IMAGE" serve --port 8080
     # Deliberately NOT setting CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY --
     # auth comes from the claude-home volume's login session (one-time

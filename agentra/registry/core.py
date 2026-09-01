@@ -16,6 +16,7 @@ AGENTRA_HOME = Path(_env_value) if _env_value else Path.home() / ".agentra"
 APPS_PATH = AGENTRA_HOME / "apps.json"
 INBOX_ROOT = AGENTRA_HOME / "inbox"
 PAUSE_PATH = AGENTRA_HOME / "paused.json"
+_SLACK_THREADS_PATH = AGENTRA_HOME / "slack_threads.json"
 _RUNS_PATH = AGENTRA_HOME / "runs.json"
 _AGENT_STEPS_PATH = AGENTRA_HOME / "agent_steps.jsonl"
 
@@ -212,6 +213,48 @@ def resume() -> None:
         _db.collection("system").document("pause").delete()
         return
     PAUSE_PATH.unlink(missing_ok=True)
+
+
+_SLACK_THREAD_CAP = 300
+
+
+def _slack_threads() -> dict:
+    if _db is not None:
+        doc = _db.collection("system").document("slack_threads").get()
+        return doc.to_dict() or {} if doc.exists else {}
+    if not _SLACK_THREADS_PATH.exists():
+        return {}
+    return json.loads(_SLACK_THREADS_PATH.read_text())
+
+
+def record_slack_thread(thread_ts: str, *, app: str, issue_number: int) -> None:
+    """Remembers which needs_human issue a Slack HUMAN_INPUT_REQUIRED thread anchors, so a
+    human's reply in that thread routes back to the right run and every follow-up question
+    stays in the same thread (GitHub issue #68's two-way loop)."""
+    entry = {"app": app, "issue_number": issue_number}
+    if _db is not None:
+        _db.collection("system").document("slack_threads").set({thread_ts: entry}, merge=True)
+        return
+    threads = _slack_threads()
+    threads[thread_ts] = entry
+    for stale in list(threads)[:-_SLACK_THREAD_CAP]:
+        del threads[stale]
+    _SLACK_THREADS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _SLACK_THREADS_PATH.write_text(json.dumps(threads, indent=2))
+
+
+def resolve_slack_thread(thread_ts: str) -> dict | None:
+    """{"app", "issue_number"} for a Slack thread recorded by record_slack_thread, or None."""
+    return _slack_threads().get(thread_ts)
+
+
+def slack_thread_for(app: str, issue_number: int) -> str | None:
+    """The thread_ts already anchoring this issue's conversation, or None -- so a follow-up
+    question replies into the existing thread instead of starting a fresh top-level message."""
+    for ts, entry in _slack_threads().items():
+        if entry.get("app") == app and entry.get("issue_number") == issue_number:
+            return ts
+    return None
 
 
 def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:

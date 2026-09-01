@@ -80,6 +80,24 @@ async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, 
             _server_log("human-input", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
+def _ack_slack_thread(app_name: str, issue_number: int) -> None:
+    """Close the loop visibly in the Slack thread this answer came from / is tracked in
+    (GitHub issue #68). Best-effort -- never blocks the resume."""
+    thread_ts = registry.slack_thread_for(app_name, issue_number)
+    if not thread_ts:
+        return
+    try:
+        from agentra.connectors import slack
+
+        slack._post_message(
+            "Got it — resuming from here. I'll follow up in this thread if I need anything else.",
+            channel=registry.get_slack_channel(app_name),
+            thread_ts=thread_ts,
+        )
+    except Exception:
+        logger.warning("_ack_slack_thread failed for app=%s issue=#%s", app_name, issue_number, exc_info=True)
+
+
 def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: str, *, source: str) -> dict:
     """Records `answer` on the needs_human issue (removing the needs_human label -- Memory.record_human_answer) and dispatches a resume in the background that reuses the original branch/session_id."""
     mem = Memory(repo)
@@ -104,6 +122,7 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         loop_id=registry.loop_id_for(objective),
     )
     mem.record_human_answer(issue_number, answer, resumed_run_key=run_key)
+    _ack_slack_thread(app_name, issue_number)
     _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} -- human answer accepted, resuming")
     asyncio.create_task(_run_human_resume_background(run_key, app_name, repo, context, answer))
     return {"run_key": run_key, "branch": context.get("branch"), "session_id": context.get("session_id")}

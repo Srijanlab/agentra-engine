@@ -170,6 +170,7 @@ from agentra.server.routes.chat import router as chat_router  # noqa: E402
 from agentra.server.routes.triggers import router as triggers_router  # noqa: E402
 from agentra.server.routes.human_input import router as human_input_router  # noqa: E402
 from agentra.server.routes.review import router as review_router  # noqa: E402
+from agentra.server.routes.slack import router as slack_router  # noqa: E402
 
 app.include_router(systems_router)
 app.include_router(connectors_router)
@@ -179,3 +180,4 @@ app.include_router(chat_router)
 app.include_router(triggers_router)
 app.include_router(human_input_router)
 app.include_router(review_router)
+app.include_router(slack_router)
