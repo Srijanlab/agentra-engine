@@ -94,7 +94,7 @@ def _record_production_release(repo: Path, run_id: str) -> list[str]:
     return newly_released
 
 
-def _new_run_key(app_name: str, source: str, objective: str) -> str:
+def _new_run_key(app_name: str, source: str, objective: str, feature: str | None = None) -> str:
     run_key = uuid.uuid4().hex[:8]
     _active_runs[run_key] = {
         "app": app_name,
@@ -102,8 +102,11 @@ def _new_run_key(app_name: str, source: str, objective: str) -> str:
         "status": "queued",
         "started_at": time.time(),
         "objective": objective,
+        "feature": feature,
         "loop_id": registry.loop_id_for(objective),
     }
+    if feature:
+        _active_runs[run_key]["result"] = {"feature": feature}
     registry.record_run(run_key, **_active_runs[run_key])
     return run_key
 
@@ -243,7 +246,7 @@ async def _dispatch_cycle(
             _server_log(source, f"app={app_name!r} not due for {due_in / 3600:.1f}h more (schedule_hours={env.schedule_hours}) -- skipped")
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
 
-    run_key = _new_run_key(app_name, source, objective)
+    run_key = _new_run_key(app_name, source, objective, feature=feature)
     _server_log(source, f"app={app_name!r} run_key={run_key} objective={objective!r} -- dispatched")
     asyncio.create_task(_run_autonomous_background(run_key, app_name, repo, objective, feature, skip_deploy))
     return {"triggered": True, "run_key": run_key}

@@ -36,6 +36,27 @@ async def github_connector_status() -> dict:
     if DEV_MODE and not github_app.is_configured():
         return {"configured": True, "installations": [_DEV_INSTALLATION], "error": None, "install_url": None}
     if not github_app.is_configured():
+        token = os.environ.get("GITHUB_TOKEN")
+        apps = registry.list_apps()
+        if token or apps:
+            accounts = set()
+            for app_info in apps.values():
+                url = app_info.get("repo_url", "")
+                owner_repo = github_app.owner_repo_from_url(url)
+                if owner_repo:
+                    accounts.add(owner_repo.split("/")[0])
+            installations = [
+                {"account": acc, "type": "Account", "repository_selection": "selected"}
+                for acc in sorted(accounts)
+            ]
+            if not installations and token:
+                installations = [{"account": "github-token", "type": "Token", "repository_selection": "all"}]
+            return {
+                "configured": True,
+                "installations": installations,
+                "error": None,
+                "install_url": None,
+            }
         return {"configured": False, "installations": [], "error": None, "install_url": None}
     try:
         installations = github_app.list_installations()
@@ -59,7 +80,19 @@ async def github_connector_repos() -> dict:
     if DEV_MODE and not github_app.is_configured():
         return {"repos": _DEV_REPOS}
     if not github_app.is_configured():
-        return {"repos": []}
+        apps = registry.list_apps()
+        repos = []
+        for name, info in apps.items():
+            url = info.get("repo_url", "")
+            owner_repo = github_app.owner_repo_from_url(url) or name
+            repos.append({
+                "full_name": owner_repo,
+                "clone_url": url,
+                "default_branch": info.get("branch", "main"),
+                "private": True,
+                "account": owner_repo.split("/")[0] if "/" in owner_repo else "github-token",
+            })
+        return {"repos": repos}
     try:
         return {"repos": github_app.list_repos()}
     except github_app.GitHubAppError as exc:
