@@ -287,6 +287,22 @@ request-signature verified. To enable:
 `SLACK_BOT_TOKEN` (from `agentra-slack-bot-token`) is what posts messages;
 thread→run mapping lives at `registry` `system/slack_threads`.
 
+## Slack assistant (ask / act)
+
+The same `/slack/events` endpoint also runs a conversational assistant: **DM the
+agentra app** or **@mention it** in a channel and it answers questions about the
+running system and takes actions against agentra's own HTTP API (trigger a cycle,
+pause/resume, submit a backlog item, answer a needs-human issue, switch the model
+backend, …). It cannot promote to production or run destructive shell commands.
+Each Slack thread keeps its own agent session; history is under
+`AGENTRA_HOME/chat_store/agentra/`. Implementation:
+`agentra/agents/slack_assistant.py`.
+
+To enable, add `app_mention` and `message.im` to the Slack app's Event
+Subscriptions (in addition to `message.channels`) and grant `app_mentions:read`
++ `im:history`/`im:read`/`chat:write`. Distinct from the #68 human-input thread
+flow above — a reply inside a HUMAN_INPUT_REQUIRED thread still resumes that run.
+
 ## Model backend: Claude vs NIMS API
 
 The agents' LLM traffic normally goes straight to `api.anthropic.com` using the

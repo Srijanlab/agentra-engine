@@ -64,6 +64,22 @@ class MemoryIssueLifecycleMixin:
         except Exception:
             logger.warning("record_human_answer: failed for issue #%s on %s", issue_number, repo_url, exc_info=True)
 
+    def human_input_pending(self, issue_number: int) -> bool:
+        """True while a needs_human issue still carries the need_human label -- no answer
+        has been recorded yet through any channel (dashboard, Slack, GitHub comment).
+        record_human_answer removes that label, so a second answer arriving afterwards
+        (e.g. a Slack reply landing just after a dashboard answer) sees False here."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return True
+        try:
+            from agentra.connectors import github_issues
+
+            issue = github_issues.get_issue(repo_url, issue_number)
+            return issue is not None and _NEED_HUMAN_LABEL in (issue.get("labels") or [])
+        except Exception:
+            return True
+
     def escalate_existing_issue(self, issue_number: int, run_id: str, full_diagnosis: str) -> None:
         """Escalates directly on the issue already tracking this work (comments the blocking question, adds the needs_human label) instead of filing a separate needs_human issue -- work that already has a home (a feature/bug issue) should never spawn a duplicate for a blocking question about that same work (confirmed live: issues #79, #80, #81, same interrupted item, three separate escalation issues)."""
         repo_url = self._repo_url()

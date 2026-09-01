@@ -566,6 +566,31 @@ def _tools_for(session: OrchestratorSession) -> list:
         elif sub_feature_of and sub_feature_of.isdigit():
             tracking_issue = int(sub_feature_of)
 
+        if tracking_issue is not None:
+            registry.record_run(session.run_id, loop_id=registry.loop_id_for_issue(session.app_name, tracking_issue))
+
+        # One loop at a time (user directive): a feature's loop stays open until it
+        # reaches production. Don't start a brand-new backlog item while another is
+        # still mid-implementation -- resume that one first. A loop that's blocked on
+        # a human carries the need_human label, which in_progress_items() already
+        # filters out, so a blocked loop never stalls other work.
+        if resolves_origin == "new" and session.human_answer_issue is None:
+            wip = [
+                it for it in session.mem.in_progress_items()
+                if str(it.get("external_id") or "") not in ("", str(tracking_issue))
+            ]
+            if wip:
+                it = wip[0]
+                title = it.get("diagnosis") or it.get("description") or "the item"
+                return {"content": [{"type": "text", "text": (
+                    f"Open loop not finished: issue #{it.get('external_id')} ({title!r}) is still "
+                    "in progress. Resume and land that one before starting new work -- call "
+                    f"implement_feature again with resolves_id={str(it.get('external_id'))!r} (and "
+                    "resume_branch if check_backlog gave one), then deploy_pre_prod + verify_pre_prod. "
+                    "Only start something new if that issue is genuinely blocked, in which case "
+                    "report HUMAN_INPUT_REQUIRED for it so it moves out of the way."
+                )}], "is_error": True}
+
         if not resolves_id and session.backlog_ids_shown and resolves_origin != "new":
             return {
                 "content": [{"type": "text", "text": (
@@ -770,6 +795,8 @@ def _tools_for(session: OrchestratorSession) -> list:
         parent_issue_number = code_complete["board_issue_number"] if code_complete else None
         if issue_number is not None:
             session.code_complete_issue_numbers.append(str(issue_number))
+            if resolves_origin != "known_bug":
+                session.all_code_complete_are_bugfixes = False
         if code_complete and not more_parts_expected:
             # Queued for the notify_shipped Slack message, drained once pre-prod delivery is
             # actually confirmed at deploy_pre_prod's trivial-merge success or verify_pre_prod's
@@ -897,12 +924,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         "deploy_pre_prod",
         "Deploy everything implemented so far this run (implement_feature may have been called "
         "more than once) to the pre-prod environment. Requires passing local tests first. "
-        "Automatically classifies the accumulated change: a trivial one (test fix, docs, config, "
-        "rename, or a couple-line bug fix) is merged straight to pre-prod without a full deploy or "
-        "live verification -- passing local tests is already enough proof at that size. A "
-        "non-trivial change gets the real deploy, and should go through verify_pre_prod next. "
-        "Prefer batching: if check_backlog showed more non-trivial items waiting, implement several "
-        "before your first call here rather than deploying once per item.",
+        "Automatically classifies this item's change: a trivial one (test fix, docs, config, "
+        "rename, a couple-line fix) or a minor bug fix (small, contained fix to a known bug) is "
+        "merged straight to pre-prod without a full deploy or live verification -- passing local "
+        "tests is already enough proof at that size. A non-trivial change gets the real deploy, "
+        "and should go through verify_pre_prod next. Covers everything implement_feature built for "
+        "this one backlog item -- one item per run, do not batch multiple items into one deploy.",
         {},
     )
     async def deploy_pre_prod(_args):
@@ -933,12 +960,14 @@ def _tools_for(session: OrchestratorSession) -> list:
             fetch_ref(session.repo, session.env.pre_prod_branch)
         except Exception:
             pass  # best-effort -- classify_change falls back to STANDARD if the diff can't be read
+        is_bug_fix = bool(session.code_complete_issue_numbers) and session.all_code_complete_are_bugfixes
         session.change_risk = change_risk.classify_change(
-            session.repo, f"origin/{session.env.pre_prod_branch}", session.feature_branch
+            session.repo, f"origin/{session.env.pre_prod_branch}", session.feature_branch,
+            is_bug_fix=is_bug_fix,
         )
         session.note(f"deploy_pre_prod: change_risk={session.change_risk}", ok=True)
 
-        if session.change_risk == change_risk.TRIVIAL:
+        if session.change_risk in change_risk.SKIP_PRE_PROD:
             deploy = await deployment.merge_to_pre_prod_only(session.repo, session.env, session.feature_branch)
             if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
                 return stop
@@ -949,7 +978,9 @@ def _tools_for(session: OrchestratorSession) -> list:
             session.deployed_to_pre_prod = ok
             # A passing local test suite is the whole point of the TRIVIAL
             session.pre_prod_verified = ok
-            session.note(f"deploy_pre_prod: trivial change, merged only: ok={ok}", ok=ok, cost_usd=deploy.cost_usd)
+            session.note(
+                f"deploy_pre_prod: {session.change_risk} change, merged only: ok={ok}", ok=ok, cost_usd=deploy.cost_usd
+            )
             if not ok:
                 session.mem.record_failure(session.run_id, "deployment", deploy.text)
                 session.record_failure("deploy_pre_prod")
@@ -964,8 +995,8 @@ def _tools_for(session: OrchestratorSession) -> list:
                 # verify_pre_prod, so this merge succeeding IS confirmed pre-prod delivery.
                 _notify_shipped_pending(
                     session,
-                    "Merged to pre-prod without a live deploy (trivial change, local tests are "
-                    "sufficient proof).",
+                    f"Merged to pre-prod without a live deploy ({session.change_risk} change, local "
+                    "tests are sufficient proof).",
                 )
             return {
                 "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this change."}],
@@ -1037,10 +1068,12 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def verify_pre_prod(_args):
         if stop := session.check_hard_stop():
             return stop
-        if session.change_risk == change_risk.TRIVIAL:
-            session.note("verify_pre_prod: skipped, deploy_pre_prod classified this change as trivial", ok=True)
+        if session.change_risk in change_risk.SKIP_PRE_PROD:
+            session.note(
+                f"verify_pre_prod: skipped, deploy_pre_prod classified this change as {session.change_risk}", ok=True
+            )
             return {
-                "content": [{"type": "text", "text": "Nothing to verify -- deploy_pre_prod classified this as a trivial change and already merged it without a live deploy."}],
+                "content": [{"type": "text", "text": f"Nothing to verify -- deploy_pre_prod classified this as a {session.change_risk} change and already merged it without a live deploy."}],
             }
         if not session.pre_prod_url:
             return {

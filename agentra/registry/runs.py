@@ -57,6 +57,15 @@ def loop_id_for(objective: str) -> str:
     return hashlib.sha1(objective.encode("utf-8")).hexdigest()[:10]
 
 
+def loop_id_for_issue(app: str, issue_number: int | str) -> str:
+    """A loop maps 1:1 to a tracked GitHub issue -- every run that works that issue
+    (implement, resume-after-human, deploy, verify) shares this id. Falls back to
+    loop_id_for(objective) at dispatch time, before the run has picked an issue."""
+    import hashlib
+
+    return hashlib.sha1(f"{app}#{issue_number}".encode("utf-8")).hexdigest()[:10]
+
+
 def list_loops(app: str | None = None) -> list[dict]:
     """Group runs by loop_id and return loop summaries, newest loop first."""
     runs = [r for r in list_runs(limit=1000) if (app is None or r.get("app") == app) and r.get("loop_id")]

@@ -5,7 +5,11 @@ import subprocess
 from pathlib import Path
 
 TRIVIAL = "trivial"
+MINOR = "minor"
 STANDARD = "standard"
+
+# Risk levels that skip the pre-prod deploy + live Testing Agent verification.
+SKIP_PRE_PROD = frozenset({TRIVIAL, MINOR})
 
 # A change touching only these kinds of paths never ships new product
 _TRIVIAL_PATH_RE = re.compile(
@@ -20,9 +24,14 @@ _TRIVIAL_PATH_RE = re.compile(
 TRIVIAL_MAX_FILES = 3
 TRIVIAL_MAX_LINES = 15
 
+# A fix to an already-tracked bug gets a more generous ceiling before it needs a
+# full pre-prod deploy -- a contained bug fix that stays under this is MINOR.
+MINOR_MAX_FILES = 6
+MINOR_MAX_LINES = 60
 
-def classify_change(repo: Path, base_ref: str, feature_ref: str) -> str:
-    """TRIVIAL or STANDARD, based on the diff of everything feature_ref has that base_ref doesn't (three-dot semantics: from their merge-base to feature_ref's tip, not base_ref's own independent history)."""
+
+def classify_change(repo: Path, base_ref: str, feature_ref: str, *, is_bug_fix: bool = False) -> str:
+    """TRIVIAL, MINOR (only when is_bug_fix), or STANDARD, based on the diff of everything feature_ref has that base_ref doesn't (three-dot semantics: from their merge-base to feature_ref's tip, not base_ref's own independent history)."""
     diff = subprocess.run(
         ["git", "-C", str(repo), "diff", "--numstat", "-M", f"{base_ref}...{feature_ref}"],
         capture_output=True, text=True,
@@ -55,4 +64,6 @@ def classify_change(repo: Path, base_ref: str, feature_ref: str) -> str:
         return TRIVIAL
     if len(non_trivial_paths) <= TRIVIAL_MAX_FILES and total_changed <= TRIVIAL_MAX_LINES:
         return TRIVIAL
+    if is_bug_fix and len(non_trivial_paths) <= MINOR_MAX_FILES and total_changed <= MINOR_MAX_LINES:
+        return MINOR
     return STANDARD
