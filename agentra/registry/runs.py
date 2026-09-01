@@ -77,6 +77,13 @@ def list_loops(app: str | None = None) -> list[dict]:
     for loop in loops.values():
         loop["runs"].sort(key=lambda r: r["started_at"], reverse=True)
         loop["started_at"] = min(r["started_at"] for r in loop["runs"])
+        # A loop maps to one tracked issue/feature; surface its title from
+        # whichever run recorded it (run.feature or run.result.feature).
+        loop["title"] = next(
+            (r.get("feature") or (r.get("result") or {}).get("feature") for r in loop["runs"]
+             if r.get("feature") or (r.get("result") or {}).get("feature")),
+            None,
+        )
         loop["cost_usd"] = sum((r.get("result") or {}).get("cost_usd") or 0 for r in loop["runs"])
         loop["cycles_completed"] = sum(1 for r in loop["runs"] if r.get("status") == "completed")
         loop["cycles_total"] = len(loop["runs"])
