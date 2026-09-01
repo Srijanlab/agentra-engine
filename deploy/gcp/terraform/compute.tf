@@ -102,7 +102,7 @@ locals {
     # google/cloud-sdk container instead, authenticated the same way any
     # container on this instance is: the metadata server, automatically,
     # no credential file needed.
-    gcs() { docker run --rm google/cloud-sdk:slim gcloud secrets versions access latest --secret="$1"; }
+    gcs() { docker run --rm google/cloud-sdk:slim gcloud secrets versions access latest --secret="$1" 2>/dev/null || true; }
 
     # docker-credential-gcr *is* preinstalled on COS, but it writes its
     # config under $HOME/.docker, and root's $HOME (/root) is on the same
@@ -151,6 +151,44 @@ locals {
     # just-superseded previous :staging layers), not just dangling ones.
     docker image prune -af 2>/dev/null || true
 
+    # NIM proxy: app -> agentra-nim-nginx -> agentra-nim-proxy ->
+    # integrate.api.nvidia.com. Only carries traffic when the dashboard's Model
+    # Backend toggle is "nim" (agentra/agents/base.py:_sdk_env sets
+    # ANTHROPIC_BASE_URL=$NIM_PROXY_URL only then); harmless to keep running
+    # otherwise. Same $IMAGE as the app, different entrypoint. Idempotent.
+    docker rm -f agentra-nim-proxy 2>/dev/null || true
+    docker run -d --name agentra-nim-proxy --restart=always \
+      --network agentra-app-net \
+      --entrypoint uvicorn \
+      -e NVIDIA_API_KEY="$(gcs agentra-nvidia-api-key)" \
+      -e NIM_MODEL="meta/llama-3.2-90b-vision-instruct" \
+      "$IMAGE" agentra.proxy.main:app --host 0.0.0.0 --port 8000
+
+    NIM_NGINX_CONF="$MOUNT/nginx/nim.conf"
+    cat > "$NIM_NGINX_CONF" <<'NIMNGINXCONF'
+    events { worker_connections 1024; }
+    http {
+        server {
+            listen 80;
+            location / {
+                proxy_pass http://agentra-nim-proxy:8000;
+                proxy_set_header Host $host;
+                proxy_set_header Connection '';
+                proxy_http_version 1.1;
+                chunked_transfer_encoding off;
+                proxy_buffering off;
+                proxy_cache off;
+                proxy_read_timeout 300s;
+            }
+        }
+    }
+    NIMNGINXCONF
+    docker rm -f agentra-nim-nginx 2>/dev/null || true
+    docker run -d --name agentra-nim-nginx --restart=always \
+      --network agentra-app-net \
+      -v "$NIM_NGINX_CONF:/etc/nginx/nginx.conf:ro" \
+      nginx:alpine
+
     docker rm -f "$ACTIVE_CONTAINER" 2>/dev/null || true
     docker run -d --name "$ACTIVE_CONTAINER" --restart=always \
       --network agentra-app-net \
@@ -171,9 +209,12 @@ locals {
       -e GITHUB_APP_PRIVATE_KEY="$(gcs agentra-github-app-private-key)" \
       -e ALARM_WEBHOOK_PASSWORD="$(gcs agentra-alarm-webhook-password)" \
       -e SLACK_BOT_TOKEN="$(gcs agentra-slack-bot-token)" \
+      -e NIM_PROXY_URL="http://agentra-nim-nginx" \
       "$IMAGE" serve --port 8080
-    # Deliberately NOT setting CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY --
-    # auth comes from the claude-home volume's login session (one-time
+    # NIM_PROXY_URL is inert unless the dashboard's Model Backend toggle is set
+    # to "nim" (agentra/agents/base.py:_sdk_env). Deliberately NOT setting
+    # CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY -- for the default "claude"
+    # backend, auth comes from the claude-home volume's login session (one-time
     # `docker exec -it "$ACTIVE_CONTAINER" claude auth login --claudeai`
     # over IAP SSH). No -p/--publish: nginx (agentra-proxy, below) reaches
     # this over agentra-app-net by container DNS name, never the host's own

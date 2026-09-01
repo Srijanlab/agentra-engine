@@ -1,6 +1,7 @@
 """Shared machinery for invoking a single agent turn via the Claude Agent SDK."""
 
 import json
+import os
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import contextmanager
@@ -52,6 +53,23 @@ def _friendly_error_text(raw: str) -> str:
     if is_login_required_failure(raw):
         return "Claude Code isn't authenticated on this server right now -- that needs a human to fix (re-run /login or refresh credentials), not something asking again will resolve."
     return raw
+
+def _sdk_env() -> dict[str, str]:
+    """Extra env for the Claude Agent SDK subprocess. Empty for the default Claude
+    backend (SDK reaches api.anthropic.com with the login session); points at the
+    self-hosted NIM proxy when the dashboard toggle selects it."""
+    from agentra import registry
+
+    if registry.get_llm_backend() != "nim":
+        return {}
+    base_url = os.environ.get("NIM_PROXY_URL", "")
+    if not base_url:
+        return {}
+    return {
+        "ANTHROPIC_BASE_URL": base_url,
+        "ANTHROPIC_API_KEY": os.environ.get("NIM_PROXY_API_KEY", "nim-proxy"),
+    }
+
 
 RunLogger = Callable[[str], None]
 _RUN_LOGGER: ContextVar[RunLogger | None] = ContextVar("agentra_run_logger", default=None)
@@ -267,6 +285,7 @@ async def run_agent(
         include_hook_events=True,
         resume=resume,
         mcp_servers=mcp_servers or {},
+        env=_sdk_env(),
     )
 
     max_contradictory_attempts = 2 if retry_on_contradictory_result else 1
@@ -367,6 +386,7 @@ async def stream_chat_turn(
         max_turns=max_turns,
         include_partial_messages=True,
         resume=resume,
+        env=_sdk_env(),
     )
 
     raw_logger = _RUN_LOGGER.get()

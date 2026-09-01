@@ -16,6 +16,7 @@ AGENTRA_HOME = Path(_env_value) if _env_value else Path.home() / ".agentra"
 APPS_PATH = AGENTRA_HOME / "apps.json"
 INBOX_ROOT = AGENTRA_HOME / "inbox"
 PAUSE_PATH = AGENTRA_HOME / "paused.json"
+_LLM_BACKEND_PATH = AGENTRA_HOME / "llm_backend.json"
 _RUNS_PATH = AGENTRA_HOME / "runs.json"
 _AGENT_STEPS_PATH = AGENTRA_HOME / "agent_steps.jsonl"
 
@@ -212,6 +213,46 @@ def resume() -> None:
         _db.collection("system").document("pause").delete()
         return
     PAUSE_PATH.unlink(missing_ok=True)
+
+
+VALID_LLM_BACKENDS = ("claude", "nim")
+_DEFAULT_LLM_BACKEND = "claude"
+_LLM_BACKEND_CACHE_TTL_SECONDS = 30
+_llm_backend_cache: tuple[float, str] | None = None
+
+
+def get_llm_backend() -> str:
+    """Which LLM the agent SDK talks to: "claude" (api.anthropic.com, default) or "nim"
+    (the self-hosted NVIDIA NIM proxy). Global toggle, set from the dashboard, read on
+    every agent turn -- cached briefly to spare Firestore."""
+    global _llm_backend_cache
+    now = time.monotonic()
+    if _llm_backend_cache is not None and (now - _llm_backend_cache[0]) < _LLM_BACKEND_CACHE_TTL_SECONDS:
+        return _llm_backend_cache[1]
+
+    if _db is not None:
+        doc = _db.collection("system").document("llm_backend").get()
+        backend = (doc.to_dict() or {}).get("backend") if doc.exists else None
+    elif _LLM_BACKEND_PATH.exists():
+        backend = json.loads(_LLM_BACKEND_PATH.read_text()).get("backend")
+    else:
+        backend = None
+
+    backend = backend if backend in VALID_LLM_BACKENDS else _DEFAULT_LLM_BACKEND
+    _llm_backend_cache = (now, backend)
+    return backend
+
+
+def set_llm_backend(backend: str) -> None:
+    if backend not in VALID_LLM_BACKENDS:
+        raise ValueError(f"unknown llm backend {backend!r} -- expected one of {VALID_LLM_BACKENDS}")
+    global _llm_backend_cache
+    _llm_backend_cache = None
+    if _db is not None:
+        _db.collection("system").document("llm_backend").set({"backend": backend})
+        return
+    _LLM_BACKEND_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _LLM_BACKEND_PATH.write_text(json.dumps({"backend": backend}, indent=2))
 
 
 def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:
