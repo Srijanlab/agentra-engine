@@ -239,8 +239,31 @@ def _seed_runs() -> None:
              objective=agentra_obj, loop_id=agentra_loop, result={
                  "run_id": "seed0008", "cost_usd": 0.52, "feature": "Pre-prod health check: 120s window + crash logs",
                  "final_message": "Widened the pre-prod health window to 120s and made a crashed sibling report its logs. Live-verified."}),
+        # Same loop as seed0004 -- a first run that hit a Slack human-input pause,
+        # then seed0004 resumed and finished it.
+        dict(run_key="seed0009", app="agentra", source="scheduled", status="waiting_for_human", started_at=now - 9800,
+             objective=agentra_obj,
+             human_input={
+                 "issue_number": None, "issue_url": None,
+                 "question": "Should a GitHub-comment reply also resume the run, or Slack-thread only?",
+                 "branch": "dev/9ac0-slack-loop", "session_id": None, "app": "agentra", "waiting_since": now - 9600,
+                 "category": "product_direction",
+             },
+             result={
+                 "run_id": "seed0009", "cost_usd": 0.44, "feature": "Two-way Slack human-input loop",
+                 "final_message": "Paused: asked in Slack whether replies should also resume from a GitHub comment. Awaiting an answer."}),
+        # Same loop as seed0001 -- a first pass that only got as far as the design note.
+        dict(run_key="seed0010", app="agentra", source="scheduled", status="completed", started_at=now - 26000,
+             objective=agentra_obj, result={
+                 "run_id": "seed0010", "cost_usd": 0.12, "feature": "Stagnation breaker for no-progress cycles",
+                 "final_message": "Scanned the codebase and drafted the STAGNATION_WINDOW approach; implementation next run."}),
     ]
+    # One loop per tracked feature (loop_id derived from the feature, not the
+    # objective) -- mirrors the "one loop = one issue" model.
     for r in runs:
+        feat = r.get("feature") or (r.get("result") or {}).get("feature")
+        if feat:
+            r["loop_id"] = registry.loop_id_for(feat)
         registry.record_run(**r)
 
     steps = [
