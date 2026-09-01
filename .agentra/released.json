@@ -1,0 +1,38 @@
+[
+  {
+    "feature": "A2A protocol implementation",
+    "commit_sha": "0da65163b105a161fe469577b191694860edd9a6",
+    "ts": "2026-09-01T14:29:12.630674+00:00",
+    "release_run_id": "d4294721"
+  },
+  {
+    "feature": "Slack incoming communication",
+    "commit_sha": "0da65163b105a161fe469577b191694860edd9a6",
+    "ts": "2026-09-01T14:29:12.631339+00:00",
+    "release_run_id": "d4294721"
+  },
+  {
+    "feature": "fix run_local silently overwrites a human",
+    "commit_sha": "0da65163b105a161fe469577b191694860edd9a6",
+    "ts": "2026-09-01T14:29:12.631630+00:00",
+    "release_run_id": "d4294721"
+  },
+  {
+    "feature": "Slack Notification for shipped feature",
+    "commit_sha": "0da65163b105a161fe469577b191694860edd9a6",
+    "ts": "2026-09-01T14:29:12.632644+00:00",
+    "release_run_id": "d4294721"
+  },
+  {
+    "feature": "Fix GitHub #92: self-hosted production promotion race (teardown fires before status durably written)",
+    "commit_sha": "0da65163b105a161fe469577b191694860edd9a6",
+    "ts": "2026-09-01T14:29:12.633879+00:00",
+    "release_run_id": "d4294721"
+  },
+  {
+    "feature": "Migrate agentra dashboard to shadcn/ui, following standard SaaS design conventions",
+    "commit_sha": "0da65163b105a161fe469577b191694860edd9a6",
+    "ts": "2026-09-01T14:29:12.634623+00:00",
+    "release_run_id": "d4294721"
+  }
+]
