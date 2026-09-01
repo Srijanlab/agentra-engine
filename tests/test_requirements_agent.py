@@ -224,7 +224,7 @@ def test_verify_pre_prod_uses_current_spec_not_codebase_summary(tmp_path, monkey
 
     captured = {}
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
         captured["spec"] = spec
         return AgentResult(ok=True, text="ok", json_data={"status": "pass", "reachable": True, "feature_verified": True}, cost_usd=0.01, turns=2)
 
@@ -242,7 +242,7 @@ def test_verify_pre_prod_falls_back_to_codebase_summary_without_a_spec(tmp_path,
 
     captured = {}
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
         captured["spec"] = spec
         return AgentResult(ok=True, text="ok", json_data={"status": "pass"}, cost_usd=0.01, turns=2)
 

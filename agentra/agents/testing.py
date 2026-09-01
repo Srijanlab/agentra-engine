@@ -227,18 +227,38 @@ def _write_report(repo: Path, run_id: str, spec: str, preview_url: str, result: 
 
 
 async def run_pre_prod(
-    repo: Path, spec: str, preview_url: str, run_id: str, session_id: str | None = None
+    repo: Path, spec: str, preview_url: str, run_id: str, session_id: str | None = None,
+    acceptance_criteria: list | None = None,
 ) -> AgentResult:
     """`spec` is the feature's requirements/acceptance criteria (agents/..."""
-    from agentra.agents import screenshot
+    from urllib.parse import urljoin
 
-    ok, detail = await screenshot.capture(preview_url, screenshot_path(repo, run_id))
-    screenshot_note = (
-        "A full-page screenshot of the live URL was already captured for you and is attached "
-        "to this run's report -- no need to take your own."
-        if ok
-        else f"Screenshot capture failed ({detail}) -- note this in your report, but don't let it block the rest of your verification."
-    )
+    from agentra.agents import screenshot
+    from agentra.agents.spec import page_urls
+
+    root_shot = screenshot_path(repo, run_id)
+    ok, detail = await screenshot.capture(preview_url, root_shot)
+
+    # GitHub #108: one extra full-page shot per distinct UI acceptance-criterion route.
+    extra_captured: list[str] = []
+    for route in page_urls(acceptance_criteria):
+        shot = root_shot.parent / f"screenshot-{screenshot.route_slug(route)}.png"
+        good, _ = await screenshot.capture(urljoin(preview_url, route), shot)
+        if good:
+            extra_captured.append(shot.name)
+
+    if ok:
+        pages = ", ".join([root_shot.name, *extra_captured])
+        screenshot_note = (
+            f"Full-page screenshots were already captured for you and attached to this run's report "
+            f"({pages}){' -- one per acceptance-criterion page' if extra_captured else ''}. "
+            "No need to take your own."
+        )
+    else:
+        screenshot_note = (
+            f"Screenshot capture failed ({detail}) -- note this in your report, but don't let it block "
+            "the rest of your verification."
+        )
 
     prompt = f"""{spec}
 

@@ -38,11 +38,16 @@ def _actionable_bugs(bugs: list[dict]) -> list[dict]:
 
 def _format_spec(spec: dict, human_answer: str | None = None) -> str:
     """Requirements Agent's JSON spec formatted as readable text."""
+    from agentra.agents.spec import criterion_page_url, criterion_text
+
     lines = [f"Spec: {spec.get('spec', '')}"]
     criteria = spec.get("acceptance_criteria") or []
     if criteria:
         lines.append("\nAcceptance criteria:")
-        lines.extend(f"- {c}" for c in criteria)
+        for c in criteria:
+            page_url = criterion_page_url(c)
+            suffix = f"  (route: {page_url})" if page_url else ""
+            lines.append(f"- {criterion_text(c)}{suffix}")
     if human_answer:
         lines.append(
             "\nA human has answered your previous blocking question -- use this to proceed, "
@@ -595,6 +600,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         else:
             spec_text = ""
         session.current_spec = spec_text or None
+        session.current_spec_dict = spec_dict or None
 
         try:
             impl = await implementation.run(
@@ -1009,8 +1015,10 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "is_error": True,
             }
         spec_for_verification = session.current_spec or session.cb_summary or "No spec available."
+        criteria = (session.current_spec_dict or {}).get("acceptance_criteria")
         test = await testing.run_pre_prod(
-            session.repo, spec_for_verification, session.pre_prod_url, session.run_id, session_id=session.session_id
+            session.repo, spec_for_verification, session.pre_prod_url, session.run_id,
+            session_id=session.session_id, acceptance_criteria=criteria,
         )
         if stop := _check_auth_failure(session, "verify_pre_prod", test):
             return stop
