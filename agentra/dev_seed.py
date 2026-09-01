@@ -33,7 +33,7 @@ _APPS = {
             {"description": "Per-app cost budget with a soft cap warning in the dashboard.", "source": "customer"},
             {"description": "Export a run's full agent-step transcript as markdown.", "source": "discovery"},
         ],
-        "in_progress": [("Retry transient Firestore writes with backoff", "dev/9f2c-firestore-retry", "run_ip01")],
+        "in_progress": [("Retry transient Firestore writes with backoff", "dev/9f2c-firestore-retry", "seed0006")],
         "code_complete": [
             ("Stagnation breaker for no-progress cycles", "9c104a7"),
             ("Firestore-backed run history", "ebbd94d"),
@@ -42,7 +42,7 @@ _APPS = {
         "ready_to_review": [
             {
                 "feature": "Two-way Slack human-input loop",
-                "run_id": "run_rr01",
+                "run_id": "seed0004",
                 "report": {
                     "status": "pass",
                     "reachable": True,
@@ -60,7 +60,7 @@ _APPS = {
             },
             {
                 "feature": "Pre-prod health check: 120s window + crash logs",
-                "run_id": "run_rr02",
+                "run_id": "seed0008",
                 "report": {
                     "status": "pass",
                     "reachable": True,
@@ -92,14 +92,14 @@ _APPS = {
         "features": [
             {"description": "Add a keyboard shortcut to approve the focused item.", "source": "customer"},
         ],
-        "in_progress": [("Bulk-reject with a shared reason", "dev/4a1b-bulk-reject", "run_ip02")],
+        "in_progress": [("Bulk-reject with a shared reason", "dev/4a1b-bulk-reject", "seed0007")],
         "code_complete": [
             ("Approvals queue UI", "a1b2c3d"),
         ],
         "ready_to_review": [
             {
                 "feature": "Bulk approve action",
-                "run_id": "run_rr03",
+                "run_id": "seed0005",
                 "report": {
                     "status": "pass",
                     "reachable": True,
@@ -235,6 +235,10 @@ def _seed_runs() -> None:
              objective=agentra_obj, loop_id=agentra_loop, feature="Retry transient Firestore writes with backoff"),
         dict(run_key="seed0007", app="cap", source="scheduled", status="queued", started_at=now - 20,
              objective=cap_obj, loop_id=cap_loop, feature="Bulk-reject with a shared reason"),
+        dict(run_key="seed0008", app="agentra", source="scheduled", status="completed", started_at=now - 7800,
+             objective=agentra_obj, loop_id=agentra_loop, result={
+                 "run_id": "seed0008", "cost_usd": 0.52, "feature": "Pre-prod health check: 120s window + crash logs",
+                 "final_message": "Widened the pre-prod health window to 120s and made a crashed sibling report its logs. Live-verified."}),
     ]
     for r in runs:
         registry.record_run(**r)
