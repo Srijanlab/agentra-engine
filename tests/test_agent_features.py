@@ -220,6 +220,39 @@ def test_list_loops_orders_runs_newest_first(tmp_path, monkeypatch):
     assert loop["started_at"] == base
 
 
+def test_list_loops_surfaces_the_tracked_issue_number(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path, "app-one")
+
+    loop_id = registry.loop_id_for_issue("app-one", 130)
+    registry.record_run(
+        "run-impl", app="app-one", source="on-demand", status="completed",
+        started_at=time.time(), objective="obj", loop_id=loop_id,
+        feature="A very long auto-generated implementation brief that nobody wants as a heading",
+        issue_number="130",
+    )
+    # A later run in the same loop that never re-recorded the issue number.
+    registry.record_run(
+        "run-verify", app="app-one", source="on-demand", status="completed",
+        started_at=time.time() + 10, objective="obj", loop_id=loop_id,
+    )
+
+    client = TestClient(server.app)
+    loops = client.get("/apps/app-one/loops").json()["loops"]
+    assert len(loops) == 1
+    assert loops[0]["issue_number"] == "130"
+
+    # A loop with no issue-scoped run falls back to a null issue_number.
+    plain_loop = registry.loop_id_for("just an objective")
+    registry.record_run(
+        "run-plain", app="app-one", source="on-demand", status="completed",
+        started_at=time.time(), objective="just an objective", loop_id=plain_loop,
+    )
+    loops = client.get("/apps/app-one/loops").json()["loops"]
+    plain = next(l for l in loops if l["loop_id"] == plain_loop)
+    assert plain["issue_number"] is None
+
+
 def test_structured_standup_generation(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = tmp_path / "standup-repo"

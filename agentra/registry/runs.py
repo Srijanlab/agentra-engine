@@ -93,6 +93,13 @@ def list_loops(app: str | None = None) -> list[dict]:
              if r.get("feature") or (r.get("result") or {}).get("feature")),
             None,
         )
+        # The tracked GitHub issue number, when a run in this loop recorded one
+        # (implement_feature stamps it alongside loop_id) -- lets the dashboard
+        # show the issue's own title/link instead of the long auto-generated brief.
+        loop["issue_number"] = next(
+            (str(r["issue_number"]) for r in loop["runs"] if r.get("issue_number")),
+            None,
+        )
         loop["cost_usd"] = sum((r.get("result") or {}).get("cost_usd") or 0 for r in loop["runs"])
         loop["cycles_completed"] = sum(1 for r in loop["runs"] if r.get("status") == "completed")
         loop["cycles_total"] = len(loop["runs"])

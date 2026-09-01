@@ -572,7 +572,11 @@ def _tools_for(session: OrchestratorSession) -> list:
             tracking_issue = int(sub_feature_of)
 
         if tracking_issue is not None:
-            registry.record_run(session.run_id, loop_id=registry.loop_id_for_issue(session.app_name, tracking_issue))
+            registry.record_run(
+                session.run_id,
+                loop_id=registry.loop_id_for_issue(session.app_name, tracking_issue),
+                issue_number=str(tracking_issue),
+            )
             # One backlog item per run, enforced regardless of resolves_origin -- a second
             # implement_feature call naming a *different* already-tracked issue is just as
             # much a batching violation as picking up brand-new work mid-run.
