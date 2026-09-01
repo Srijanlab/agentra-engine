@@ -1562,3 +1562,48 @@ def test_deploy_pre_prod_self_hosted_sweeps_stale_siblings_before_deploying(tmp_
 
     assert result.ok is True
     assert cleanup_calls == [config]
+
+
+# -- GitHub issue #117: pre-prod health check ------------------------------------
+
+
+def test_wait_for_healthy_bails_early_when_the_container_exited(monkeypatch):
+    """A sibling that crashes during startup should report that (with its logs),
+    not silently burn the full timeout window."""
+    sleeps = []
+
+    def _run(args, **kwargs):
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="curl: connection refused")
+        if args[:3] == ["docker", "inspect", "-f"]:
+            return subprocess.CompletedProcess(args, 0, stdout="false\n", stderr="")
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="ModuleNotFoundError: no module named 'x'")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    async def _no_sleep(*a, **k):
+        sleeps.append(1)
+
+    monkeypatch.setattr(deployment.subprocess, "run", _run)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _no_sleep)
+
+    healthy, detail = asyncio.run(deployment._wait_for_healthy("widget-preprod-abc"))
+
+    assert healthy is False
+    assert "exited during startup" in detail
+    assert "ModuleNotFoundError" in detail
+    assert sleeps == []  # bailed on the first attempt, never slept the window out
+
+
+def test_wait_for_healthy_returns_true_once_health_answers(monkeypatch):
+    def _run(args, **kwargs):
+        if args[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(deployment.subprocess, "run", _run)
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    healthy, detail = asyncio.run(deployment._wait_for_healthy("widget-preprod-abc"))
+    assert healthy is True
+    assert detail == ""

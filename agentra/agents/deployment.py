@@ -298,7 +298,11 @@ async def deploy_pre_prod(
     )
 
 
-_HEALTH_CHECK_ATTEMPTS = 10
+# GitHub issue #117: a cold agentra sibling has to git-clone the target repo,
+# import the full package graph, and bind uvicorn before /health answers -- on a
+# loaded shared VM that regularly took longer than the old 30s (10 x 3s) window,
+# so pre-prod deploys failed spuriously. Default is now 120s, env-overridable.
+_HEALTH_CHECK_ATTEMPTS = int(os.environ.get("AGENTRA_HEALTH_CHECK_ATTEMPTS", "40"))
 _HEALTH_CHECK_DELAY_SECONDS = 3
 _NOT_CONFIGURED_TEXT = (
     "self_hosted_vm strategy selected but this repo has no "
@@ -492,13 +496,13 @@ async def deploy_pre_prod_self_hosted(
             json_data={"status": "failed", "preview_url": None},
             cost_usd=0.0, turns=0,
         )
-    healthy = await _wait_for_healthy(container_name)
+    healthy, health_detail = await _wait_for_healthy(container_name)
 
     if not healthy:
         return AgentResult(
             ok=False,
-            text=f"{container_name} did not become healthy on {preview_url}/health within "
-            f"{_HEALTH_CHECK_ATTEMPTS * _HEALTH_CHECK_DELAY_SECONDS}s.",
+            text=f"{container_name} did not become healthy on {preview_url}/health "
+            f"({health_detail})",
             json_data={"status": "failed", "preview_url": preview_url},
             cost_usd=0.0, turns=0,
         )
@@ -587,16 +591,32 @@ def _host_reachable_preview_url(config: "environments.SelfHostedVMConfig", conta
     return f"http://{host_address}:{host_port}"
 
 
-async def _wait_for_healthy(container_name: str) -> bool:
+async def _wait_for_healthy(container_name: str) -> tuple[bool, str]:
+    """Polls the sibling's own /health. Returns (True, "") once it answers, or
+    (False, detail) -- detail distinguishes a container that exited during
+    startup (a real crash, with its last logs) from one that's merely still
+    slow (GitHub issue #117)."""
+    window = _HEALTH_CHECK_ATTEMPTS * _HEALTH_CHECK_DELAY_SECONDS
     for _ in range(_HEALTH_CHECK_ATTEMPTS):
         check = subprocess.run(
             ["docker", "exec", container_name, "curl", "-sf", "http://localhost:8080/health"],
             capture_output=True, text=True,
         )
         if check.returncode == 0:
-            return True
+            return True, ""
+        running = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+            capture_output=True, text=True,
+        )
+        if running.stdout.strip() == "false":
+            logs = subprocess.run(
+                ["docker", "logs", "--tail", "40", container_name],
+                capture_output=True, text=True,
+            )
+            tail = (logs.stdout + logs.stderr).strip()[-1500:]
+            return False, f"container exited during startup -- last logs:\n{tail}"
         await asyncio.sleep(_HEALTH_CHECK_DELAY_SECONDS)
-    return False
+    return False, f"still not answering /health after {window}s"
 
 
 async def _wait_for_reachable_from_orchestrator(preview_url: str) -> tuple[bool, str]:
@@ -780,12 +800,13 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
             json_data=None, cost_usd=0.0, turns=0,
         )
 
-    if not await _wait_for_healthy(new_container):
+    new_healthy, new_health_detail = await _wait_for_healthy(new_container)
+    if not new_healthy:
         subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
         subprocess.run(["docker", "rmi", image_tag], capture_output=True, text=True)
         return AgentResult(
             ok=False,
-            text=f"{new_container} did not become healthy -- promotion aborted, "
+            text=f"{new_container} did not become healthy ({new_health_detail}) -- promotion aborted, "
             f"{current_color} ({base_name}-{current_color}) is still live.",
             json_data={"status": "failed"},
             cost_usd=0.0, turns=0,
