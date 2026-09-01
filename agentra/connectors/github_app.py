@@ -102,8 +102,14 @@ def get_installation_token(repo_url: str) -> str:
     owner_repo = owner_repo_from_url(repo_url)
     if owner_repo is None:
         raise GitHubAppError(f"not a github.com HTTPS URL: {repo_url!r}")
-    installation_id = _get_installation_id(owner_repo)
-    return _mint_token_for_installation(installation_id)
+    try:
+        installation_id = _get_installation_id(owner_repo)
+        return _mint_token_for_installation(installation_id)
+    except GitHubAppNotConfigured:
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            return token
+        raise
 
 
 def _raw_installations() -> list[dict]:

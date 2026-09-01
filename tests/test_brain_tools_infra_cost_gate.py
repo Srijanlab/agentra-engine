@@ -145,7 +145,9 @@ def test_material_infra_cost_impact_blocks_and_escalates(tmp_path, monkeypatch):
     assert kwargs["needs_human"] is True
     assert len(slack_calls) == 1
     assert session.waiting_for_human is True
-    assert session.current_feature is None  # nothing shipped
+    # current_feature tracks what this run *worked on* (set when work begins),
+    # not what shipped -- so it's populated even though the gate blocked the build.
+    assert session.current_feature == "Add a background worker"
     # The structured run record (what the dashboard / any analytics actually
     # query) must carry the escalation category too, not just the GitHub
     # issue body -- otherwise "which runs were blocked by the infra-cost

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from claude_agent_sdk import tool
 
-from agentra import change_risk
+from agentra import change_risk, registry
 from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, human_answer_judge, implementation, requirements, testing
 from agentra.agents import catalog as agents_catalog
 from agentra.agents.base import AgentResult
@@ -95,6 +95,25 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
 
 
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
+
+
+def _as_bool(value: object) -> bool:
+    """NIM (and some OpenAI-compat models) stringify JSON booleans as 'False'/'True'."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def _optional_str(value: object) -> str:
+    """Treat missing values and string sentinels ('None', 'null') as unset."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in ("none", "null", "nil"):
+        return ""
+    return text
 
 
 def _infer_resolves_from_brief(mem, feature_brief: str) -> tuple[str, str] | None:
@@ -494,7 +513,11 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
-        stop, review = await _run_design_review(session, args["feature_brief"])
+        brief = args.get("feature_brief", "")
+        if brief:
+            session.current_feature = brief
+            registry.record_run(session.run_id, feature=brief, result={"feature": brief})
+        stop, review = await _run_design_review(session, brief)
         if stop:
             return stop
         if not review.ok:
@@ -515,7 +538,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             "resolves_origin": str,
             "resolves_id": str,
             "sub_feature_of": str,
-            "more_parts_expected": bool,
+            "more_parts_expected": bool | str,
             "resume_branch": str,
         },
     )
@@ -525,16 +548,18 @@ def _tools_for(session: OrchestratorSession) -> list:
         if session.cb_summary is None:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         brief = args["feature_brief"]
-        resume_branch = args.get("resume_branch") or ""
+        session.current_feature = brief
+        registry.record_run(session.run_id, feature=brief, result={"feature": brief})
+        resume_branch = _optional_str(args.get("resume_branch"))
         resuming = bool(resume_branch) and session.feature_branch is None
         if session.feature_branch is None:
             session.feature_branch = resume_branch if resume_branch else feature_branch_name(session.env, session.run_id, brief)
-        resolves_origin = args.get("resolves_origin") or ""
-        resolves_id = args.get("resolves_id") or ""
+        resolves_origin = _optional_str(args.get("resolves_origin"))
+        resolves_id = _optional_str(args.get("resolves_id"))
         if not resolves_id and resolves_origin != "new":
             resolves_id, resolves_origin = _infer_resolves_from_brief(session.mem, brief) or ("", resolves_origin)
-        sub_feature_of = args.get("sub_feature_of") or ""
-        more_parts_expected = bool(args.get("more_parts_expected"))
+        sub_feature_of = _optional_str(args.get("sub_feature_of"))
+        more_parts_expected = _as_bool(args.get("more_parts_expected"))
         tracking_issue = None
         if resolves_id and resolves_id.isdigit():
             tracking_issue = int(resolves_id)
