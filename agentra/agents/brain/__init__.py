@@ -92,6 +92,14 @@ class OrchestratorSession:
     # False once any code_complete item this cycle was NOT a known-bug fix -- gates the
     # change_risk MINOR tier (deploy_pre_prod), which only applies to contained bug fixes.
     all_code_complete_are_bugfixes: bool = True
+    # The tracking-issue number implement_feature has already committed this run to (its
+    # first call with a resolved tracking_issue sets this). One backlog item per run: a
+    # later implement_feature call naming a *different* numbered issue is refused --
+    # confirmed live (loop d728c61dc0, 2026-09-01): one run chained #127 -> #131 -> #130
+    # onto the same feature_branch before running out of turns, because the cross-run
+    # "one loop at a time" gate only ever checked resolves_origin="new", not a second
+    # already-tracked item picked up mid-run.
+    committed_issue: str | None = None
     # issue_numbers stamped status:shipped this cycle (by the deploy_pre_prod call above) --
     # verify_pre_prod moves these to status:tested on a passing live check.
     shipped_this_cycle_issue_numbers: list[str] = field(default_factory=list)

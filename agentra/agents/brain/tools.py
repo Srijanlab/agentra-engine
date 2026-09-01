@@ -568,6 +568,17 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         if tracking_issue is not None:
             registry.record_run(session.run_id, loop_id=registry.loop_id_for_issue(session.app_name, tracking_issue))
+            # One backlog item per run, enforced regardless of resolves_origin -- a second
+            # implement_feature call naming a *different* already-tracked issue is just as
+            # much a batching violation as picking up brand-new work mid-run.
+            if session.committed_issue is not None and str(tracking_issue) != session.committed_issue:
+                return {"content": [{"type": "text", "text": (
+                    f"This run already committed to issue #{session.committed_issue} -- one backlog "
+                    f"item per run. Do not start issue #{tracking_issue} here: finish #{session.committed_issue} "
+                    "(deploy_pre_prod + verify_pre_prod) and end this run; check_backlog will surface "
+                    f"#{tracking_issue} for the next run."
+                )}], "is_error": True}
+            session.committed_issue = str(tracking_issue)
 
         # One loop at a time (user directive): a feature's loop stays open until it
         # reaches production. Don't start a brand-new backlog item while another is

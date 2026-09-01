@@ -100,6 +100,65 @@ def test_resuming_the_in_progress_item_itself_is_allowed(tmp_path, monkeypatch):
     assert result.get("is_error") is not True
 
 
+def test_a_second_different_already_tracked_issue_is_refused_within_the_same_run(tmp_path, monkeypatch):
+    """Confirmed live (loop d728c61dc0, 2026-09-01): a single run chained #127 -> #131 -> #130
+    onto the same feature_branch by calling implement_feature with resolves_origin="known_bug"
+    each time -- the resolves_origin="new" check alone never catches a second already-tracked
+    item picked up mid-run."""
+    session = _session(tmp_path)
+    monkeypatch.setattr(session.mem, "in_progress_items", lambda: [])
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 127, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
+
+    impl_calls = []
+
+    async def fake_impl_run(*a, **k):
+        impl_calls.append(a)
+        return AgentResult(ok=True, text="done", json_data={"feature": "Fix #127"}, cost_usd=0.0, turns=1)
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+
+    first = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "Fix issue 127", "resolves_id": "127", "resolves_origin": "known_bug"}
+        )
+    )
+    assert first.get("is_error") is not True
+    assert session.committed_issue == "127"
+
+    second = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "Fix issue 131", "resolves_id": "131", "resolves_origin": "known_bug"}
+        )
+    )
+    assert second.get("is_error") is True
+    assert "already committed to issue #127" in second["content"][0]["text"]
+    assert "#131" in second["content"][0]["text"]
+    assert len(impl_calls) == 1  # implementation.run never ran for #131
+
+
+def test_retrying_the_same_committed_issue_is_allowed(tmp_path, monkeypatch):
+    session = _session(tmp_path)
+    monkeypatch.setattr(session.mem, "in_progress_items", lambda: [])
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 127, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
+
+    async def fake_impl_run(*a, **k):
+        return AgentResult(ok=True, text="done", json_data={"feature": "Fix #127"}, cost_usd=0.0, turns=1)
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+
+    for _ in range(2):
+        result = asyncio.run(
+            _tool(session, "implement_feature").handler(
+                {"feature_brief": "Fix issue 127", "resolves_id": "127", "resolves_origin": "known_bug"}
+            )
+        )
+        assert result.get("is_error") is not True
+
+
 def test_human_answer_resume_may_start_new_work_despite_an_open_loop(tmp_path, monkeypatch):
     session = _session(tmp_path, human_answer="Go ahead.", human_answer_issue=99)
     monkeypatch.setattr(
