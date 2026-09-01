@@ -152,7 +152,11 @@ locals {
     docker image prune -af 2>/dev/null || true
 
     docker rm -f "$ACTIVE_CONTAINER" 2>/dev/null || true
-    docker run -d --name "$ACTIVE_CONTAINER" --restart=always \
+    # --init: run tini as PID 1 so orphaned grandchildren of the Claude Agent
+    # SDK subprocess (node + MCP servers the SDK's own terminate() doesn't
+    # process-group-kill) get reaped instead of accumulating as zombies until
+    # the container can't fork a new thread (GitHub issues #101 / #93).
+    docker run -d --name "$ACTIVE_CONTAINER" --restart=always --init \
       --network agentra-app-net \
       -v "$MOUNT/claude:/home/agentuser/.claude" \
       -v "$MOUNT/agentra-home:/home/agentuser/.agentra" \

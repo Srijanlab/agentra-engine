@@ -483,6 +483,9 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
     assert "widget-app-preprod-run123" in run_cmd
     assert "widget-preprod-net" in run_cmd
     assert "--memory=1g" in run_cmd and "--cpus=1" in run_cmd
+    # GitHub #101/#93: reap zombies + cap a runaway process leak on the shared host
+    assert "--init" in run_cmd
+    assert "--pids-limit" in run_cmd and "512" in run_cmd
     assert "AGENTRA_FIRESTORE_PROJECT=widget-prod" in run_cmd
     assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude:ro" in run_cmd
     # GitHub issue #45: 8080 is published to a Docker-assigned free host

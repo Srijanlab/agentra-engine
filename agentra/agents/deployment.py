@@ -474,6 +474,9 @@ async def deploy_pre_prod_self_hosted(
             "--network", config.preprod_network,
             # GitHub issue #45: publish 8080 to a Docker-assigned free host
             "-p", "8080",
+            # --init reaps zombies; --pids-limit caps a runaway so a sibling
+            # that leaks processes can't take the shared host down (GitHub #101/#93).
+            "--init", "--pids-limit", "512",
             "--memory=1g", "--cpus=1",
             "-v", f"{claude_home}:/home/agentuser/.claude:ro",
             *env_args,
@@ -782,7 +785,7 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
     subprocess.run(["docker", "rm", "-f", new_container], capture_output=True, text=True)
     run = subprocess.run(
         [
-            "docker", "run", "-d", "--name", new_container, "--restart=always",
+            "docker", "run", "-d", "--name", new_container, "--restart=always", "--init",
             "--network", config.app_network,
             "-v", f"{config.data_mount}/claude:/home/agentuser/.claude",
             "-v", f"{config.data_mount}/agentra-home:/home/agentuser/.agentra",
