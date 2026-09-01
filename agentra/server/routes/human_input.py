@@ -80,20 +80,25 @@ async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, 
             _server_log("human-input", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
-def _ack_slack_thread(app_name: str, issue_number: int) -> None:
-    """Close the loop visibly in the Slack thread this answer came from / is tracked in
-    (GitHub issue #68). Best-effort -- never blocks the resume."""
+_SOURCE_LABEL = {"human-input": "the dashboard", "slack": "Slack", "github-comment": "a GitHub comment"}
+
+
+def _ack_slack_thread(app_name: str, issue_number: int, answer: str, source: str) -> None:
+    """Reflect the resolution back into the Slack thread so a watcher there sees it was
+    handled -- whichever channel the answer actually came from (GitHub issue #68). A reply
+    that came in via Slack itself is already visible in the thread, so that just gets a
+    short "resuming"; a dashboard/GitHub answer echoes the answer text. Best-effort."""
     thread_ts = registry.slack_thread_for(app_name, issue_number)
     if not thread_ts:
         return
+    if source == "slack":
+        text = ":white_check_mark: Got it — resuming."
+    else:
+        text = f':white_check_mark: Answered via {_SOURCE_LABEL.get(source, source)}: "{answer.strip()}" — resuming.'
     try:
         from agentra.connectors import slack
 
-        slack._post_message(
-            "Got it — resuming from here. I'll follow up in this thread if I need anything else.",
-            channel=registry.get_slack_channel(app_name),
-            thread_ts=thread_ts,
-        )
+        slack._post_message(text, channel=registry.get_slack_channel(app_name), thread_ts=thread_ts)
     except Exception:
         logger.warning("_ack_slack_thread failed for app=%s issue=#%s", app_name, issue_number, exc_info=True)
 
@@ -105,12 +110,26 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
     if context is None:
         raise ValueError(f"no human-input context recorded for issue #{issue_number}")
 
+    # A second answer landing after the first (e.g. a Slack reply just after a
+    # dashboard answer) must not spawn a spurious fresh cycle -- once any channel
+    # has answered, the need_human label is gone and this is a no-op ack.
+    if not mem.human_input_pending(issue_number):
+        _ack_slack_thread(app_name, issue_number, answer, source)
+        _server_log(source, f"app={app_name!r} issue=#{issue_number} -- answer ignored, already resolved")
+        return {"run_key": None, "already_answered": True}
+
     for run in registry.list_waiting_for_human():
         human_input = run.get("human_input") or {}
         if run.get("app") == app_name and human_input.get("issue_number") == issue_number:
             registry.record_run(run["run_key"], status="answered")
 
     objective = mem.get_objective() or ""
+    tracking_issue = context.get("tracking_issue")
+    loop_id = (
+        registry.loop_id_for_issue(repo.name, tracking_issue)
+        if tracking_issue is not None
+        else registry.loop_id_for(objective)
+    )
     run_key = uuid.uuid4().hex[:8]
     registry.record_run(
         run_key,
@@ -119,10 +138,10 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         status="queued",
         started_at=time.time(),
         objective=objective,
-        loop_id=registry.loop_id_for(objective),
+        loop_id=loop_id,
     )
     mem.record_human_answer(issue_number, answer, resumed_run_key=run_key)
-    _ack_slack_thread(app_name, issue_number)
+    _ack_slack_thread(app_name, issue_number, answer, source)
     _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} -- human answer accepted, resuming")
     asyncio.create_task(_run_human_resume_background(run_key, app_name, repo, context, answer))
     return {"run_key": run_key, "branch": context.get("branch"), "session_id": context.get("session_id")}

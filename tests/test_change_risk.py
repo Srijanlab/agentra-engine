@@ -108,3 +108,27 @@ def test_mixed_trivial_and_real_code_change_counts_only_the_real_part(tmp_path):
 def test_unreadable_diff_defaults_to_standard(tmp_path):
     repo = _repo(tmp_path)
     assert change_risk.classify_change(repo, "main", "does-not-exist") == change_risk.STANDARD
+
+
+def test_contained_bug_fix_is_minor_only_with_the_bug_fix_flag(tmp_path):
+    repo = _repo(tmp_path)
+    _on_feature(repo)
+    _commit(repo, "app.py", "\n".join(f"print({i})" for i in range(30)) + "\n")
+
+    # ~30 lines, one file: over the TRIVIAL ceiling, under the MINOR one.
+    assert change_risk.classify_change(repo, "main", "feature") == change_risk.STANDARD
+    assert change_risk.classify_change(repo, "main", "feature", is_bug_fix=True) == change_risk.MINOR
+
+
+def test_large_bug_fix_is_still_standard(tmp_path):
+    repo = _repo(tmp_path)
+    _on_feature(repo)
+    _commit(repo, "app.py", "\n".join(f"print({i})" for i in range(120)) + "\n")
+
+    assert change_risk.classify_change(repo, "main", "feature", is_bug_fix=True) == change_risk.STANDARD
+
+
+def test_minor_is_in_the_skip_pre_prod_set(tmp_path):
+    assert change_risk.MINOR in change_risk.SKIP_PRE_PROD
+    assert change_risk.TRIVIAL in change_risk.SKIP_PRE_PROD
+    assert change_risk.STANDARD not in change_risk.SKIP_PRE_PROD

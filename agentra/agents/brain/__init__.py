@@ -89,6 +89,9 @@ class OrchestratorSession:
     # merged to pre-prod -- deploy_pre_prod moves these to status:shipped on success and
     # empties this list into shipped_this_cycle_issue_numbers.
     code_complete_issue_numbers: list[str] = field(default_factory=list)
+    # False once any code_complete item this cycle was NOT a known-bug fix -- gates the
+    # change_risk MINOR tier (deploy_pre_prod), which only applies to contained bug fixes.
+    all_code_complete_are_bugfixes: bool = True
     # issue_numbers stamped status:shipped this cycle (by the deploy_pre_prod call above) --
     # verify_pre_prod moves these to status:tested on a passing live check.
     shipped_this_cycle_issue_numbers: list[str] = field(default_factory=list)
