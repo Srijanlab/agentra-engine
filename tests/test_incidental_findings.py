@@ -108,7 +108,7 @@ def test_verify_pre_prod_pass_with_incidental_findings_files_known_bugs(tmp_path
     known_bug_calls, failure_calls = _patch_common(monkeypatch)
     findings = [{"diagnosis": "footer link 404s on the live site", "severity": "low"}]
 
-    async def fake_run_pre_prod(repo, cb_summary, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, cb_summary, preview_url, run_id, session_id=None, **_kw):
         return _fake_result("pass", incidental_findings=findings, reachable=True, feature_verified=True)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
@@ -145,7 +145,7 @@ def test_run_local_tests_pass_without_incidental_findings_is_a_noop(tmp_path, mo
 def test_verify_pre_prod_pass_with_empty_incidental_findings_is_a_noop(tmp_path, monkeypatch):
     known_bug_calls, failure_calls = _patch_common(monkeypatch)
 
-    async def fake_run_pre_prod(repo, cb_summary, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, cb_summary, preview_url, run_id, session_id=None, **_kw):
         return _fake_result("pass", incidental_findings=[], reachable=True, feature_verified=True)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
@@ -204,7 +204,7 @@ def test_run_local_tests_fail_without_incidental_findings_unchanged(tmp_path, mo
 def test_verify_pre_prod_fail_unchanged_without_incidental_findings(tmp_path, monkeypatch):
     known_bug_calls, failure_calls = _patch_common(monkeypatch)
 
-    async def fake_run_pre_prod(repo, cb_summary, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, cb_summary, preview_url, run_id, session_id=None, **_kw):
         return _fake_result("fail", reachable=True, feature_verified=False)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)

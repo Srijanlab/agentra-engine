@@ -95,7 +95,7 @@ def test_verify_pre_prod_tears_down_the_self_hosted_sibling_after_a_passing_repo
     _patch_registry(monkeypatch)
     session = _session(tmp_path, pre_prod_url="http://agentra-preprod-testrun1:8080")
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
         return AgentResult(ok=True, text="ok", json_data={"status": "pass", "reachable": True, "feature_verified": True}, cost_usd=0.0, turns=1)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
@@ -111,7 +111,7 @@ def test_verify_pre_prod_tears_down_the_self_hosted_sibling_even_after_a_failing
     _patch_registry(monkeypatch)
     session = _session(tmp_path, pre_prod_url="http://agentra-preprod-testrun1:8080")
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
         return AgentResult(ok=True, text="broken", json_data={"status": "fail", "reachable": True, "feature_verified": False}, cost_usd=0.0, turns=1)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
@@ -130,7 +130,7 @@ def test_verify_pre_prod_does_not_teardown_when_strategy_is_vercel_firebase(tmp_
         tmp_path, env=EnvironmentConfig(), pre_prod_url="https://preview.example.com",
     )
 
-    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
         return AgentResult(ok=True, text="ok", json_data={"status": "pass"}, cost_usd=0.0, turns=1)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)

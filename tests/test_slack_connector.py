@@ -43,7 +43,7 @@ def test_notify_human_input_required_skips_silently_when_bot_token_set_but_no_ch
 
     result = slack.notify_human_input_required(app="myapp", run_id="run1", question="q")
 
-    assert result is False
+    assert result is None
 
 
 def test_notify_human_input_required_uses_the_per_app_channel_override_instead_of_the_global_one(monkeypatch):
@@ -58,7 +58,7 @@ def test_notify_human_input_required_uses_the_per_app_channel_override_instead_o
             pass
 
         def json(self):
-            return {"ok": True}
+            return {"ok": True, "ts": "1234.5678"}
 
     def _fake_post(url, headers=None, json=None, timeout=None):
         captured["json"] = json
@@ -68,7 +68,7 @@ def test_notify_human_input_required_uses_the_per_app_channel_override_instead_o
 
     result = slack.notify_human_input_required(app="myapp", run_id="run1", question="q", channel="C_PER_APP")
 
-    assert result is True
+    assert result == "1234.5678"
     assert captured["json"]["channel"] == "C_PER_APP"
 
 
@@ -82,7 +82,7 @@ def test_notify_human_input_required_skips_silently_when_unconfigured(monkeypatc
         app="myapp", run_id="run1", question="Which auth provider should we use?",
     )
 
-    assert result is False
+    assert result is None
 
 
 def test_notify_human_input_required_posts_the_question_and_links_when_configured(monkeypatch):
@@ -117,7 +117,7 @@ def test_notify_human_input_required_posts_the_question_and_links_when_configure
         session_id="sess-xyz",
     )
 
-    assert result is True
+    assert result == "1234.5678"
     assert captured["url"] == slack.SLACK_API_POST_MESSAGE
     assert captured["headers"]["Authorization"] == "Bearer xoxb-fake"
     assert captured["json"]["channel"] == "C0123456789"
@@ -144,7 +144,7 @@ def test_notify_human_input_required_returns_false_on_slack_api_level_rejection(
 
     result = slack.notify_human_input_required(app="myapp", run_id="run1", question="q")
 
-    assert result is False
+    assert result is None
 
 
 def test_notify_human_input_required_never_raises_on_network_failure(monkeypatch):
@@ -159,7 +159,7 @@ def test_notify_human_input_required_never_raises_on_network_failure(monkeypatch
 
     result = slack.notify_human_input_required(app="myapp", run_id="run1", question="q")
 
-    assert result is False
+    assert result is None
 
 
 def test_notify_shipped_skips_silently_when_unconfigured(monkeypatch):
@@ -298,4 +298,4 @@ def test_notify_human_input_required_escalated_message_is_distinguishable(monkey
     normal_text = captured["json"]["text"]
 
     assert escalated_text != normal_text
-    assert "waiting on a human answer past its configured timeout" in escalated_text
+    assert "past timeout" in escalated_text

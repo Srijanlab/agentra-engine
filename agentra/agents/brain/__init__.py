@@ -58,6 +58,10 @@ class OrchestratorSession:
     design_reviews: dict[str, dict] = field(default_factory=dict)
     current_feature: str | None = None
     current_spec: str | None = None
+    # Raw Requirements Agent spec dict for this build -- carries structured
+    # acceptance_criteria (GitHub #108) that verify_pre_prod uses to screenshot
+    # each UI criterion's own page. current_spec is the formatted-text view.
+    current_spec_dict: dict | None = None
     feature_branch: str | None = None
     # The Claude CLI session_id for this issue's build -- captured from each
     session_id: str | None = None

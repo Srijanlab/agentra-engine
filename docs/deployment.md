@@ -266,6 +266,27 @@ alarm, queue, and the on-demand `/apps/{name}/run`. While paused, each
 returns a clean no-op (`{"triggered": false, "reason": "system is paused"}`)
 instead of starting new agent work. Survives a restart.
 
+## Slack human-input loop (GitHub #68)
+
+When a run hits HUMAN_INPUT_REQUIRED it posts a concise proposal to Slack. A
+human **reply in that thread** resumes the run with the answer (same effect as
+the dashboard's "Needs your input" panel or a GitHub-issue comment). If the run
+still needs input after resuming, the follow-up question lands in the **same
+thread** — a real back-and-forth until the decision is settled.
+
+Inbound path: `POST /slack/events` (`agentra/server/routes/slack.py`), Slack
+request-signature verified. To enable:
+
+1. Create the `agentra-slack-signing-secret` Secret Manager secret (the app's
+   Signing Secret). `compute.tf` already fetches it into `SLACK_SIGNING_SECRET`
+   (best-effort — a missing secret just leaves the endpoint returning 403).
+2. In the Slack app config, add an Event Subscription request URL of
+   `https://agentra.srijanlab.com/slack/events` and subscribe the bot to
+   `message.channels` (and `message.groups` for private channels).
+
+`SLACK_BOT_TOKEN` (from `agentra-slack-bot-token`) is what posts messages;
+thread→run mapping lives at `registry` `system/slack_threads`.
+
 ## Daily standup (TASK-019)
 
 For each registered app, `POST /standup/daily` (behind the paused

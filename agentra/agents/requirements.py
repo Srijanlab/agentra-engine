@@ -38,11 +38,16 @@ source code at that point, only the spec you write here.
    Even when citing a path or route name, keep each criterion phrased as an \
    externally-observable check (HTTP request/response, rendered UI) with no \
    reference to source files, functions, classes, or internal return types.
+4. For any criterion that is verified in the rendered UI (not a raw HTTP \
+   response), write it as an object {"text": "...", "page_url": "/the/route"} \
+   where page_url is the concrete path the page is served at, relative to the \
+   site root. Purely API/HTTP criteria stay plain strings. This lets the \
+   Testing Agent screenshot the exact page instead of guessing it from prose.
 
 End your response with a fenced ```json block shaped like:
 {
   "spec": "...",
-  "acceptance_criteria": ["...", "..."],
+  "acceptance_criteria": ["GET /apps returns 200 with ...", {"text": "the dashboard shows a Backlog tab", "page_url": "/"}],
   "open_questions": ["..."]
 }
 """

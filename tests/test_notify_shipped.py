@@ -178,7 +178,7 @@ def test_verify_pre_prod_pass_notifies_and_includes_preview_url(tmp_path, monkey
     _patch_issue_url(monkeypatch, session)
     calls = _capture_notify_shipped(monkeypatch)
 
-    async def fake_run_pre_prod(repo, spec, url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, url, run_id, session_id=None, **_kw):
         return AgentResult(ok=True, text="verified", json_data={"status": "pass", "reachable": True, "feature_verified": True}, cost_usd=0.0, turns=0)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
@@ -205,7 +205,7 @@ def test_verify_pre_prod_failure_does_not_notify(tmp_path, monkeypatch):
     _patch_issue_url(monkeypatch, session)
     calls = _capture_notify_shipped(monkeypatch)
 
-    async def fake_run_pre_prod(repo, spec, url, run_id, session_id=None):
+    async def fake_run_pre_prod(repo, spec, url, run_id, session_id=None, **_kw):
         return AgentResult(ok=False, text="broken", json_data={"status": "fail", "reachable": True, "feature_verified": False}, cost_usd=0.0, turns=0)
 
     monkeypatch.setattr(brain.testing, "run_pre_prod", fake_run_pre_prod)
