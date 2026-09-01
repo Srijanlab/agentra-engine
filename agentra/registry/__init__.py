@@ -8,8 +8,10 @@ from typing import Any
 
 from agentra.registry import core
 from agentra.registry.core import (
+    VALID_LLM_BACKENDS,
     firestore_client,
     get_app_repo,
+    get_llm_backend,
     get_slack_channel,
     is_paused,
     list_apps,
@@ -21,6 +23,7 @@ from agentra.registry.core import (
     resolve_slack_thread,
     slack_thread_for,
     resume,
+    set_llm_backend,
     set_slack_channel,
 )
 from agentra.registry.inbox import (
@@ -48,6 +51,7 @@ _DELEGATED_NAMES = {
     "INBOX_ROOT",
     "PAUSE_PATH",
     "_SLACK_THREADS_PATH",
+    "_LLM_BACKEND_PATH",
     "REPOS_ROOT",
     "REQUEST_TYPES",
     "STALE_PROCESSING_SECONDS",
@@ -77,8 +81,10 @@ sys.modules[__name__].__class__ = RegistryModule
 
 __all__ = [
     "DispatchSummary",
+    "VALID_LLM_BACKENDS",
     "firestore_client",
     "get_app_repo",
+    "get_llm_backend",
     "get_run",
     "get_slack_channel",
     "is_paused",
@@ -101,6 +107,7 @@ __all__ = [
     "register_app",
     "remove_app",
     "resume",
+    "set_llm_backend",
     "set_slack_channel",
     "dispatch_once",
     "submit_request",

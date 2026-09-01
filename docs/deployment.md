@@ -287,6 +287,30 @@ request-signature verified. To enable:
 `SLACK_BOT_TOKEN` (from `agentra-slack-bot-token`) is what posts messages;
 thread→run mapping lives at `registry` `system/slack_threads`.
 
+## Model backend: Claude vs NIMS API
+
+The agents' LLM traffic normally goes straight to `api.anthropic.com` using the
+VM's `claude auth login` session. A global toggle (dashboard → Account Settings →
+**Model Backend**, or `GET`/`POST /system/llm-backend` with `{"backend":
+"claude"|"nim"}`) can instead route it through a self-hosted NVIDIA NIM proxy:
+
+```
+app container ──(ANTHROPIC_BASE_URL)──▶ agentra-nim-nginx ──▶ agentra-nim-proxy ──▶ integrate.api.nvidia.com
+```
+
+`agentra-nim-proxy` (`agentra/proxy/main.py`, same image as the app, different
+entrypoint) translates the Anthropic Messages API to NIM's OpenAI-compatible
+chat-completions API; `agentra-nim-nginx` fronts it for SSE streaming. Both run on
+`agentra-app-net`, started by `compute.tf`'s startup script. The proxy reads
+`NVIDIA_API_KEY` from the `agentra-nvidia-api-key` Secret Manager secret (created
+out of band; `secrets.tf` only grants the compute SA access to it).
+
+Default is `claude`, stored like the pause flag (`system/llm_backend` in
+Firestore). It takes effect on the next agent turn — no redeploy. When set to
+`claude`, `agentra/agents/base.py:_sdk_env` returns no env at all, so the SDK
+falls back to the login session; `NIM_PROXY_URL` on the app container is inert
+until the toggle flips.
+
 ## Daily standup (TASK-019)
 
 For each registered app, `POST /standup/daily` (behind the paused

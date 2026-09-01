@@ -41,6 +41,22 @@ async def resume_system() -> dict:
     return {"paused": False}
 
 
+@router.get("/system/llm-backend")
+async def get_llm_backend() -> dict:
+    return {"backend": registry.get_llm_backend()}
+
+
+@router.post("/system/llm-backend")
+async def set_llm_backend(payload: dict | None = None) -> dict:
+    backend = (payload or {}).get("backend")
+    try:
+        registry.set_llm_backend(backend)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _server_log("llm-backend", f"llm backend set to {backend!r}")
+    return {"backend": backend}
+
+
 @router.get("/runs")
 async def get_runs(limit: int = 50) -> dict:
     registry.reconcile_stale_runs()

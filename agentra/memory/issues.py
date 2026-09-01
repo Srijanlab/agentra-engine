@@ -32,6 +32,15 @@ class MemoryIssuesMixin:
 
     _DUPLICATE_BUG_SIMILARITY_THRESHOLD = 0.6
 
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        """difflib ratio with autojunk disabled -- autojunk silently drops any
+        character occurring >1% of the time once a string passes ~200 chars, which
+        tanked the ratio for the verbose 'deployment failed ... agentra-preprod-<hash>
+        did not become healthy' diagnoses (repeated host/hash/':8080/health') far
+        below the threshold, so every recurrence filed a fresh duplicate issue."""
+        return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
     def known_bugs(self) -> list[dict]:
         """Open 'bug'-labeled issues still needing a fix — excludes ones..."""
         repo_url = self._repo_url()
@@ -105,7 +114,7 @@ class MemoryIssuesMixin:
         free text that varies call to call even when describing the same thing."""
         for candidate in candidates:
             existing = candidate.get(field) or ""
-            if difflib.SequenceMatcher(None, text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+            if self._similarity(text, existing) >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
                 return candidate.get("external_id")
         return None
 
@@ -119,7 +128,7 @@ class MemoryIssuesMixin:
         candidate_text = f"{diagnosis}\n{detail[:300]}"
         for candidate in bugs:
             existing = f"{candidate.get('diagnosis', '')}\n{(candidate.get('proposed_fix') or '')[:300]}"
-            if difflib.SequenceMatcher(None, candidate_text, existing).ratio() >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
+            if self._similarity(candidate_text, existing) >= self._DUPLICATE_BUG_SIMILARITY_THRESHOLD:
                 return candidate.get("external_id")
         return None
 

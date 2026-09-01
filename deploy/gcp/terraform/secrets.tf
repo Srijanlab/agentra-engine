@@ -23,6 +23,10 @@ resource "google_secret_manager_secret" "claude_code_oauth_token" {
 resource "google_secret_manager_secret_version" "claude_code_oauth_token" {
   secret      = google_secret_manager_secret.claude_code_oauth_token.id
   secret_data = var.claude_code_oauth_token
+
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 # Same story as above, for the loose .github_pat file -- used by
@@ -42,6 +46,10 @@ resource "google_secret_manager_secret" "github_token" {
 resource "google_secret_manager_secret_version" "github_token" {
   secret      = google_secret_manager_secret.github_token.id
   secret_data = var.github_token
+
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 # Runtime identity (default compute SA -- used by both cloudrun.tf and
@@ -112,6 +120,10 @@ resource "google_secret_manager_secret" "cloudflare_tunnel_token" {
 resource "google_secret_manager_secret_version" "cloudflare_tunnel_token" {
   secret      = google_secret_manager_secret.cloudflare_tunnel_token.id
   secret_data = var.cloudflare_tunnel_token
+
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "cloudflare_tunnel_token_access" {
@@ -140,6 +152,10 @@ resource "google_secret_manager_secret" "github_app_id" {
 resource "google_secret_manager_secret_version" "github_app_id" {
   secret      = google_secret_manager_secret.github_app_id.id
   secret_data = var.github_app_id
+
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "github_app_id_access" {
@@ -163,6 +179,10 @@ resource "google_secret_manager_secret" "github_app_private_key" {
 resource "google_secret_manager_secret_version" "github_app_private_key" {
   secret      = google_secret_manager_secret.github_app_private_key.id
   secret_data = var.github_app_private_key
+
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "github_app_private_key_access" {
@@ -180,6 +200,17 @@ resource "google_secret_manager_secret_iam_member" "github_app_private_key_acces
 resource "google_secret_manager_secret_iam_member" "slack_bot_token_access" {
   project   = var.project_id
   secret_id = "agentra-slack-bot-token"
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
+
+# agentra-nvidia-api-key was also created outside Terraform (its value never
+# transits here) -- compute.tf's startup script fetches it as NVIDIA_API_KEY for
+# the agentra-nim-proxy container (agentra/proxy/main.py). Same bare-secret_id
+# grant pattern as agentra-slack-bot-token above.
+resource "google_secret_manager_secret_iam_member" "nvidia_api_key_access" {
+  project   = var.project_id
+  secret_id = "agentra-nvidia-api-key"
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
