@@ -1,0 +1,3 @@
+Lint: not_configured
+Typecheck: pass
+Notes: Feature verified: a2a models + read-only discovery routes. py_compile clean, tests/test_a2a.py 14/14 pass, full web suite (26) and web build (tsc+vite) pass. The only pytest failures (6) are pre-existing on parent commit 20f94c2 and unrelated to A2A (Firestore FieldPath bug in brain infra-cost-gate / implement_feature human-input tests). No source files modified. Repo left clean on the feature branch with commit e67a1d3 intact.
