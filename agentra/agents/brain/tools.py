@@ -360,7 +360,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         shipped = [f["feature"] for f in session.mem.shipped_features()]
         pending_test = _attach_resume_branches(session.mem, session.mem.shipped_pending_test_items())
         pending_merge = _attach_resume_branches(session.mem, session.mem.code_complete_items())
-        in_progress = session.mem.in_progress_features()
+        # GitHub issue #131: in-progress multi-part features used to be listed here without a
+        # resume_branch (unlike every other category below) -- the brain had no way to see that
+        # a branch was already pushed for the part being continued, so resuming it re-ran
+        # implement_feature from scratch and filed a brand-new duplicate sub-issue instead of
+        # continuing the same one.
+        in_progress = _attach_resume_branches(session.mem, session.mem.in_progress_features())
         # GitHub issue #87: a single-part bug/feature already stamped status:in-progress (a
         # branch, prior implement_feature attempts) used to rank no higher than a never-touched
         # backlog item, since neither known_bugs() nor feature_queue() special-cases this label

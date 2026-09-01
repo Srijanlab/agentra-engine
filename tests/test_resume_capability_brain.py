@@ -109,6 +109,34 @@ def test_check_backlog_attaches_resume_branch_to_bugs_and_queue(tmp_path, monkey
     assert '"resume_branch": null' in text  # the feature-queue entry has none
 
 
+def test_check_backlog_attaches_resume_branch_to_in_progress_multi_part_features(tmp_path, monkeypatch):
+    # GitHub issue #131: an in-progress multi-part feature's resume_branch used to be dropped
+    # here, so the brain had no way to see a branch was already pushed for the part being
+    # continued -- it re-ran implement_feature from scratch and filed a duplicate sub-issue
+    # instead of continuing the same one.
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path)
+
+    monkeypatch.setattr(session.mem, "shipped_features", lambda: [])
+    monkeypatch.setattr(
+        session.mem,
+        "in_progress_features",
+        lambda: [{"external_id": "20", "description": "a multi-part feature", "sub_issues_total": 2, "sub_issues_completed": 1}],
+    )
+    monkeypatch.setattr(session.mem, "known_bugs", lambda: [])
+    monkeypatch.setattr(session.mem, "feature_queue", lambda: [])
+    monkeypatch.setattr(
+        session.mem,
+        "resume_branch_for",
+        lambda external_id: "dev/def456-continue-part-2" if external_id == "20" else None,
+    )
+
+    result = asyncio.run(_tool(session, "check_backlog").handler({}))
+
+    text = result["content"][0]["text"]
+    assert "dev/def456-continue-part-2" in text
+
+
 # -- implement_feature records the marker regardless of ok/fail ----------------------
 
 

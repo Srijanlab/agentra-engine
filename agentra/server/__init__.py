@@ -30,6 +30,8 @@ WEB_DIST = Path(os.environ.get("AGENTRA_WEB_DIST") or (Path(__file__).resolve().
 if (WEB_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="web-assets")
 
+FAVICON = WEB_DIST / "favicon.svg"
+
 
 def _run_log_path(run_key: str) -> Path | None:
     run = _active_runs.get(run_key) or registry.get_run(run_key)
@@ -74,6 +76,15 @@ async def dashboard() -> FileResponse | dict:
             "hint": "run `npm install && npm run build` in agentra/web/, or set AGENTRA_WEB_DIST",
         }
     return FileResponse(index)
+
+
+@app.get("/favicon.ico", response_model=None)
+@app.get("/favicon.svg", response_model=None)
+async def favicon() -> FileResponse:
+    """GitHub #127: serve the built dashboard favicon so browsers' /favicon.ico request does not 404."""
+    if not FAVICON.exists():
+        raise HTTPException(status_code=404, detail="favicon not built")
+    return FileResponse(FAVICON, media_type="image/svg+xml")
 
 
 @app.get("/health")
