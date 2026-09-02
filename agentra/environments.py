@@ -58,13 +58,9 @@ _FLOAT_FIELDS = {"schedule_hours"}
 
 
 def _repo_url(repo: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "remote", "get-url", "origin"], capture_output=True, text=True, timeout=10
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    from agentra import registry
+
+    return registry.repo_url_for_path(repo)
 
 
 def _coerce(field: str, raw: str):

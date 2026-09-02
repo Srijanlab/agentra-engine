@@ -48,7 +48,10 @@ def _finalize_chat_turn(app_name: str, agent_id: str, raw_text: str, session_id:
 
 @router.post("/tts")
 async def text_to_speech(payload: TtsPayload) -> Response:
-    from google.cloud import texttospeech
+    try:
+        from google.cloud import texttospeech
+    except ImportError as exc:  # not installed on the slim engine host
+        raise HTTPException(status_code=503, detail=f"text-to-speech unavailable: {exc}") from exc
 
     voice_name = AGENT_VOICES.get(payload.agent_id, AGENT_VOICES["custom"])
 

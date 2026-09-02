@@ -1,0 +1,14 @@
+tests/
+deploy/
+docs/
+ci/
+workflow/
+scripts/
+.venv/
+*.md
+docker-compose.yml
+Dockerfile
+dev.sh
+run-agent.sh
+git-askpass.sh
+docker-entrypoint.sh

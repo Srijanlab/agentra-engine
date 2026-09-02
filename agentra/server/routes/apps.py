@@ -223,13 +223,16 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         raise HTTPException(status_code=409, detail=f"app {payload.name!r} already registered")
 
     dest = registry.REPOS_ROOT / payload.name
-    try:
-        from agentra.agents.git_ops import GitOpError, clone_repo
+    if registry._db is None:
+        # Local/CLI: clone up front. Cloud mode has no git -- the repo_url +
+        # ensure_labels() below is the validation, and the loop clones on demand.
+        try:
+            from agentra.agents.git_ops import GitOpError, clone_repo
 
-        clone_repo(payload.repo_url, dest, branch=payload.branch)
-    except GitOpError as exc:
-        _server_log("register", f"app={payload.name!r} clone failed: {exc}")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+            clone_repo(payload.repo_url, dest, branch=payload.branch)
+        except GitOpError as exc:
+            _server_log("register", f"app={payload.name!r} clone failed: {exc}")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
     if payload.slack_channel_id is not None:

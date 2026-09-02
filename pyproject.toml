@@ -11,7 +11,6 @@ dependencies = [
     "pyjwt[crypto]>=2.9",
     "httpx>=0.27",
     "google-cloud-firestore>=2.19",
-    "google-cloud-texttospeech>=2.16",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +23,7 @@ agents = [
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.6",
+    "google-cloud-texttospeech>=2.16",
     "playwright>=1.48",
     "graphifyy[mcp]>=0.9.46",
 ]

@@ -39,6 +39,14 @@ def _init_firestore():
         from google.cloud import firestore
     except ImportError:
         return None
+    # Off-GCP (Vercel etc.) there's no ADC file or metadata server -- take the
+    # service-account key straight from an env var when one is set.
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_json:
+        from google.oauth2 import service_account
+
+        creds = service_account.Credentials.from_service_account_info(json.loads(sa_json))
+        return firestore.Client(project=project, credentials=creds)
     return firestore.Client(project=project)
 
 
@@ -174,11 +182,35 @@ def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
         )
 
 
+def repo_url_for_path(repo: Path) -> str | None:
+    """The GitHub URL for a checkout path -- the registry's stored repo_url (works
+    with no local git), falling back to `git remote get-url origin` for local use."""
+    try:
+        for app in list_apps().values():
+            if app.get("repo_path") == str(repo) and app.get("repo_url"):
+                return app["repo_url"]
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def get_app_repo(name: str) -> Path | None:
     app = list_apps().get(name)
     if app is None:
         return None
     repo = Path(app["repo_path"])
+    # Cloud mode (Firestore-backed): the engine never reads working-tree files --
+    # backlog/issue data comes from the GitHub API, run state from Firestore. Skip
+    # the clone/pull entirely; there's no git binary or persistent disk here.
+    if _db is not None:
+        return repo
     if not repo.exists() and app.get("repo_url"):
         from agentra.agents.git_ops import GitOpError, clone_repo
 
@@ -299,6 +331,10 @@ def set_llm_backend(backend: str) -> None:
 
 
 def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:
+    # `.agentra/` is the local-JSON fallback store; with Firestore it holds
+    # nothing worth committing, and the host has no git. No-op in cloud mode.
+    if _db is not None:
+        return None
     from agentra.agents.git_ops import GitOpError, commit_and_push
 
     try:

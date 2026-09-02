@@ -117,14 +117,9 @@ class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, 
         return self.log(run_id, format_safety_denial_line(tool_name, pattern, detail))
 
     def _repo_url(self) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(self.repo), "remote", "get-url", "origin"],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (subprocess.SubprocessError, OSError):
-            return None
-        return result.stdout.strip() if result.returncode == 0 else None
+        from agentra import registry
+
+        return registry.repo_url_for_path(self.repo)
 
 
 __all__ = [
