@@ -52,9 +52,8 @@ def sync_oidc_token_file(token: str | None = None) -> None:
 
 
 def _gcp_credentials():
-    """Credentials for every GCP API this process calls (Firestore, Secret
-    Manager), in priority order. Returns None to fall back to ADC / the metadata
-    server (i.e. running on GCP)."""
+    """Credentials for Firestore, in priority order. Returns None to fall back to
+    ADC / the metadata server (i.e. running on GCP)."""
     # 1. Keyless: Vercel OIDC -> Workload Identity Federation (survives the
     #    iam.disableServiceAccountKeyCreation org policy -- no key anywhere).
     wif_config = os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")
@@ -64,12 +63,7 @@ def _gcp_credentials():
 
         cfg = json.loads(wif_config)
         cfg.setdefault("credential_source", {})["file"] = _OIDC_TOKEN_FILE
-        creds = identity_pool.Credentials.from_info(cfg)
-        # Scope for impersonation -- Firestore's client re-scopes itself, but a
-        # manual refresh (Secret Manager) needs it or generateAccessToken 400s.
-        if hasattr(creds, "with_scopes"):
-            creds = creds.with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
-        return creds
+        return identity_pool.Credentials.from_info(cfg)
     # 2. A service-account key from an env var, if one is ever available.
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json:
@@ -77,62 +71,6 @@ def _gcp_credentials():
 
         return service_account.Credentials.from_service_account_info(json.loads(sa_json))
     return None
-
-
-# Secrets the connectors read from os.environ. Off-GCP the runtime SA pulls them
-# from Secret Manager once, at import, so nothing sensitive lives in Vercel.
-_SECRET_MANAGER_ENV = {
-    "GITHUB_TOKEN": "agentra-github-token",
-    "GITHUB_APP_ID": "agentra-github-app-id",
-    "GITHUB_APP_PRIVATE_KEY": "agentra-github-app-private-key",
-    "SLACK_SIGNING_SECRET": "agentra-slack-signing-secret",
-    "SLACK_BOT_TOKEN": "agentra-slack-bot-token",
-    "AGENTRA_ALARM_WEBHOOK_PASSWORD": "agentra-alarm-webhook-password",
-}
-
-
-_secret_hydration_status: dict = {}
-
-
-def _hydrate_env_from_secret_manager(creds) -> None:
-    # Secret Manager REST (no google-cloud-secret-manager dep -- httpx + a token
-    # from the same WIF credentials). Only off-GCP against a real project.
-    _secret_hydration_status.clear()
-    project = os.environ.get("AGENTRA_SECRETS_PROJECT") or os.environ.get("AGENTRA_FIRESTORE_PROJECT")
-    if not project or creds is None or not os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG"):
-        _secret_hydration_status["skipped"] = "no project / no creds / no wif config"
-        return
-    try:
-        import httpx
-        from google.auth.transport.requests import Request
-
-        creds.refresh(Request())
-        token = creds.token
-    except Exception as exc:
-        _secret_hydration_status["token_error"] = f"{type(exc).__name__}: {exc}"[:300]
-        logger.warning("could not mint a token for Secret Manager", exc_info=True)
-        return
-
-    base = "https://secretmanager.googleapis.com/v1"
-    headers = {"Authorization": f"Bearer {token}"}
-    for env_name, secret_id in _SECRET_MANAGER_ENV.items():
-        if os.environ.get(env_name):
-            _secret_hydration_status[env_name] = "already set"
-            continue
-        try:
-            r = httpx.get(
-                f"{base}/projects/{project}/secrets/{secret_id}/versions/latest:access",
-                headers=headers, timeout=10,
-            )
-            if r.status_code == 200:
-                import base64
-
-                os.environ[env_name] = base64.b64decode(r.json()["payload"]["data"]).decode("utf-8")
-                _secret_hydration_status[env_name] = "loaded"
-            else:
-                _secret_hydration_status[env_name] = f"http {r.status_code}: {r.text[:120]}"
-        except Exception as exc:
-            _secret_hydration_status[env_name] = f"{type(exc).__name__}: {exc}"[:200]
 
 
 def _init_firestore():
@@ -143,10 +81,6 @@ def _init_firestore():
         from google.cloud import firestore
 
         creds = _gcp_credentials()
-        try:
-            _hydrate_env_from_secret_manager(creds)
-        except Exception:
-            logger.warning("secret-manager hydration failed", exc_info=True)
         if creds is not None:
             return firestore.Client(project=project, credentials=creds)
         return firestore.Client(project=project)
