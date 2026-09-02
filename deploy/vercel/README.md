@@ -54,7 +54,7 @@ placeholders: [`.env.example`](.env.example).
 | `GITHUB_APP_PRIVATE_KEY` | the App's `.pem` contents (multi-line) |
 | `GITHUB_TOKEN` | optional PAT fallback (repo scope) |
 | `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN` | Slack app credentials |
-| `AGENTRA_ALARM_WEBHOOK_PASSWORD` | your choice |
+| `ALARM_WEBHOOK_PASSWORD` | optional; unset leaves `/trigger/alarm` open |
 
 GitHub access is the `agentra-orchestrator` GitHub App (per-repo installation
 tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback.

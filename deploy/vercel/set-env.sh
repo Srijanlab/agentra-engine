@@ -12,7 +12,7 @@
 #   GITHUB_APP_PRIVATE_KEY_FILE     - path to the downloaded .pem
 #   SLACK_SIGNING_SECRET            - api.slack.com/apps -> Basic Information
 #   SLACK_BOT_TOKEN                 - api.slack.com/apps -> OAuth & Permissions (xoxb-)
-#   AGENTRA_ALARM_WEBHOOK_PASSWORD  - your choice
+#   ALARM_WEBHOOK_PASSWORD          - optional; unset leaves /trigger/alarm open
 #   GITHUB_TOKEN                    - optional PAT fallback (repo scope)
 set -euo pipefail
 
@@ -44,7 +44,7 @@ set_var GITHUB_APP_PRIVATE_KEY "$PEM"
 echo "slack + misc:"
 set_var SLACK_SIGNING_SECRET           "$(ask SLACK_SIGNING_SECRET 'Slack signing secret')"
 set_var SLACK_BOT_TOKEN               "$(ask SLACK_BOT_TOKEN 'Slack bot token (xoxb-)')"
-set_var AGENTRA_ALARM_WEBHOOK_PASSWORD "$(ask AGENTRA_ALARM_WEBHOOK_PASSWORD 'Alarm webhook password')"
+set_var ALARM_WEBHOOK_PASSWORD        "${ALARM_WEBHOOK_PASSWORD:-}"   # optional
 set_var GITHUB_TOKEN                   "${GITHUB_TOKEN:-}"   # optional fallback
 
 echo
