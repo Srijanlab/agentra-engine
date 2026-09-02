@@ -106,7 +106,7 @@ async def health() -> dict:
 
 
 @app.get("/debug/firestore")
-async def debug_firestore() -> dict:
+async def debug_firestore(request: Request) -> dict:
     """Diagnose the keyless Firestore path (Vercel OIDC -> WIF). No secrets returned."""
     from agentra import registry
 
@@ -116,6 +116,8 @@ async def debug_firestore() -> dict:
         "firestore_project": os.environ.get("AGENTRA_FIRESTORE_PROJECT"),
         "db_connected": registry.firestore_client() is not None,
         "github_token_loaded": bool(os.environ.get("GITHUB_TOKEN")),
+        "vercel_env_keys": sorted(k for k in os.environ if k.startswith(("VERCEL", "AWS", "GOOGLE", "GCP"))),
+        "vercel_headers": sorted(h for h in request.headers if h.lower().startswith(("x-vercel", "x-oidc"))),
     }
     db = registry.firestore_client()
     if db is not None:
