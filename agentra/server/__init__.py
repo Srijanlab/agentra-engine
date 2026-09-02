@@ -9,8 +9,11 @@ import logging
 import os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware
 
 from agentra import registry
 from agentra.agents import catalog as agents_catalog
@@ -36,6 +39,18 @@ async def _refresh_oidc_token(request, call_next):
     registry.sync_oidc_token_file(request.headers.get("x-vercel-oidc-token"))
     registry.ensure_firestore()
     return await call_next(request)
+
+
+# Order matters: CORS added last == outermost, so it answers preflight and
+# attaches headers even to the auth gate's 401/403.
+app.middleware("http")(auth_middleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 WEB_DIST = Path(os.environ.get("AGENTRA_WEB_DIST") or (Path(__file__).resolve().parent.parent / "web" / "dist"))
