@@ -90,7 +90,7 @@ jobs:
             --min-instances 0 --max-instances 4 \
             --cpu 1 --memory 512Mi --timeout 120 \
             --set-env-vars "AGENTRA_FIRESTORE_PROJECT=${{ vars.GCP_PROJECT }},AGENTRA_ENV=${{ steps.t.outputs.target }}" \
-            --set-secrets "GITHUB_APP_ID=agentra-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=agentra-github-app-private-key:latest,GITHUB_TOKEN=agentra-github-token:latest,SLACK_SIGNING_SECRET=agentra-slack-signing-secret:latest,SLACK_BOT_TOKEN=agentra-slack-bot-token:latest,AGENTRA_ALARM_WEBHOOK_PASSWORD=agentra-alarm-webhook-password:latest" \
+            --set-secrets "${{ vars.ENGINE_SECRETS }}" \
             --no-allow-unauthenticated \
             --quiet
           URL=$(gcloud run services describe "${{ steps.t.outputs.service }}" --project "${{ vars.GCP_PROJECT }}" --region "${{ vars.GCP_REGION }}" --format 'value(status.url)')

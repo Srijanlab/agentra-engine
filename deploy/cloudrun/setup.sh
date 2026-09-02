@@ -78,6 +78,18 @@ gh variable set WIF_PROVIDER --repo "$REPO" --body "$WIF"
 gh variable set DEPLOY_SA    --repo "$REPO" --body "$DEPLOY_SA"
 gh variable set RUNTIME_SA   --repo "$REPO" --body "$RUN_SA"
 
+# --set-secrets for `gcloud run deploy`, as a variable so it's easy to extend.
+# Only secrets with a live version — agentra-github-app-{id,private-key} have
+# all versions DESTROYED, so the engine runs on the PAT (GITHUB_TOKEN) until
+# the App key is regenerated (then add GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY).
+SECRETS="GITHUB_TOKEN=agentra-github-token:latest"
+for S in agentra-slack-signing-secret:SLACK_SIGNING_SECRET \
+         agentra-slack-bot-token:SLACK_BOT_TOKEN \
+         agentra-alarm-webhook-password:AGENTRA_ALARM_WEBHOOK_PASSWORD; do
+  SECRETS="${SECRETS},${S##*:}=${S%%:*}:latest"
+done
+gh variable set ENGINE_SECRETS --repo "$REPO" --body "$SECRETS"
+
 say "Done"
 cat <<EOF
 Next:
