@@ -64,7 +64,12 @@ def _gcp_credentials():
 
         cfg = json.loads(wif_config)
         cfg.setdefault("credential_source", {})["file"] = _OIDC_TOKEN_FILE
-        return identity_pool.Credentials.from_info(cfg)
+        creds = identity_pool.Credentials.from_info(cfg)
+        # Scope for impersonation -- Firestore's client re-scopes itself, but a
+        # manual refresh (Secret Manager) needs it or generateAccessToken 400s.
+        if hasattr(creds, "with_scopes"):
+            creds = creds.with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+        return creds
     # 2. A service-account key from an env var, if one is ever available.
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json:
