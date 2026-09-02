@@ -29,7 +29,8 @@ jobs:
       - name: Tags
         id: tags
         run: |
-          IMG=ghcr.io/${{ github.repository_owner }}/agentra-engine
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMG=ghcr.io/${OWNER}/agentra-engine
           if [ "${{ github.ref_name }}" = "main" ]; then
             echo "tags=${IMG}:prod,${IMG}:latest,${IMG}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
           else
