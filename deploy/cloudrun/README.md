@@ -11,6 +11,31 @@ Two services in `agentra-prod`, one region:
 Workload Identity Federation (no service-account keys in the repo) plus a runtime
 service account with Firestore + Secret Manager access.
 
+## GitHub App access (do this first — access is per repo)
+
+agentra reaches GitHub through the **`agentra-orchestrator` GitHub App**, and
+`connectors/github_app.py` mints an installation token **per `owner/repo`**. The
+org install (`id 153365557`) is `repository_selection: selected` — the three new
+repos are **not** covered yet. Add them:
+
+`github.com/organizations/Srijanlab/settings/installations/153365557` → *Repository
+access* → add `agentra-ui`, `agentra-engine`, `agentra-loop`. Or:
+
+```bash
+# needs a user token authorized to the app (do it from the App owner account)
+for RID in 1354211262 1354213499 1354213458; do   # ui, engine, loop
+  gh api -X PUT /user/installations/153365557/repositories/$RID
+done
+```
+
+Without this, the engine's `get_installation_token()` fails for those repos and
+so does every dashboard read of their backlog.
+
+**Caveat:** the App has no `workflows` permission, so it **cannot** edit
+`.github/workflows/`. `deploy.yml` / `ci.yml` in these repos are human-maintained
+(push with a PAT). Grant *Workflows: Read and write* on the App if you want the
+autonomous loop to touch them.
+
 ## One-time setup
 
 ```bash
@@ -51,15 +76,18 @@ for ROLE in roles/run.admin roles/cloudbuild.builds.editor \
 done
 
 # --- Workload Identity Federation for GitHub Actions ---
+# One pool/provider, scoped to the Srijanlab org so agentra-ui and agentra-loop
+# reuse it later. Access stays tight via the per-repo bindings below.
 gcloud iam workload-identity-pools create github --project $PROJECT --location global \
   --display-name "GitHub Actions"
 gcloud iam workload-identity-pools providers create-oidc github \
   --project $PROJECT --location global --workload-identity-pool github \
   --display-name "GitHub" \
-  --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository" \
-  --attribute-condition "assertion.repository=='$REPO'" \
+  --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+  --attribute-condition "assertion.repository_owner=='Srijanlab'" \
   --issuer-uri "https://token.actions.githubusercontent.com"
 WIF=projects/$PROJECT_NUM/locations/global/workloadIdentityPools/github/providers/github
+# only agentra-engine's repo may impersonate the engine deploy SA
 gcloud iam service-accounts add-iam-policy-binding $DEPLOY_SA --project $PROJECT \
   --role roles/iam.workloadIdentityUser \
   --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUM/locations/global/workloadIdentityPools/github/attribute.repository/$REPO"
