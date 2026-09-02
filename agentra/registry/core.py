@@ -37,10 +37,13 @@ HUMAN_INPUT_MAX_WAIT_SECONDS = float(os.environ.get("AGENTRA_HUMAN_INPUT_MAX_WAI
 _OIDC_TOKEN_FILE = "/tmp/agentra_vercel_oidc_token"
 
 
-def sync_oidc_token_file() -> None:
-    token = os.environ.get("VERCEL_OIDC_TOKEN")
+def sync_oidc_token_file(token: str | None = None) -> None:
+    # Fluid Compute delivers the OIDC JWT as the x-vercel-oidc-token request
+    # header (not an env var), so the caller passes it in from the request.
+    token = token or os.environ.get("VERCEL_OIDC_TOKEN")
     if not token:
         return
+    os.environ["VERCEL_OIDC_TOKEN"] = token  # so downstream env checks pass
     try:
         with open(_OIDC_TOKEN_FILE, "w") as fh:
             fh.write(token)
@@ -140,6 +143,15 @@ def _init_firestore():
 
 
 _db = _init_firestore()
+
+
+def ensure_firestore():
+    """Lazy init for the Vercel path: the OIDC token only exists per-request, so
+    _db can't be built at import. Call once the token file is in place."""
+    global _db
+    if _db is None:
+        _db = _init_firestore()
+    return _db
 
 
 def firestore_client():
