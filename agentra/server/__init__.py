@@ -118,6 +118,7 @@ async def debug_firestore(request: Request) -> dict:
         "firestore_project": os.environ.get("AGENTRA_FIRESTORE_PROJECT"),
         "db_connected": registry.firestore_client() is not None,
         "github_token_loaded": bool(os.environ.get("GITHUB_TOKEN")),
+        "github_app_loaded": bool(os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")),
         "vercel_env_keys": sorted(k for k in os.environ if k.startswith(("VERCEL", "AWS", "GOOGLE", "GCP"))),
         "vercel_headers": sorted(h for h in request.headers if h.lower().startswith(("x-vercel", "x-oidc"))),
     }

@@ -39,10 +39,10 @@ gcloud iam service-accounts add-iam-policy-binding $RUN_SA --project agentra-pro
 
 ### 3. Vercel env vars
 
-The engine's **secret** values (GitHub PAT, Slack tokens, alarm password) are
-**not** set in Vercel -- the runtime SA (`agentra-engine-run`, which already has
-`secretmanager.secretAccessor`) pulls them from Secret Manager at startup via the
-same WIF credentials. Only these non-secret vars go in Vercel:
+GCP Secret Manager is billing-gated, so **all** values live in Vercel. Set every
+var in **both** environments -- Production (`main` -> prod) and Preview (`beta` ->
+pre-prod) -- with `bash deploy/vercel/set-env.sh` or the dashboard. Full list with
+placeholders: [`.env.example`](.env.example).
 
 | var | value |
 |---|---|
@@ -50,6 +50,14 @@ same WIF credentials. Only these non-secret vars go in Vercel:
 | `GCP_WORKLOAD_IDENTITY_CONFIG` | the JSON below (not secret) |
 | `FIREBASE_PROJECT_ID` | `agentra-prod` (for the Google-OAuth check) |
 | `AGENTRA_ALLOWED_EMAILS` | your email(s), comma-separated |
+| `GITHUB_APP_ID` | `agentra-orchestrator` App ID (`4545406`) |
+| `GITHUB_APP_PRIVATE_KEY` | the App's `.pem` contents (multi-line) |
+| `GITHUB_TOKEN` | optional PAT fallback (repo scope) |
+| `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN` | Slack app credentials |
+| `AGENTRA_ALARM_WEBHOOK_PASSWORD` | your choice |
+
+GitHub access is the `agentra-orchestrator` GitHub App (per-repo installation
+tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback.
 
 `GCP_WORKLOAD_IDENTITY_CONFIG`:
 ```json
