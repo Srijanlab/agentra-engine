@@ -378,10 +378,43 @@ def _docker_build_env() -> dict:
     return {**os.environ, "DOCKER_BUILDKIT": "1"}
 
 
+_MIN_FREE_BYTES_FOR_BUILD = 5 * 1024**3  # an agentra image is ~3.4 GB; the build needs scratch on top
+
+
+def _docker_root_free_bytes() -> int | None:
+    """Bytes available under the docker storage root (where `docker build` writes), or None if it can't be determined."""
+    info = subprocess.run(["docker", "info", "--format", "{{.DockerRootDir}}"], capture_output=True, text=True)
+    root = info.stdout.strip() or "/var/lib/docker"
+    try:
+        st = os.statvfs(root)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize
+
+
 def _reclaim_build_disk_space() -> None:
-    """Best-effort disk reclaim, run immediately before every `docker build` call in this module -- same non-fatal, swallow-everything pattern as cleanup_stale_preprod above, just aimed at generic build-cache/dangling- image bloat rather than leaked preprod siblings specifically."""
-    subprocess.run(["docker", "builder", "prune", "-f"], capture_output=True, text=True)
-    subprocess.run(["docker", "image", "prune", "-f"], capture_output=True, text=True)
+    """Best-effort disk reclaim, run immediately before every `docker build` call in this module. A long-lived build host accretes build cache, stopped containers, and old agentra-preprod:<run> / agentra:<hash> tags whose containers are gone; `image prune -f` (dangling only) never touches those, so this sweeps broader -- it still can't remove an image a running container needs. Non-fatal, swallow-everything, same as cleanup_stale_preprod."""
+    subprocess.run(["docker", "container", "prune", "-f"], capture_output=True, text=True)
+    subprocess.run(["docker", "builder", "prune", "-af"], capture_output=True, text=True)
+    subprocess.run(["docker", "image", "prune", "-af"], capture_output=True, text=True)
+
+
+def _build_disk_guard() -> AgentResult | None:
+    """Reclaim, then refuse the build with a clear infra diagnosis if the docker root still hasn't enough free space -- a full disk fails `docker build` deep in a base-layer extract with a cryptic buildkit error (confirmed live: GitHub #134), and no brief/approach/retry fixes it."""
+    _reclaim_build_disk_space()
+    free = _docker_root_free_bytes()
+    if free is not None and free < _MIN_FREE_BYTES_FOR_BUILD:
+        return AgentResult(
+            ok=False,
+            text=(
+                f"pre-prod build host is out of disk: {free // 1024**2} MiB free under the docker root "
+                f"after reclaim, need ~{_MIN_FREE_BYTES_FOR_BUILD // 1024**3} GiB for a build. This is an "
+                "infrastructure problem (grow the VM disk or free space) -- a different brief/approach "
+                "will not fix it, and retrying will not help."
+            ),
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+    return None
 
 
 def _inherit_env(container_name: str | None, keys: list[str]) -> list[str]:
@@ -429,7 +462,8 @@ async def deploy_pre_prod_self_hosted(
     # A real HOST path, not this container's own -- see
     claude_home = f"{config.data_mount}/claude"
 
-    _reclaim_build_disk_space()
+    if disk_error := _build_disk_guard():
+        return disk_error
     build = subprocess.run(
         ["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True,
         env=_docker_build_env(),
@@ -752,7 +786,8 @@ async def promote_prod_self_hosted(repo: Path, env: EnvironmentConfig, run_id: s
     image_tag = _candidate_image_tag(config, run_id)
     new_container = f"{base_name}-{new_color}"
 
-    _reclaim_build_disk_space()
+    if disk_error := _build_disk_guard():
+        return disk_error
     build = subprocess.run(
         ["docker", "build", "-t", image_tag, str(repo)], capture_output=True, text=True,
         env=_docker_build_env(),

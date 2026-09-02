@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_SELF_HEAL_ATTEMPTS = 1
+# Distinct autonomous runs allowed to work one tracking issue before implement_feature
+# stops re-selecting it and escalates (stuck-loop backstop -- see GitHub #130).
+MAX_RUNS_PER_TRACKING_ISSUE = 6
 
 
 def _actionable_bugs(bugs: list[dict]) -> list[dict]:
@@ -386,14 +389,9 @@ def _tools_for(session: OrchestratorSession) -> list:
             + len(bugs) + len(queue) - 1
         )
         batching_hint = (
-            f"\n\n{remaining_after_one} more item(s) will still be waiting after you address one of "
-            "these -- if what you're about to build is not a trivial fix, consider implementing "
-            "several of them before your first deploy_pre_prod call this run (it deploys/verifies "
-            "everything implemented so far together, see its own description), rather than paying "
-            "for a full pre-prod deploy + live verification once per item. Do not bundle a large, "
-            "standing, multi-session effort (e.g. one already spanning several prior commits) in "
-            "with an unrelated small fix just because both are waiting -- pick items that are "
-            "actually safe to test/deploy/review together."
+            f"\n\n{remaining_after_one} more item(s) are waiting, but work ONLY the single "
+            "highest-priority one this run -- one backlog item per run. deploy_pre_prod + "
+            "verify_pre_prod it, then stop; the rest are picked up next run."
             if remaining_after_one > 0 else ""
         )
         text = (
@@ -588,6 +586,39 @@ def _tools_for(session: OrchestratorSession) -> list:
                     f"#{tracking_issue} for the next run."
                 )}], "is_error": True}
             session.committed_issue = str(tracking_issue)
+
+            # Stuck-loop backstop: an issue that can never reach a terminal state
+            # (status:done) grinds forever -- check_backlog keeps offering it, each run
+            # resumes the same branch, nothing finishes. Confirmed live: #130 ran through
+            # 5+ separate runs. After this many distinct runs with no completion, stop
+            # re-selecting it and escalate so a human can see what's wedged.
+            if session.human_answer_issue != tracking_issue:
+                prior_runs = {r for r in session.mem.run_ids_for(str(tracking_issue)) if r != session.run_id}
+                if len(prior_runs) >= MAX_RUNS_PER_TRACKING_ISSUE:
+                    _escalate_to_human(
+                        session,
+                        category="stuck_loop",
+                        diagnosis=(
+                            f"Issue #{tracking_issue} has been worked by {len(prior_runs)} separate autonomous "
+                            "runs without ever reaching status:done. Something is stopping it from finishing -- "
+                            f"a pre-prod deploy that keeps failing, a verification that never passes, or a spec "
+                            f"that doesn't match the request. Branch: {session.feature_branch!r}. Prior runs: "
+                            f"{sorted(prior_runs)}."
+                        ),
+                        question=(
+                            f"Issue #{tracking_issue} is looping without completing after many autonomous "
+                            "attempts -- what should happen with it?"
+                        ),
+                        source="stuck-loop-detector",
+                        title=f"Stuck: issue #{tracking_issue} looping without completing",
+                        branch=session.feature_branch,
+                        tracking_issue=tracking_issue,
+                    )
+                    session.note(f"implement_feature: issue #{tracking_issue} stuck-loop -- escalated", ok=None)
+                    return {"content": [{"type": "text", "text": (
+                        f"Issue #{tracking_issue} has been through {len(prior_runs)} runs without finishing. "
+                        "Escalated to a human; this run is now waiting_for_human. Stop here."
+                    )}], "is_error": True}
 
         # One loop at a time (user directive): a feature's loop stays open until it
         # reaches production. Don't start a brand-new backlog item while another is
@@ -1009,8 +1040,14 @@ def _tools_for(session: OrchestratorSession) -> list:
                 if session.code_complete_issue_numbers:
                     moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
                     session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
-                    # No verify_pre_prod call follows a trivial merge, so these never reach
-                    # status:tested -- deliberately not added to shipped_this_cycle_issue_numbers.
+                    # A skip-verify tier (TRIVIAL/MINOR) has no verify_pre_prod step to move these
+                    # on to status:tested -- the passing local suite plus a clean merge IS the
+                    # terminal proof at this size. Stamp tested now; otherwise the issue sits at
+                    # status:shipped forever as check_backlog's "shipped, pending live testing"
+                    # top priority and every future run re-picks it (confirmed live: GitHub #130
+                    # ground through 5 runs / ~6h this way).
+                    if moved:
+                        session.mem.record_tested(moved, session.run_id)
                 # notify_shipped choke point (a): trivial changes never go through
                 # verify_pre_prod, so this merge succeeding IS confirmed pre-prod delivery.
                 _notify_shipped_pending(

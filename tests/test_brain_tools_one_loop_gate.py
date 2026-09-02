@@ -159,6 +159,71 @@ def test_retrying_the_same_committed_issue_is_allowed(tmp_path, monkeypatch):
         assert result.get("is_error") is not True
 
 
+def test_an_issue_worked_by_too_many_runs_is_escalated_not_re_selected(tmp_path, monkeypatch):
+    """Stuck-loop backstop (GitHub #130): an issue that can't reach status:done grinds
+    forever -- check_backlog keeps offering it, each run resumes the same branch. After
+    MAX_RUNS_PER_TRACKING_ISSUE distinct runs, implement_feature escalates instead."""
+    session = _session(tmp_path, feature_branch="dev/stuck-branch")
+    monkeypatch.setattr(session.mem, "in_progress_items", lambda: [])
+    monkeypatch.setattr(
+        session.mem, "run_ids_for",
+        lambda ext: [f"run{i}" for i in range(brain.tools.MAX_RUNS_PER_TRACKING_ISSUE)],
+    )
+    escalations = []
+    monkeypatch.setattr(
+        brain.tools, "_escalate_to_human",
+        lambda session, **kw: escalations.append(kw) or 130,
+    )
+
+    impl_calls = []
+
+    async def fake_impl_run(*a, **k):
+        impl_calls.append(a)
+        return AgentResult(ok=True, text="done", json_data={"feature": "X"}, cost_usd=0.0, turns=1)
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+
+    result = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "Resume and finish #130", "resolves_id": "130", "resolves_origin": "known_bug"}
+        )
+    )
+
+    assert result.get("is_error") is True
+    assert impl_calls == []
+    assert len(escalations) == 1
+    assert escalations[0]["category"] == "stuck_loop"
+    assert escalations[0]["tracking_issue"] == 130
+
+
+def test_human_answered_stuck_issue_is_allowed_to_proceed(tmp_path, monkeypatch):
+    session = _session(tmp_path, feature_branch="dev/stuck-branch", human_answer="do X", human_answer_issue=130)
+    monkeypatch.setattr(session.mem, "in_progress_items", lambda: [])
+    monkeypatch.setattr(
+        session.mem, "run_ids_for",
+        lambda ext: [f"run{i}" for i in range(brain.tools.MAX_RUNS_PER_TRACKING_ISSUE + 3)],
+    )
+    monkeypatch.setattr(session.mem, "record_code_complete", lambda *a, **k: {"issue_number": 130, "board_issue_number": None})
+    monkeypatch.setattr(session.mem, "append_documentation", lambda *a, **k: None)
+    monkeypatch.setattr(session.mem, "clear_known_bug", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brain.tools, "_escalate_to_human",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not escalate a human-answered issue")),
+    )
+
+    async def fake_impl_run(*a, **k):
+        return AgentResult(ok=True, text="done", json_data={"feature": "Fix #130"}, cost_usd=0.0, turns=1)
+
+    monkeypatch.setattr(brain.implementation, "run", fake_impl_run)
+
+    result = asyncio.run(
+        _tool(session, "implement_feature").handler(
+            {"feature_brief": "Resume #130 with the human's answer", "resolves_id": "130", "resolves_origin": "known_bug"}
+        )
+    )
+    assert result.get("is_error") is not True
+
+
 def test_human_answer_resume_may_start_new_work_despite_an_open_loop(tmp_path, monkeypatch):
     session = _session(tmp_path, human_answer="Go ahead.", human_answer_issue=99)
     monkeypatch.setattr(

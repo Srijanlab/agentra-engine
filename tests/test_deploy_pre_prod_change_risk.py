@@ -78,6 +78,29 @@ def test_deploy_pre_prod_merges_only_for_a_trivial_change(tmp_path, monkeypatch)
     assert session.deployed_to_pre_prod is True
 
 
+def test_skip_verify_merge_stamps_the_issue_tested_not_just_shipped(tmp_path, monkeypatch):
+    """A MINOR/TRIVIAL change merges without a verify_pre_prod step, so deploy_pre_prod
+    itself must advance the issue past status:shipped -- otherwise it sits forever as
+    check_backlog's "shipped, pending live testing" #1 priority and every run re-picks it
+    (confirmed live: GitHub #130 ground through 5 runs this way)."""
+    _patch_registry(monkeypatch)
+    session = _session(tmp_path, code_complete_issue_numbers=["130"])
+    monkeypatch.setattr(brain.tools.change_risk, "classify_change", lambda *a, **k: "minor")
+
+    async def fake_merge(repo, env, feature_branch):
+        return AgentResult(ok=True, text="merged", json_data={"status": "skipped_light", "preview_url": None}, cost_usd=0.0, turns=0)
+
+    monkeypatch.setattr(brain.deployment, "merge_to_pre_prod_only", fake_merge)
+    monkeypatch.setattr(session.mem, "record_shipped_to_preprod", lambda ids, run_id=None: list(ids))
+    tested_calls = []
+    monkeypatch.setattr(session.mem, "record_tested", lambda ids, run_id=None: tested_calls.append(list(ids)) or list(ids))
+
+    result = asyncio.run(_tool(session, "deploy_pre_prod").handler({}))
+
+    assert result.get("is_error") is not True
+    assert tested_calls == [["130"]]
+
+
 def test_deploy_pre_prod_uses_the_full_strategy_for_a_standard_change(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(tmp_path)
@@ -116,7 +139,7 @@ def test_verify_pre_prod_skips_when_change_was_classified_trivial(tmp_path, monk
     assert "trivial" in result["content"][0]["text"].lower()
 
 
-def test_check_backlog_hints_at_batching_when_multiple_items_are_pending(tmp_path, monkeypatch):
+def test_check_backlog_tells_the_orchestrator_to_work_only_one_item(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(tmp_path)
     monkeypatch.setattr(session.mem, "shipped_features", lambda: [])
@@ -133,7 +156,8 @@ def test_check_backlog_hints_at_batching_when_multiple_items_are_pending(tmp_pat
 
     text = result["content"][0]["text"]
     assert "1 more item(s)" in text
-    assert "batch" in text.lower() or "batching" in text.lower() or "consider implementing" in text.lower()
+    assert "one backlog item per run" in text.lower()
+    assert "batch" not in text.lower()
 
 
 def test_check_backlog_has_no_batching_hint_with_a_single_item(tmp_path, monkeypatch):
