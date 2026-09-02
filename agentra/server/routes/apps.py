@@ -127,6 +127,22 @@ def _apply_app_config(
 
 
 async def _app_digest(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
+    try:
+        return await _app_digest_inner(name, info, github_data)
+    except Exception:
+        # One app failing (missing GitHub creds, API blip) must not 500 the whole list.
+        logger.warning("app digest failed for %s", name, exc_info=True)
+        d = environments.EnvironmentConfig()
+        return name, {
+            "repo_path": info.get("repo_path"), "objective": None,
+            "shipped_count": 0, "released_count": 0, "known_bugs": 0,
+            "pre_prod_branch": d.pre_prod_branch, "prod_branch": d.prod_branch,
+            "schedule_hours": d.schedule_hours, "alarm_enabled": d.alarm_enabled,
+            "digest_error": True,
+        }
+
+
+async def _app_digest_inner(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
     repo = Path(info["repo_path"])
     if not repo.exists() and not info.get("repo_url"):
         defaults = environments.EnvironmentConfig()
