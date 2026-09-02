@@ -48,6 +48,65 @@ def sync_oidc_token_file() -> None:
         pass
 
 
+def _gcp_credentials():
+    """Credentials for every GCP API this process calls (Firestore, Secret
+    Manager), in priority order. Returns None to fall back to ADC / the metadata
+    server (i.e. running on GCP)."""
+    # 1. Keyless: Vercel OIDC -> Workload Identity Federation (survives the
+    #    iam.disableServiceAccountKeyCreation org policy -- no key anywhere).
+    wif_config = os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")
+    if wif_config and os.environ.get("VERCEL_OIDC_TOKEN"):
+        sync_oidc_token_file()
+        from google.auth import identity_pool
+
+        cfg = json.loads(wif_config)
+        cfg.setdefault("credential_source", {})["file"] = _OIDC_TOKEN_FILE
+        return identity_pool.Credentials.from_info(cfg)
+    # 2. A service-account key from an env var, if one is ever available.
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_json:
+        from google.oauth2 import service_account
+
+        return service_account.Credentials.from_service_account_info(json.loads(sa_json))
+    return None
+
+
+# Secrets the connectors read from os.environ. Off-GCP the runtime SA pulls them
+# from Secret Manager once, at import, so nothing sensitive lives in Vercel.
+_SECRET_MANAGER_ENV = {
+    "GITHUB_TOKEN": "agentra-github-token",
+    "GITHUB_APP_ID": "agentra-github-app-id",
+    "GITHUB_APP_PRIVATE_KEY": "agentra-github-app-private-key",
+    "SLACK_SIGNING_SECRET": "agentra-slack-signing-secret",
+    "SLACK_BOT_TOKEN": "agentra-slack-bot-token",
+    "AGENTRA_ALARM_WEBHOOK_PASSWORD": "agentra-alarm-webhook-password",
+}
+
+
+def _hydrate_env_from_secret_manager(creds) -> None:
+    project = os.environ.get("AGENTRA_SECRETS_PROJECT") or os.environ.get("AGENTRA_FIRESTORE_PROJECT")
+    if not project or not os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG"):
+        return  # only when running off-GCP against a real project
+    try:
+        from google.cloud import secretmanager
+    except ImportError:
+        return
+    try:
+        client = secretmanager.SecretManagerServiceClient(credentials=creds)
+    except Exception:
+        return
+    for env_name, secret_id in _SECRET_MANAGER_ENV.items():
+        if os.environ.get(env_name):
+            continue
+        try:
+            resp = client.access_secret_version(
+                name=f"projects/{project}/secrets/{secret_id}/versions/latest"
+            )
+            os.environ[env_name] = resp.payload.data.decode("utf-8")
+        except Exception:
+            pass  # a destroyed/missing secret (e.g. the App key) -- skip it
+
+
 def _init_firestore():
     project = os.environ.get("AGENTRA_FIRESTORE_PROJECT")
     if not project:
@@ -56,28 +115,10 @@ def _init_firestore():
         from google.cloud import firestore
     except ImportError:
         return None
-
-    # 1. Keyless: Vercel OIDC -> GCP Workload Identity Federation (no SA key,
-    #    survives the iam.disableServiceAccountKeyCreation org policy).
-    wif_config = os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")
-    if wif_config and os.environ.get("VERCEL_OIDC_TOKEN"):
-        sync_oidc_token_file()
-        from google.auth import identity_pool
-
-        cfg = json.loads(wif_config)
-        cfg.setdefault("credential_source", {})["file"] = _OIDC_TOKEN_FILE
-        creds = identity_pool.Credentials.from_info(cfg)
+    creds = _gcp_credentials()
+    _hydrate_env_from_secret_manager(creds)
+    if creds is not None:
         return firestore.Client(project=project, credentials=creds)
-
-    # 2. A service-account key straight from an env var, when allowed.
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if sa_json:
-        from google.oauth2 import service_account
-
-        creds = service_account.Credentials.from_service_account_info(json.loads(sa_json))
-        return firestore.Client(project=project, credentials=creds)
-
-    # 3. On GCP: application default credentials / metadata server.
     return firestore.Client(project=project)
 
 

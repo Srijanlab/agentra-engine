@@ -39,14 +39,16 @@ gcloud iam service-accounts add-iam-policy-binding $RUN_SA --project agentra-pro
 
 ### 3. Vercel env vars
 
+The engine's **secret** values (GitHub PAT, Slack tokens, alarm password) are
+**not** set in Vercel -- the runtime SA (`agentra-engine-run`, which already has
+`secretmanager.secretAccessor`) pulls them from Secret Manager at startup via the
+same WIF credentials. Only these non-secret vars go in Vercel:
+
 | var | value |
 |---|---|
 | `AGENTRA_FIRESTORE_PROJECT` | `agentra-prod` |
 | `GCP_WORKLOAD_IDENTITY_CONFIG` | the JSON below (not secret) |
-| `GITHUB_TOKEN` | the PAT (`agentra-github-token` value) |
-| `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN` | current values |
-| `AGENTRA_ALARM_WEBHOOK_PASSWORD` | current value |
-| `FIREBASE_PROJECT_ID` | `agentra-prod` (for the auth check — see below) |
+| `FIREBASE_PROJECT_ID` | `agentra-prod` (for the Google-OAuth check) |
 | `AGENTRA_ALLOWED_EMAILS` | your email(s), comma-separated |
 
 `GCP_WORKLOAD_IDENTITY_CONFIG`:
