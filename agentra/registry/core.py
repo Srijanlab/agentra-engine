@@ -84,25 +84,35 @@ _SECRET_MANAGER_ENV = {
 
 
 def _hydrate_env_from_secret_manager(creds) -> None:
+    # Secret Manager REST (no google-cloud-secret-manager dep -- httpx + a token
+    # from the same WIF credentials). Only off-GCP against a real project.
     project = os.environ.get("AGENTRA_SECRETS_PROJECT") or os.environ.get("AGENTRA_FIRESTORE_PROJECT")
-    if not project or not os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG"):
-        return  # only when running off-GCP against a real project
-    try:
-        from google.cloud import secretmanager
-    except ImportError:
+    if not project or creds is None or not os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG"):
         return
     try:
-        client = secretmanager.SecretManagerServiceClient(credentials=creds)
+        import httpx
+        from google.auth.transport.requests import Request
+
+        creds.refresh(Request())
+        token = creds.token
     except Exception:
+        logger.warning("could not mint a token for Secret Manager", exc_info=True)
         return
+
+    base = "https://secretmanager.googleapis.com/v1"
+    headers = {"Authorization": f"Bearer {token}"}
     for env_name, secret_id in _SECRET_MANAGER_ENV.items():
         if os.environ.get(env_name):
             continue
         try:
-            resp = client.access_secret_version(
-                name=f"projects/{project}/secrets/{secret_id}/versions/latest"
+            r = httpx.get(
+                f"{base}/projects/{project}/secrets/{secret_id}/versions/latest:access",
+                headers=headers, timeout=10,
             )
-            os.environ[env_name] = resp.payload.data.decode("utf-8")
+            if r.status_code == 200:
+                import base64
+
+                os.environ[env_name] = base64.b64decode(r.json()["payload"]["data"]).decode("utf-8")
         except Exception:
             pass  # a destroyed/missing secret (e.g. the App key) -- skip it
 
