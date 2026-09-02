@@ -105,6 +105,27 @@ async def health() -> dict:
     return {"status": "ok", "apps_registered": len(registry.list_apps())}
 
 
+@app.get("/debug/firestore")
+async def debug_firestore() -> dict:
+    """Diagnose the keyless Firestore path (Vercel OIDC -> WIF). No secrets returned."""
+    from agentra import registry
+
+    out = {
+        "vercel_oidc_token_present": bool(os.environ.get("VERCEL_OIDC_TOKEN")),
+        "wif_config_present": bool(os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")),
+        "firestore_project": os.environ.get("AGENTRA_FIRESTORE_PROJECT"),
+        "db_connected": registry.firestore_client() is not None,
+        "github_token_loaded": bool(os.environ.get("GITHUB_TOKEN")),
+    }
+    db = registry.firestore_client()
+    if db is not None:
+        try:
+            out["apps_doc_count"] = sum(1 for _ in db.collection("apps").limit(20).stream())
+        except Exception as exc:
+            out["read_error"] = f"{type(exc).__name__}: {exc}"[:400]
+    return out
+
+
 @app.get("/runs/{run_key}/logs")
 async def stream_run_logs(run_key: str) -> StreamingResponse:
     run = _active_runs.get(run_key) or registry.get_run(run_key)
