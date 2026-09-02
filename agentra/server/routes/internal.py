@@ -138,6 +138,22 @@ async def rpc(req: RpcRequest) -> dict:
     return {"result": _json_safe(result)}
 
 
+class RunLogRequest(BaseModel):
+    lines: list[str]
+
+
+@router.post("/runs/{run_id}/log", dependencies=[Depends(_require_token)])
+async def run_log(run_id: str, req: RunLogRequest) -> dict:
+    """Durable copy of a run's log tail (the loop's disk is ephemeral); the
+    dashboard streams it back from here via /runs/{key}/logs."""
+    db = registry.firestore_client()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Firestore unavailable")
+    tail = req.lines[-500:]
+    db.collection("run_logs").document(run_id).set({"lines": tail})
+    return {"ok": True, "lines": len(tail)}
+
+
 class GitTokenRequest(BaseModel):
     repo_url: str
 

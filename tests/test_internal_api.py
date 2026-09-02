@@ -68,3 +68,28 @@ def test_git_token_calls_github_app(client, monkeypatch):
     r = client.post("/internal/git-token", json={"repo_url": "https://github.com/x/y"},
                     headers={"Authorization": f"Bearer {TOKEN}"})
     assert r.json() == {"token": "tok-for-https://github.com/x/y"}
+
+
+def test_run_log_writes_to_firestore(client, monkeypatch):
+    written = {}
+
+    class _Doc:
+        def set(self, data):
+            written.update(data)
+
+    class _Col:
+        def document(self, key):
+            written["key"] = key
+            return _Doc()
+
+    class _DB:
+        def collection(self, name):
+            written["collection"] = name
+            return _Col()
+
+    monkeypatch.setattr(internal.registry, "firestore_client", lambda: _DB())
+    r = client.post("/internal/runs/run-9/log", json={"lines": ["a", "b"]},
+                    headers={"Authorization": f"Bearer {TOKEN}"})
+    assert r.json() == {"ok": True, "lines": 2}
+    assert written["collection"] == "run_logs" and written["key"] == "run-9"
+    assert written["lines"] == ["a", "b"]
