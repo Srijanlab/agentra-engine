@@ -69,7 +69,14 @@ jobs:
 
       - name: Build image (Cloud Build)
         if: steps.cfg.outputs.ready == 'true'
-        run: gcloud builds submit --tag "${{ steps.t.outputs.image }}" --project "${{ vars.GCP_PROJECT }}" .
+        # regional-user-owned-bucket: logs go to a bucket the deploy SA owns, so
+        # `builds submit` can stream them without project Viewer on the SA.
+        run: |
+          gcloud builds submit . \
+            --tag "${{ steps.t.outputs.image }}" \
+            --project "${{ vars.GCP_PROJECT }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --default-buckets-behavior regional-user-owned-bucket
 
       - name: Deploy to Cloud Run
         if: steps.cfg.outputs.ready == 'true'
