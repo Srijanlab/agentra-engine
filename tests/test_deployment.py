@@ -697,6 +697,29 @@ def test_deploy_pre_prod_self_hosted_returns_error_when_build_fails(tmp_path, mo
     assert not any(c[:2] == ["docker", "run"] for c in docker_calls)
 
 
+def test_deploy_pre_prod_self_hosted_refuses_with_an_infra_diagnosis_when_the_disk_is_full(tmp_path, monkeypatch):
+    """GitHub #134: a full docker root fails `docker build` deep in a base-layer extract
+    with a cryptic buildkit error, and no retry fixes it -- so refuse up front with a
+    clear infrastructure message and never start the build."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+
+    docker_calls = []
+    monkeypatch.setattr(git_ops, "pull_latest", lambda repo, branch: None)
+    monkeypatch.setattr(git_ops, "push_branch", lambda repo, branch: None)
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: _self_hosted_config())
+    monkeypatch.setattr(deployment.subprocess, "run", _fake_docker_run(docker_calls))
+    monkeypatch.setattr(deployment, "_docker_root_free_bytes", lambda: 400 * 1024**2)  # 400 MiB
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is False
+    assert "out of disk" in result.text.lower()
+    assert not any(c[:2] == ["docker", "build"] for c in docker_calls)
+
+
 def test_deploy_pre_prod_self_hosted_returns_failed_status_when_health_check_never_succeeds(tmp_path, monkeypatch):
     feature_branch = "dev/1234-feature"
     repo = _setup_pre_prod_repo(tmp_path, feature_branch)
