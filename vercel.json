@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "pip install -r requirements.txt && python3 -c \"import claude_agent_sdk, os, shutil; shutil.rmtree(os.path.join(os.path.dirname(claude_agent_sdk.__file__), '_bundled'), ignore_errors=True)\"",
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
   "functions": { "api/index.py": { "maxDuration": 30, "memory": 1024 } }
 }

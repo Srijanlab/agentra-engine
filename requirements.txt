@@ -1,6 +1,6 @@
-# Vercel installs from here. Kept minimal — no uvicorn (Vercel provides the
-# ASGI server), no playwright/graphifyy/texttospeech (loop-only / dashboard
-# nicety), to stay under the 250 MB function limit.
+# Vercel installs from here (see vercel.json installCommand, which also prunes
+# claude-agent-sdk's 199 MB bundled CLI — the engine never runs it). No uvicorn
+# (Vercel provides the ASGI server), no playwright/graphifyy/texttospeech.
 claude-agent-sdk>=0.2.110
 pyyaml>=6.0
 fastapi>=0.115
