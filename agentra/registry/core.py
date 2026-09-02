@@ -113,13 +113,20 @@ def _init_firestore():
         return None
     try:
         from google.cloud import firestore
-    except ImportError:
+
+        creds = _gcp_credentials()
+        try:
+            _hydrate_env_from_secret_manager(creds)
+        except Exception:
+            logger.warning("secret-manager hydration failed", exc_info=True)
+        if creds is not None:
+            return firestore.Client(project=project, credentials=creds)
+        return firestore.Client(project=project)
+    except Exception:
+        # Never crash the whole app on a credential/import problem -- endpoints
+        # that need Firestore will 503, the rest (and /health) still work.
+        logger.error("Firestore init failed -- running without it", exc_info=True)
         return None
-    creds = _gcp_credentials()
-    _hydrate_env_from_secret_manager(creds)
-    if creds is not None:
-        return firestore.Client(project=project, credentials=creds)
-    return firestore.Client(project=project)
 
 
 _db = _init_firestore()
