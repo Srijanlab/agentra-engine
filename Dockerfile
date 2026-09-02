@@ -1,17 +1,8 @@
 # syntax=docker/dockerfile:1
-# ─── Stage 0: build the React dashboard (agentra/web/) ───────────────────────
-# Separate stage so only the built dist/ (static HTML/JS/CSS) makes it into
-# the final image -- not node_modules or dev dependencies (vite, tailwind,
-# typescript). The runtime stage below installs its own Node 20 anyway (for
-# the Claude Code CLI), but that's a different concern from building this
-# frontend, so it stays its own stage rather than reusing that install.
-FROM node:20-slim AS web-builder
-
-WORKDIR /web
-COPY agentra/web/package.json agentra/web/package-lock.json ./
-RUN npm ci
-COPY agentra/web/ ./
-RUN npm run build
+# The React dashboard was split out to Srijanlab/agentra-ui (2026-09-02) and is
+# hosted separately -- no web build stage here anymore. server/__init__.py
+# degrades gracefully when AGENTRA_WEB_DIST is unset (the / route returns a JSON
+# "dashboard not built" hint instead of an index.html).
 
 # ─── Stage 1: build agentra package ──────────────────────────────────────────
 FROM python:3.12-slim AS builder
@@ -100,13 +91,6 @@ RUN playwright install --with-deps chromium \
 RUN useradd --create-home --shell /bin/bash agentuser \
     && mkdir -p /workspace /home/agentuser/.claude /home/agentuser/.agentra \
     && chown agentuser:agentuser /workspace /home/agentuser/.claude /home/agentuser/.agentra
-
-# Built React dashboard (server.py's AGENTRA_WEB_DIST default assumes
-# agentra/web/dist next to the source tree, which doesn't exist in this
-# image -- only the installed package does -- so this env var points it at
-# where the built assets actually landed instead.)
-COPY --from=web-builder --chown=agentuser:agentuser /web/dist /home/agentuser/web-dist
-ENV AGENTRA_WEB_DIST=/home/agentuser/web-dist
 
 # Claude CLI stores its config here; a named volume is mounted at runtime
 # so OAuth tokens / session state persist across container restarts.
