@@ -121,6 +121,8 @@ async def debug_firestore(request: Request) -> dict:
         "vercel_env_keys": sorted(k for k in os.environ if k.startswith(("VERCEL", "AWS", "GOOGLE", "GCP"))),
         "vercel_headers": sorted(h for h in request.headers if h.lower().startswith(("x-vercel", "x-oidc"))),
     }
+    from agentra.registry.core import _secret_hydration_status
+    out["secret_hydration"] = dict(_secret_hydration_status)
     db = registry.firestore_client()
     if db is not None:
         try:

@@ -86,11 +86,16 @@ _SECRET_MANAGER_ENV = {
 }
 
 
+_secret_hydration_status: dict = {}
+
+
 def _hydrate_env_from_secret_manager(creds) -> None:
     # Secret Manager REST (no google-cloud-secret-manager dep -- httpx + a token
     # from the same WIF credentials). Only off-GCP against a real project.
+    _secret_hydration_status.clear()
     project = os.environ.get("AGENTRA_SECRETS_PROJECT") or os.environ.get("AGENTRA_FIRESTORE_PROJECT")
     if not project or creds is None or not os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG"):
+        _secret_hydration_status["skipped"] = "no project / no creds / no wif config"
         return
     try:
         import httpx
@@ -98,7 +103,8 @@ def _hydrate_env_from_secret_manager(creds) -> None:
 
         creds.refresh(Request())
         token = creds.token
-    except Exception:
+    except Exception as exc:
+        _secret_hydration_status["token_error"] = f"{type(exc).__name__}: {exc}"[:300]
         logger.warning("could not mint a token for Secret Manager", exc_info=True)
         return
 
@@ -106,6 +112,7 @@ def _hydrate_env_from_secret_manager(creds) -> None:
     headers = {"Authorization": f"Bearer {token}"}
     for env_name, secret_id in _SECRET_MANAGER_ENV.items():
         if os.environ.get(env_name):
+            _secret_hydration_status[env_name] = "already set"
             continue
         try:
             r = httpx.get(
@@ -116,8 +123,11 @@ def _hydrate_env_from_secret_manager(creds) -> None:
                 import base64
 
                 os.environ[env_name] = base64.b64decode(r.json()["payload"]["data"]).decode("utf-8")
-        except Exception:
-            pass  # a destroyed/missing secret (e.g. the App key) -- skip it
+                _secret_hydration_status[env_name] = "loaded"
+            else:
+                _secret_hydration_status[env_name] = f"http {r.status_code}: {r.text[:120]}"
+        except Exception as exc:
+            _secret_hydration_status[env_name] = f"{type(exc).__name__}: {exc}"[:200]
 
 
 def _init_firestore():
