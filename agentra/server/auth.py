@@ -18,6 +18,7 @@ _PUBLIC_PREFIXES = (
     "/favicon",
     "/assets/",
     "/slack/",            # Slack signs its own requests
+    "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
     "/trigger/queue",     # internal enqueue path (loop / SQS)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible

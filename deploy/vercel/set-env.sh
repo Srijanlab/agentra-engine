@@ -33,6 +33,7 @@ set_var AGENTRA_FIRESTORE_PROJECT    agentra-prod
 set_var GCP_WORKLOAD_IDENTITY_CONFIG "$WIF_JSON"
 set_var FIREBASE_PROJECT_ID          agentra-prod
 set_var AGENTRA_ALLOWED_EMAILS       "${AGENTRA_ALLOWED_EMAILS:-rossharma1@gmail.com}"
+set_var AGENTRA_INTERNAL_TOKEN       "$(ask AGENTRA_INTERNAL_TOKEN 'Internal RPC token (openssl rand -hex 32)')"
 
 echo "github app:"
 set_var GITHUB_APP_ID          "$(ask GITHUB_APP_ID 'GitHub App ID')"

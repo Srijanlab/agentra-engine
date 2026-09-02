@@ -234,6 +234,7 @@ from agentra.server.routes.triggers import router as triggers_router  # noqa: E4
 from agentra.server.routes.human_input import router as human_input_router  # noqa: E402
 from agentra.server.routes.review import router as review_router  # noqa: E402
 from agentra.server.routes.slack import router as slack_router  # noqa: E402
+from agentra.server.routes.internal import router as internal_router  # noqa: E402
 from agentra.a2a.routes import router as a2a_router  # noqa: E402
 
 app.include_router(systems_router)
@@ -245,4 +246,5 @@ app.include_router(triggers_router)
 app.include_router(human_input_router)
 app.include_router(review_router)
 app.include_router(slack_router)
+app.include_router(internal_router)
 app.include_router(a2a_router)
