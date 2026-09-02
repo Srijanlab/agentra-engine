@@ -25,6 +25,17 @@ logger = logging.getLogger("agentra.server")
 
 app = FastAPI(title="agentra orchestrator")
 
+
+@app.middleware("http")
+async def _refresh_oidc_token(request, call_next):
+    # Vercel rotates VERCEL_OIDC_TOKEN per invocation; keep the file identity_pool
+    # reads in sync so credential refresh always has a valid subject token.
+    from agentra import registry
+
+    registry.sync_oidc_token_file()
+    return await call_next(request)
+
+
 WEB_DIST = Path(os.environ.get("AGENTRA_WEB_DIST") or (Path(__file__).resolve().parent.parent / "web" / "dist"))
 
 if (WEB_DIST / "assets").is_dir():

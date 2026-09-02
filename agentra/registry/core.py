@@ -31,6 +31,23 @@ REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 HUMAN_INPUT_MAX_WAIT_SECONDS = float(os.environ.get("AGENTRA_HUMAN_INPUT_MAX_WAIT_HOURS", "24")) * 3600
 
 
+# Vercel injects a fresh OIDC JWT per invocation; identity_pool reads it from a
+# file. sync_oidc_token_file() copies the env var onto disk -- call it before any
+# Firestore use (see server middleware).
+_OIDC_TOKEN_FILE = "/tmp/agentra_vercel_oidc_token"
+
+
+def sync_oidc_token_file() -> None:
+    token = os.environ.get("VERCEL_OIDC_TOKEN")
+    if not token:
+        return
+    try:
+        with open(_OIDC_TOKEN_FILE, "w") as fh:
+            fh.write(token)
+    except OSError:
+        pass
+
+
 def _init_firestore():
     project = os.environ.get("AGENTRA_FIRESTORE_PROJECT")
     if not project:
@@ -39,14 +56,28 @@ def _init_firestore():
         from google.cloud import firestore
     except ImportError:
         return None
-    # Off-GCP (Vercel etc.) there's no ADC file or metadata server -- take the
-    # service-account key straight from an env var when one is set.
+
+    # 1. Keyless: Vercel OIDC -> GCP Workload Identity Federation (no SA key,
+    #    survives the iam.disableServiceAccountKeyCreation org policy).
+    wif_config = os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")
+    if wif_config and os.environ.get("VERCEL_OIDC_TOKEN"):
+        sync_oidc_token_file()
+        from google.auth import identity_pool
+
+        cfg = json.loads(wif_config)
+        cfg.setdefault("credential_source", {})["file"] = _OIDC_TOKEN_FILE
+        creds = identity_pool.Credentials.from_info(cfg)
+        return firestore.Client(project=project, credentials=creds)
+
+    # 2. A service-account key straight from an env var, when allowed.
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json:
         from google.oauth2 import service_account
 
         creds = service_account.Credentials.from_service_account_info(json.loads(sa_json))
         return firestore.Client(project=project, credentials=creds)
+
+    # 3. On GCP: application default credentials / metadata server.
     return firestore.Client(project=project)
 
 
