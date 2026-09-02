@@ -21,4 +21,17 @@ step of the three-service split:
 `srijanlab-agentra` stays as the running incumbent (the GCP VM keeps serving from it)
 until the loop has a new home and the VM is decommissioned.
 
+## Two separate GitHub concerns — don't conflate them
+
+- **Deploy access** — WIF → GCP → Cloud Run. Only for shipping this platform's own
+  images. Per-repo, set up in `deploy/cloudrun/`. Nothing to do with the App.
+- **Issue / contents access** — the `agentra-orchestrator` GitHub App, used across
+  *every* app agentra manages to read backlogs, open PRs, comment on issues.
+  `connectors/github_app.py` mints an installation token **per `owner/repo`**.
+
+For the App: the org install (`id 153365557`) is `repository_selection: selected`,
+so `agentra-ui` / `agentra-engine` / `agentra-loop` each have to be added to it
+(the user is handling this). The App has no `workflows` permission — the CI/deploy
+YAML in these repos is human-maintained.
+
 The full plan: "Three Repos, One Engine".
