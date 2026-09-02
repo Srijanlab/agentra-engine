@@ -45,6 +45,12 @@ async def get_backlog_board(name: str) -> dict:
     features), and code-complete items awaiting merge -- the same buckets/priority check_backlog
     presents to the orchestrator, surfaced for a human to see directly. Every item carries its
     full run_ids history (1:N), not just the single most-recent run."""
+    from agentra.server.gh_cache import cached
+
+    return await cached(f"backlog_board:{name}", lambda: _build_backlog_board(name), ttl=45)
+
+
+async def _build_backlog_board(name: str) -> dict:
     repo = _repo_or_404(name)
     mem = Memory(repo)
 
@@ -82,6 +88,12 @@ async def get_ready_to_review(name: str) -> dict:
     production -- each with its own itemized test report attached (moved out of the per-run
     detail drawer so a reviewer sees every pending item's own verification in one consolidated
     view, not just whichever run they happen to click into) and its full run_ids history (1:N)."""
+    from agentra.server.gh_cache import cached
+
+    return await cached(f"ready_to_review:{name}", lambda: _build_ready_to_review(name), ttl=45)
+
+
+async def _build_ready_to_review(name: str) -> dict:
     repo = _repo_or_404(name)
     mem = Memory(repo)
     items = await asyncio.to_thread(mem.tested_items)

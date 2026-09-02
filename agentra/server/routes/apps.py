@@ -128,7 +128,7 @@ def _apply_app_config(
 
 async def _app_digest(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
     repo = Path(info["repo_path"])
-    if not repo.exists():
+    if not repo.exists() and not info.get("repo_url"):
         defaults = environments.EnvironmentConfig()
         return name, {
             "repo_path": info["repo_path"],
@@ -182,31 +182,32 @@ async def _app_digest(name: str, info: dict, github_data: dict | None = None) ->
 
 @router.get("/apps")
 async def list_apps() -> dict:
+    import hashlib
+
     from agentra.connectors import github_issues
     from agentra.connectors.github_app import owner_repo_from_url
+    from agentra.server.gh_cache import cached
 
     apps = registry.list_apps()
 
-    # Collect repo_urls for all apps that have a github remote configured.
     repo_url_map: dict[str, str] = {}  # name -> repo_url
     for name, info in apps.items():
-        repo = Path(info["repo_path"])
-        if not repo.exists():
-            continue
         url = info.get("repo_url")
         if url and owner_repo_from_url(url):
             repo_url_map[name] = url
 
-    # Single GraphQL call for all apps — falls back to {} on any error
+    # One GraphQL call for all apps, cached in Firestore -- the dashboard polls
+    # this often and the backlog counts don't change second-to-second.
     batch: dict[str, dict] = {}
     if repo_url_map:
+        urls = sorted(repo_url_map.values())
+        key = "digest_batch:" + hashlib.sha1(",".join(urls).encode()).hexdigest()[:16]
         try:
-            batch = await asyncio.to_thread(
-                github_issues.fetch_app_digest_batch, list(repo_url_map.values())
+            raw = await cached(
+                key, lambda: asyncio.to_thread(github_issues.fetch_app_digest_batch, urls), ttl=90
             )
-            # Re-key by app name
             url_to_name = {v: k for k, v in repo_url_map.items()}
-            batch = {url_to_name[url]: data for url, data in batch.items() if url in url_to_name}
+            batch = {url_to_name[u]: d for u, d in (raw or {}).items() if u in url_to_name}
         except Exception:
             batch = {}
 
@@ -276,8 +277,13 @@ async def get_app(name: str) -> dict:
     apps = registry.list_apps()
     if name not in apps:
         raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
-    info = apps[name]
 
+    from agentra.server.gh_cache import cached
+
+    return await cached(f"app_detail:{name}", lambda: _build_app_detail(name, apps[name]), ttl=60)
+
+
+async def _build_app_detail(name: str, info: dict) -> dict:
     repo = registry.get_app_repo(name)
     if repo is None:
         raise HTTPException(status_code=409, detail=f"local checkout for {name!r} is missing and could not be recovered")
