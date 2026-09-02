@@ -12,14 +12,20 @@ dependencies = [
     "httpx>=0.27",
     "google-cloud-firestore>=2.19",
     "google-cloud-texttospeech>=2.16",
-    "playwright>=1.48",
-    "graphifyy[mcp]>=0.9.46",
 ]
 
 [project.optional-dependencies]
+# The loop's workloads — screenshots (Testing Agent) and the codebase graph.
+# Not installed in the engine image; the engine never runs these.
+agents = [
+    "playwright>=1.48",
+    "graphifyy[mcp]>=0.9.46",
+]
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.6",
+    "playwright>=1.48",
+    "graphifyy[mcp]>=0.9.46",
 ]
 
 [project.scripts]

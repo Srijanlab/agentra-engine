@@ -33,3 +33,7 @@ deploy/cloudflare/terraform/terraform.tfvars
 deploy/cloudflare/terraform/*.tfplan
 deploy/cloudflare/terraform/tfplan_*
 slack-credentials.txt
+
+build/
+*.egg-info/
+.venv/
