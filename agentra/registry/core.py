@@ -21,12 +21,15 @@ PAUSE_PATH = AGENTRA_HOME / "paused.json"
 _SLACK_THREADS_PATH = AGENTRA_HOME / "slack_threads.json"
 _LLM_BACKEND_PATH = AGENTRA_HOME / "llm_backend.json"
 _RUNS_PATH = AGENTRA_HOME / "runs.json"
+_LOOPS_PATH = AGENTRA_HOME / "loops.json"
 _AGENT_STEPS_PATH = AGENTRA_HOME / "agent_steps.jsonl"
 
 _repos_env_value = os.environ.get("AGENTRA_REPOS_ROOT")
 REPOS_ROOT = Path(_repos_env_value) if _repos_env_value else AGENTRA_HOME / "repos"
 
-STALE_PROCESSING_SECONDS = 10 * 60
+# A cycle is one long await (a sub-agent dispatch can itself run 10-20 min with
+# no orchestrator-level checkpoint), so the reaper only fires on a genuine hang.
+STALE_PROCESSING_SECONDS = 60 * 60
 REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 
 # Human-in-the-loop escalation (GitHub issue #34): how long a run may sit in

@@ -23,7 +23,7 @@ from agentra.memory import Memory
 
 
 def test_note_prefixes_logged_lines_with_orchestrator_label(tmp_path, monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
+    monkeypatch.setattr(registry, "record_run", lambda *a, **k: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     mem = Memory(repo)
@@ -41,16 +41,15 @@ def test_note_prefixes_logged_lines_with_orchestrator_label(tmp_path, monkeypatc
     assert any("[Orchestrator] implement_feature: ok=True feature='thing'" in line for line in lines)
 
 
-def test_note_still_reports_the_unprefixed_action_to_the_registry(tmp_path, monkeypatch):
-    """The [Orchestrator] prefix is only for the raw log stream -- registry
-    reporting (dashboard's agent-steps panel) must keep seeing the plain
-    action text/resolved agent name, unaffected by this."""
-    captured = {}
+def test_note_bumps_the_run_liveness_signal_throttled(tmp_path, monkeypatch):
+    """Per-agent cost/tokens live in Langfuse now; note() only keeps the run's
+    updated_at fresh for reconcile_stale_runs, and throttles the write."""
+    touches = []
 
-    def fake_record_agent_step(app_name, run_id, agent, ok, cost_usd, turns, action, **kwargs):
-        captured.update(app_name=app_name, run_id=run_id, agent=agent, action=action)
+    def fake_record_run(run_key, **fields):
+        touches.append((run_key, fields))
 
-    monkeypatch.setattr(registry, "record_agent_step", fake_record_agent_step)
+    monkeypatch.setattr(registry, "record_run", fake_record_run)
     repo = tmp_path / "repo"
     repo.mkdir()
     session = OrchestratorSession(
@@ -58,6 +57,8 @@ def test_note_still_reports_the_unprefixed_action_to_the_registry(tmp_path, monk
     )
 
     session.note("check_backlog")
+    session.note("implement_feature")  # within the throttle window -- no second write
 
-    assert captured["agent"] == "check_backlog"
-    assert captured["action"] == "check_backlog"  # unprefixed
+    assert len(touches) == 1
+    assert touches[0][0] == "testrun1"
+    assert "updated_at" in touches[0][1]

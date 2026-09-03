@@ -62,13 +62,10 @@ async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, 
             _set_run(
                 run_key,
                 status="waiting_for_human" if report.waiting_for_human else "completed",
-                result={
-                    "run_id": report.run_id,
-                    "actions": report.actions,
-                    "final_message": report.final_message,
-                    "cost_usd": report.cost_usd,
-                    "feature": report.feature,
-                },
+                ended_at=time.time(),
+                cost_usd=report.cost_usd,
+                summary=report.final_message,
+                feature=report.feature,
             )
             _server_log(
                 "human-input",
@@ -76,7 +73,7 @@ async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, 
                 f"waiting_for_human={report.waiting_for_human} cost=${report.cost_usd:.4f}",
             )
         except Exception as exc:
-            _set_run(run_key, status="failed", error=str(exc))
+            _set_run(run_key, status="failed", ended_at=time.time(), error=str(exc), summary=str(exc)[:2000])
             _server_log("human-input", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 

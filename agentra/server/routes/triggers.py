@@ -96,6 +96,8 @@ def _record_production_release(repo: Path, run_id: str) -> list[str]:
 
 def _new_run_key(app_name: str, source: str, objective: str, feature: str | None = None) -> str:
     run_key = uuid.uuid4().hex[:8]
+    # loop_id is left unset here -- the cycle binds it (registry.bind_loop) once it
+    # commits to a tracked GitHub issue. Runs that never bind stay unlinked.
     _active_runs[run_key] = {
         "app": app_name,
         "source": source,
@@ -103,10 +105,7 @@ def _new_run_key(app_name: str, source: str, objective: str, feature: str | None
         "started_at": time.time(),
         "objective": objective,
         "feature": feature,
-        "loop_id": registry.loop_id_for(objective),
     }
-    if feature:
-        _active_runs[run_key]["result"] = {"feature": feature}
     registry.record_run(run_key, **_active_runs[run_key])
     return run_key
 
@@ -126,20 +125,17 @@ async def _run_autonomous_background(
             _set_run(
                 run_key,
                 status="waiting_for_human" if report.waiting_for_human else "completed",
-                result={
-                    "run_id": report.run_id,
-                    "actions": report.actions,
-                    "final_message": report.final_message,
-                    "cost_usd": report.cost_usd,
-                    "feature": report.feature,
-                },
+                ended_at=time.time(),
+                cost_usd=report.cost_usd,
+                summary=report.final_message,
+                feature=report.feature,
             )
             _server_log(
                 _active_runs[run_key]["source"],
                 f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} completed | cost=${report.cost_usd:.4f}",
             )
         except Exception as exc:
-            _set_run(run_key, status="failed", error=str(exc))
+            _set_run(run_key, status="failed", ended_at=time.time(), error=str(exc), summary=str(exc)[:2000])
             _server_log(_active_runs[run_key]["source"], f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 

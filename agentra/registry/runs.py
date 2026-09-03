@@ -88,59 +88,6 @@ def loop_id_for_issue(app: str, issue_number: int | str) -> str:
     return hashlib.sha1(f"{app}#{issue_number}".encode("utf-8")).hexdigest()[:10]
 
 
-_LOOPS_RUN_SCAN = 300  # Firestore free tier is 50k reads/day -- bound how deep loop views read
-
-def list_loops(app: str | None = None) -> list[dict]:
-    """Group runs by loop_id and return loop summaries, newest loop first."""
-    runs = [r for r in list_runs(limit=_LOOPS_RUN_SCAN) if (app is None or r.get("app") == app) and r.get("loop_id")]
-    steps = list_agent_steps(app=app, limit=400)
-    steps_by_run_key: dict[str, list[dict]] = {}
-    for s in steps:
-        steps_by_run_key.setdefault(s.get("run_id"), []).append(s)
-
-    loops: dict[tuple[str, str], dict] = {}
-    for run in runs:
-        key = (run.get("app"), run["loop_id"])
-        loop = loops.setdefault(
-            key, {"loop_id": run["loop_id"], "app": run.get("app"), "objective": run.get("objective"), "runs": []}
-        )
-        loop["runs"].append(run)
-
-    result = []
-    for loop in loops.values():
-        loop["runs"].sort(key=lambda r: r["started_at"], reverse=True)
-        loop["started_at"] = min(r["started_at"] for r in loop["runs"])
-        # A loop maps to one tracked issue/feature; surface its title from
-        # whichever run recorded it (run.feature or run.result.feature).
-        loop["title"] = next(
-            (r.get("feature") or (r.get("result") or {}).get("feature") for r in loop["runs"]
-             if r.get("feature") or (r.get("result") or {}).get("feature")),
-            None,
-        )
-        # The tracked GitHub issue number, when a run in this loop recorded one
-        # (implement_feature stamps it alongside loop_id) -- lets the dashboard
-        # show the issue's own title/link instead of the long auto-generated brief.
-        loop["issue_number"] = next(
-            (str(r["issue_number"]) for r in loop["runs"] if r.get("issue_number")),
-            None,
-        )
-        loop["cost_usd"] = sum((r.get("result") or {}).get("cost_usd") or 0 for r in loop["runs"])
-        loop["cycles_completed"] = sum(1 for r in loop["runs"] if r.get("status") == "completed")
-        loop["cycles_total"] = len(loop["runs"])
-
-        agent_totals: dict[str, dict] = {}
-        for r in loop["runs"]:
-            for s in steps_by_run_key.get(r["run_key"], []):
-                bucket = agent_totals.setdefault(s["agent"], {"agent": s["agent"], "count": 0, "cost_usd": 0.0})
-                bucket["count"] += 1
-                bucket["cost_usd"] += s.get("cost_usd") or 0
-        loop["agents"] = sorted(agent_totals.values(), key=lambda a: -a["cost_usd"])
-        result.append(loop)
-
-    result.sort(key=lambda l: l["started_at"], reverse=True)
-    return result
-
-
 def last_run_at(app: str, source: str | None = None) -> float | None:
     matches = [r for r in list_runs(limit=200) if r.get("app") == app and (source is None or r.get("source") == source)]
     if not matches:
@@ -150,24 +97,12 @@ def last_run_at(app: str, source: str | None = None) -> float | None:
 
 def reconcile_stale_runs() -> list[str]:
     now = time.time()
-    steps_by_run: dict[str, float] = {}
-    for step in list_agent_steps(limit=500):
-        run_id = step.get("run_id")
-        if not run_id:
-            continue
-        try:
-            ts = dt.datetime.fromisoformat(step["ts"]).timestamp()
-        except (KeyError, ValueError):
-            continue
-        if run_id not in steps_by_run or ts > steps_by_run[run_id]:
-            steps_by_run[run_id] = ts
-
     marked: list[str] = []
     for run in list_runs(limit=200):
         if run.get("status") not in ("queued", "running"):
             continue
         run_key = run["run_key"]
-        last_activity = steps_by_run.get(run_key, run.get("started_at", now))
+        last_activity = run.get("updated_at") or run.get("started_at") or now
         if now - last_activity > core.STALE_PROCESSING_SECONDS:
             record_run(
                 run_key,

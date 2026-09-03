@@ -19,6 +19,7 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
     monkeypatch.setattr(registry, "PAUSE_PATH", home / "paused.json")
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
+    monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")
     monkeypatch.setattr(registry, "_AGENT_STEPS_PATH", home / "agent_steps.jsonl")
     server._active_runs.clear()
     server._app_locks.clear()
@@ -142,115 +143,61 @@ def test_server_agent_chat_stream_endpoint(tmp_path, monkeypatch):
     assert chat_store.get_agent_session_id("stream-app", "codebase") == "stream-session-456"
 
 
-def test_all_apps_loops_endpoint_matches_per_app_shape(tmp_path, monkeypatch):
+def test_loops_are_scoped_per_app_even_on_the_same_issue_number(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path, "app-one")
     _register_tmp_app(tmp_path, "app-two")
 
-    # Deliberately the same objective text for both apps -- loop_id_for()
-    # hashes only the objective, so this is exactly the case that used to
-    # silently merge two different apps' runs into a single loop once
-    # list_loops aggregated across apps.
-    same_objective = "Ship useful dashboard improvements."
-    loop_id = registry.loop_id_for(same_objective)
-    registry.record_run(
-        "run-one", app="app-one", source="on-demand", status="completed",
-        started_at=time.time(), objective=same_objective, loop_id=loop_id,
-    )
-    registry.record_run(
-        "run-two", app="app-two", source="on-demand", status="completed",
-        started_at=time.time(), objective=same_objective, loop_id=loop_id,
-    )
+    # loop_id_for_issue hashes app + issue number, so the same issue number in
+    # two apps is two distinct loops -- never merged.
+    for app, run_key in (("app-one", "run-one"), ("app-two", "run-two")):
+        registry.record_run(
+            run_key, app=app, source="on-demand", status="running",
+            started_at=time.time(), objective="obj",
+        )
+        registry.bind_loop(run_key, app, 42, title="same number", kind="feature")
 
     client = TestClient(server.app)
+    loops = client.get("/loops").json()["loops"]
+    assert len(loops) == 2
+    assert {loop["app"] for loop in loops} == {"app-one", "app-two"}
 
-    # Same grouped-by-loop shape as the per-app endpoint, just aggregated.
-    response = client.get("/loops")
-    assert response.status_code == 200
-    loops = response.json()["loops"]
-    assert len(loops) == 2, "two apps sharing an objective must not merge into one loop"
-    apps_seen = {loop["app"] for loop in loops}
-    assert apps_seen == {"app-one", "app-two"}
-    for loop in loops:
-        assert len(loop["runs"]) == 1
-
-    # Per-app endpoint still returns just that app's one loop.
-    response = client.get("/apps/app-one/loops")
-    assert response.status_code == 200
-    loops = response.json()["loops"]
-    assert len(loops) == 1
-    assert loops[0]["app"] == "app-one"
-    assert len(loops[0]["runs"]) == 1
+    one = client.get("/apps/app-one/loops").json()["loops"]
+    assert len(one) == 1 and one[0]["app"] == "app-one"
 
 
-def test_list_loops_orders_runs_newest_first(tmp_path, monkeypatch):
+def test_loop_detail_returns_its_runs_newest_first(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path, "app-one")
 
-    objective = "Ship useful dashboard improvements."
-    loop_id = registry.loop_id_for(objective)
     base = time.time()
-    # Record out of order to make sure the fix doesn't rely on insertion order.
-    registry.record_run(
-        "run-mid", app="app-one", source="on-demand", status="completed",
-        started_at=base + 100, objective=objective, loop_id=loop_id,
-    )
-    registry.record_run(
-        "run-oldest", app="app-one", source="on-demand", status="completed",
-        started_at=base, objective=objective, loop_id=loop_id,
-    )
-    registry.record_run(
-        "run-newest", app="app-one", source="on-demand", status="completed",
-        started_at=base + 200, objective=objective, loop_id=loop_id,
-    )
+    for run_key, offset in (("run-mid", 100), ("run-oldest", 0), ("run-newest", 200)):
+        registry.record_run(
+            run_key, app="app-one", source="on-demand", status="completed",
+            started_at=base + offset, objective="obj",
+        )
+        loop_id = registry.bind_loop(run_key, "app-one", 130, title="thing", kind="feature")
 
-    client = TestClient(server.app)
-    response = client.get("/loops")
-    assert response.status_code == 200
-    loops = response.json()["loops"]
-    assert len(loops) == 1
-    loop = loops[0]
-
-    # Runs within the expanded loop must be newest first.
-    started_ats = [r["started_at"] for r in loop["runs"]]
-    assert started_ats == sorted(started_ats, reverse=True)
-    assert [r["run_key"] for r in loop["runs"]] == ["run-newest", "run-mid", "run-oldest"]
-
-    # loop["started_at"] must reflect the true oldest run, not runs[0].
-    assert loop["started_at"] == base
+    detail = TestClient(server.app).get(f"/loops/{loop_id}").json()
+    assert [r["run_key"] for r in detail["runs"]] == ["run-newest", "run-mid", "run-oldest"]
+    assert detail["run_count"] == 0  # roll_up_loop not called here
 
 
-def test_list_loops_surfaces_the_tracked_issue_number(tmp_path, monkeypatch):
+def test_bind_loop_stores_the_tracked_issue_number(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path, "app-one")
 
-    loop_id = registry.loop_id_for_issue("app-one", 130)
     registry.record_run(
-        "run-impl", app="app-one", source="on-demand", status="completed",
-        started_at=time.time(), objective="obj", loop_id=loop_id,
-        feature="A very long auto-generated implementation brief that nobody wants as a heading",
-        issue_number="130",
+        "run-impl", app="app-one", source="on-demand", status="running",
+        started_at=time.time(), objective="obj",
     )
-    # A later run in the same loop that never re-recorded the issue number.
-    registry.record_run(
-        "run-verify", app="app-one", source="on-demand", status="completed",
-        started_at=time.time() + 10, objective="obj", loop_id=loop_id,
-    )
+    registry.bind_loop("run-impl", "app-one", 130, title="a long brief", kind="feature")
 
-    client = TestClient(server.app)
-    loops = client.get("/apps/app-one/loops").json()["loops"]
+    loops = TestClient(server.app).get("/apps/app-one/loops").json()["loops"]
     assert len(loops) == 1
     assert loops[0]["issue_number"] == "130"
-
-    # A loop with no issue-scoped run falls back to a null issue_number.
-    plain_loop = registry.loop_id_for("just an objective")
-    registry.record_run(
-        "run-plain", app="app-one", source="on-demand", status="completed",
-        started_at=time.time(), objective="just an objective", loop_id=plain_loop,
-    )
-    loops = client.get("/apps/app-one/loops").json()["loops"]
-    plain = next(l for l in loops if l["loop_id"] == plain_loop)
-    assert plain["issue_number"] is None
+    assert loops[0]["title"] == "a long brief"
+    assert registry.get_run("run-impl")["loop_id"] == loops[0]["loop_id"]
 
 
 def test_structured_standup_generation(tmp_path, monkeypatch):
