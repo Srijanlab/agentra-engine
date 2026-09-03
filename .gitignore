@@ -37,3 +37,4 @@ slack-credentials.txt
 build/
 *.egg-info/
 .venv/
+.vercel
