@@ -271,16 +271,26 @@ def get_app_repo(name: str) -> Path | None:
     # the clone/pull entirely; there's no git binary or persistent disk here.
     if _db is not None:
         return repo
-    if not repo.exists() and app.get("repo_url"):
-        from agentra.agents.git_ops import GitOpError, clone_repo
-
-        try:
-            clone_repo(app["repo_url"], repo, branch=app.get("branch", "main"))
-        except GitOpError:
-            return None
-    elif repo.exists() and app.get("repo_url"):
+    if repo.exists() and app.get("repo_url"):
         _sync_if_stale(repo, app["repo_url"], app.get("branch", "main"))
-    return repo if repo.exists() else None
+        return repo
+    if not app.get("repo_url"):
+        return repo if repo.exists() else None
+    # The stored repo_path has no checkout on THIS host -- it's from wherever the
+    # app last ran (GCP VM, Vercel sandbox, ...). A fresh clone goes to this
+    # runtime's REPOS_ROOT/name, never back to that foreign (often unwritable)
+    # path, which used to fail every cycle with a read-only-filesystem mkdir.
+    dest = REPOS_ROOT / name
+    if dest.exists():
+        _sync_if_stale(dest, app["repo_url"], app.get("branch", "main"))
+        return dest
+    from agentra.agents.git_ops import GitOpError, clone_repo
+
+    try:
+        clone_repo(app["repo_url"], dest, branch=app.get("branch", "main"))
+    except GitOpError:
+        return None
+    return dest if dest.exists() else None
 
 
 def _read_pause_doc() -> dict | None:
