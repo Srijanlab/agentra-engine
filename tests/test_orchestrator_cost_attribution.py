@@ -1,23 +1,17 @@
 """GitHub issue #74: the orchestrator's own reasoning cost (the top-level
 query() call in agents/brain/__init__.py::run_autonomous_cycle, not any
-sub-agent tool call) was only ever folded into session.cost_usd -- the
-run's aggregate total -- and never recorded as its own agent_steps entry.
-Every one of the 10 lifecycle session.note(..., agent="cycle", ...) call
-sites defaults cost_usd=0.0, so the dashboard's per-agent cost breakdown
-always showed $0.00 for "Orchestrator" even though real spend happens on
-every ResultMessage the top-level query() yields. That same ResultMessage
-also carries token usage (model_usage), now threaded through alongside
-cost_usd.
+sub-agent tool call) must be attributed to the orchestrator, not hidden in
+the run's cost aggregate.
 
-Fast unit tests (query() monkeypatched, no real LLM call) -- same style as
-tests/test_brain_blocking_bugs.py.
+Per-agent cost/tokens now land in Langfuse as an `orchestrator` generation
+(_emit_orchestrator_generation) rather than a Firestore agent_steps row.
+These fast unit tests monkeypatch query() and the Langfuse client.
 """
 
 import asyncio
 
 from claude_agent_sdk import ResultMessage
 
-from agentra import registry
 from agentra.agents import brain
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
@@ -33,131 +27,99 @@ def _result_message(
     )
 
 
+class _FakeGeneration:
+    def __init__(self, sink, kwargs):
+        self._sink = sink
+        self._kwargs = kwargs
+
+    def end(self, **_):
+        self._sink.append(self._kwargs)
+
+
+class _FakeClient:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def start_observation(self, **kwargs):
+        return _FakeGeneration(self._sink, kwargs)
+
+    def update_current_span(self, **_):
+        pass
+
+    def get_current_trace_id(self):
+        return "trace-abc"
+
+
 def _common_monkeypatches(monkeypatch):
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [])
 
 
-def test_orchestrators_own_result_message_cost_is_recorded_as_a_cycle_agent_step(tmp_path, monkeypatch):
-    _common_monkeypatches(monkeypatch)
-    recorded_steps = []
-
-    def fake_record_agent_step(app, run_id, agent, ok, cost_usd, turns, summary, **kwargs):
-        recorded_steps.append(dict(app=app, run_id=run_id, agent=agent, ok=ok, cost_usd=cost_usd, turns=turns, summary=summary, **kwargs))
-
-    monkeypatch.setattr(registry, "record_agent_step", fake_record_agent_step)
+def _run(monkeypatch, tmp_path, msg):
+    generations: list[dict] = []
+    monkeypatch.setattr(brain, "get_client", lambda: _FakeClient(generations))
 
     async def _fake_query(*args, **kwargs):
-        yield _result_message(cost=0.0123, num_turns=4)
+        yield msg
 
     monkeypatch.setattr(brain, "query", _fake_query)
-
     repo = tmp_path / "repo"
     repo.mkdir()
-
     report = asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
-
-    # The run aggregate must still include it (unchanged prior behavior).
-    assert report.cost_usd == 0.0123
-
-    cycle_steps_with_cost = [s for s in recorded_steps if s["agent"] == "cycle" and s["cost_usd"] > 0]
-    assert len(cycle_steps_with_cost) == 1
-    step = cycle_steps_with_cost[0]
-    assert step["cost_usd"] == 0.0123
-    assert step["turns"] == 4
-    assert step["ok"] is True
-
-    # Every other "cycle" lifecycle step (start/complete/etc.) still defaults
-    # to cost_usd=0.0 -- only the ResultMessage-driven step carries real cost,
-    # so the aggregate isn't double counted across the 10 lifecycle call sites.
-    other_cycle_steps = [s for s in recorded_steps if s["agent"] == "cycle" and s is not step]
-    assert other_cycle_steps  # cycle start/complete notes still fire
-    assert all(s["cost_usd"] == 0.0 for s in other_cycle_steps)
+    return report, [g for g in generations if g.get("name") == "orchestrator"]
 
 
-def test_orchestrator_cost_step_reflects_a_failed_result_message(tmp_path, monkeypatch):
+def test_orchestrator_result_message_cost_becomes_a_generation(tmp_path, monkeypatch):
     _common_monkeypatches(monkeypatch)
-    recorded_steps = []
+    report, gens = _run(monkeypatch, tmp_path, _result_message(cost=0.0123, num_turns=4))
 
-    def fake_record_agent_step(app, run_id, agent, ok, cost_usd, turns, summary, **kwargs):
-        recorded_steps.append(dict(agent=agent, ok=ok, cost_usd=cost_usd))
-
-    monkeypatch.setattr(registry, "record_agent_step", fake_record_agent_step)
-
-    async def _fake_query(*args, **kwargs):
-        yield _result_message(cost=0.05, is_error=True)
-
-    monkeypatch.setattr(brain, "query", _fake_query)
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
-
-    cost_steps = [s for s in recorded_steps if s["agent"] == "cycle" and s["cost_usd"] == 0.05]
-    assert len(cost_steps) == 1
-    assert cost_steps[0]["ok"] is False
+    assert report.cost_usd == 0.0123  # run aggregate unchanged
+    assert len(gens) == 1
+    assert gens[0]["cost_details"] == {"total": 0.0123}
+    assert gens[0]["metadata"]["turns"] == 4
+    assert gens[0]["level"] == "DEFAULT"
 
 
-def test_orchestrator_cost_step_carries_token_usage_from_model_usage(tmp_path, monkeypatch):
+def test_failed_result_message_marks_the_generation_as_error(tmp_path, monkeypatch):
     _common_monkeypatches(monkeypatch)
-    recorded_steps = []
+    _report, gens = _run(monkeypatch, tmp_path, _result_message(cost=0.05, is_error=True))
 
-    def fake_record_agent_step(app, run_id, agent, ok, cost_usd, turns, summary, **kwargs):
-        recorded_steps.append(dict(agent=agent, cost_usd=cost_usd, **kwargs))
+    assert len(gens) == 1
+    assert gens[0]["level"] == "ERROR"
+    assert gens[0]["cost_details"] == {"total": 0.05}
 
-    monkeypatch.setattr(registry, "record_agent_step", fake_record_agent_step)
 
+def test_generation_carries_token_usage_from_model_usage(tmp_path, monkeypatch):
+    _common_monkeypatches(monkeypatch)
     usage = {"claude-opus-4-7": {"inputTokens": 900, "outputTokens": 210, "cacheReadInputTokens": 40, "cacheCreationInputTokens": 3}}
+    _report, gens = _run(monkeypatch, tmp_path, _result_message(cost=0.03, model_usage=usage))
+
+    assert len(gens) == 1
+    details = gens[0]["usage_details"]
+    assert details["input_tokens"] == 900
+    assert details["output_tokens"] == 210
+    assert details["cache_read_input_tokens"] == 40
+    assert details["cache_creation_input_tokens"] == 3
+
+
+def test_no_generation_when_query_never_yields_a_result_message(tmp_path, monkeypatch):
+    """A hard-stop before query() runs (e.g. a blocking bug) must not fabricate
+    an orchestrator generation -- there was no real spend."""
+    monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
+    monkeypatch.setattr(
+        Memory, "blocking_bugs",
+        lambda self: [{"external_id": "9", "diagnosis": "x", "proposed_fix": "y"}],
+    )
+    generations: list[dict] = []
+    monkeypatch.setattr(brain, "get_client", lambda: _FakeClient(generations))
 
     async def _fake_query(*args, **kwargs):
-        yield _result_message(cost=0.03, model_usage=usage)
+        raise AssertionError("query() should not be reached")
+        yield  # pragma: no cover
 
     monkeypatch.setattr(brain, "query", _fake_query)
-
     repo = tmp_path / "repo"
     repo.mkdir()
-
     asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
 
-    cost_step = next(s for s in recorded_steps if s["agent"] == "cycle" and s["cost_usd"] == 0.03)
-    assert cost_step["input_tokens"] == 900
-    assert cost_step["output_tokens"] == 210
-    assert cost_step["cache_read_input_tokens"] == 40
-    assert cost_step["cache_creation_input_tokens"] == 3
-
-
-def test_no_orchestrator_cost_step_recorded_when_query_never_yields_a_result_message(tmp_path, monkeypatch):
-    """A hard-stop before query() is even called (e.g. a blocking bug) must
-    not fabricate a cost step -- there was no real ResultMessage/spend."""
-    monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
-    recorded_steps = []
-
-    def fake_record_agent_step(app, run_id, agent, ok, cost_usd, turns, summary, **kwargs):
-        recorded_steps.append(dict(agent=agent, cost_usd=cost_usd))
-
-    monkeypatch.setattr(registry, "record_agent_step", fake_record_agent_step)
-    monkeypatch.setattr(
-        Memory,
-        "blocking_bugs",
-        lambda self: [
-            {
-                "run_id": "7", "severity": "medium", "diagnosis": "403 Write access to repository not granted",
-                "proposed_fix": "", "source": "github", "external_id": "7",
-                "html_url": "https://github.com/acme/app/issues/7", "needs_human": True, "blocking_agentra": True,
-            }
-        ],
-    )
-
-    async def _fail_if_called(*args, **kwargs):
-        raise AssertionError("query() must not be called while a blocking_agentra bug is open")
-
-    monkeypatch.setattr(brain, "query", _fail_if_called)
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    report = asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
-
-    assert report.cost_usd == 0.0
-    assert all(s["cost_usd"] == 0.0 for s in recorded_steps)
+    assert [g for g in generations if g.get("name") == "orchestrator"] == []

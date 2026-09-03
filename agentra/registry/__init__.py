@@ -38,7 +38,6 @@ from agentra.registry.runs import (
     get_run,
     last_run_at,
     list_agent_steps,
-    list_loops,
     list_runs,
     list_waiting_for_human,
     loop_id_for,
@@ -47,6 +46,13 @@ from agentra.registry.runs import (
     record_run,
     reconcile_stale_runs,
     reconcile_waiting_for_human,
+)
+from agentra.registry.loops import (
+    bind_loop,
+    get_loop,
+    list_loops,
+    roll_up_loop,
+    set_loop_status,
 )
 
 _DELEGATED_NAMES = {
@@ -63,6 +69,7 @@ _DELEGATED_NAMES = {
     "HUMAN_INPUT_MAX_WAIT_SECONDS",
     "_db",
     "_RUNS_PATH",
+    "_LOOPS_PATH",
     "_AGENT_STEPS_PATH",
 }
 
@@ -98,6 +105,10 @@ __all__ = [
     "repo_url_for_path",
     "sync_oidc_token_file",
     "ensure_firestore",
+    "bind_loop",
+    "get_loop",
+    "roll_up_loop",
+    "set_loop_status",
     "list_loops",
     "list_runs",
     "list_waiting_for_human",

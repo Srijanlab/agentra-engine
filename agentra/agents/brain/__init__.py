@@ -36,6 +36,55 @@ def _tool_call_hash(tool_name: str, args: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def _current_trace_id() -> str | None:
+    """The active Langfuse trace id, so the run doc can deep-link to the trace."""
+    try:
+        client = get_client()
+        for attr in ("get_current_trace_id", "get_trace_id"):
+            fn = getattr(client, attr, None)
+            if callable(fn):
+                return fn()
+    except Exception:
+        pass
+    return None
+
+
+def _emit_orchestrator_generation(message: ResultMessage, turn_cost: float) -> None:
+    """One Langfuse generation for the orchestrator's own reasoning turn -- the
+    per-agent cost/token breakdown that used to be an agent_steps row."""
+    try:
+        lf = get_client()
+        usage = _sum_model_usage(message.model_usage)
+        gen = lf.start_observation(
+            as_type="generation", name="orchestrator",
+            model=next(iter(message.model_usage), None) if message.model_usage else None,
+            output=(message.result or "")[:4000],
+            usage_details={k: v for k, v in usage.items() if v is not None},
+            cost_details={"total": turn_cost},
+            metadata={"turns": message.num_turns, "stop_reason": message.stop_reason},
+            level="ERROR" if message.is_error else "DEFAULT",
+        )
+        gen.end()
+    except Exception:
+        pass
+
+
+def _finish_loop_rollup(run_id: str, report: "AutonomousCycleReport") -> None:
+    """Fold the finished cycle into its loop's rolling totals (no-op if the cycle
+    never bound a tracked issue)."""
+    try:
+        from agentra import registry
+
+        run = registry.get_run(run_id) or {}
+        loop_id = run.get("loop_id")
+        if not loop_id:
+            return
+        status = "waiting_for_human" if report.waiting_for_human else (run.get("status") or "completed")
+        registry.roll_up_loop(loop_id, run_id, status, report.cost_usd)
+    except Exception:
+        logger.warning("loop roll-up failed for run %s", run_id, exc_info=True)
+
+
 @dataclass
 class OrchestratorSession:
     repo: Path
@@ -117,6 +166,9 @@ class OrchestratorSession:
     # notify_shipped choke points in tools.py: deploy_pre_prod's trivial-merge success and
     # verify_pre_prod's pass, never at the earlier status:shipped label stamp itself.
     pending_shipped_notifications: list[dict] = field(default_factory=list)
+    # Last time note() bumped the run's updated_at (throttled -- reconcile_stale_runs
+    # only needs a coarse liveness signal, per-agent detail lives in Langfuse now).
+    _last_touch: float = 0.0
 
     @property
     def app_name(self) -> str:
@@ -162,14 +214,18 @@ class OrchestratorSession:
         # "[Orchestrator]" prefix, matching base.py's log_claude_message convention
         self.mem.log(self.run_id, f"[Orchestrator] {action}")
         print(f"[agentra] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
-        from agentra import registry
+        # Per-agent cost/tokens/turns now land in Langfuse (agents/base.py emits an
+        # `agent` + aggregate `generation` observation per dispatch). Here we only
+        # keep the run's liveness signal fresh, throttled to bound Firestore writes.
+        now = time.time()
+        if now - self._last_touch > 90:
+            self._last_touch = now
+            from agentra import registry
 
-        resolved_agent = agent or action.split(":", 1)[0].split("[", 1)[0].strip()
-        registry.record_agent_step(
-            self.app_name, self.run_id, resolved_agent, ok, cost_usd, turns, action,
-            input_tokens=input_tokens, output_tokens=output_tokens,
-            cache_read_input_tokens=cache_read_input_tokens, cache_creation_input_tokens=cache_creation_input_tokens,
-        )
+            try:
+                registry.record_run(self.run_id, updated_at=now)
+            except Exception:
+                pass
 
     def check_hard_stop(self) -> dict | None:
         # No per-cycle cost cap here: the previous $3.00 hard stop never actually
@@ -281,6 +337,12 @@ async def run_autonomous_cycle(
         input={"objective": objective, "feature": feature, "skip_deploy": skip_deploy,
                "resume": bool(human_answer), "backend": registry.get_llm_backend()},
     )
+    _trace_id = _current_trace_id()
+    if _trace_id:
+        try:
+            registry.record_run(run_id, langfuse_trace_id=_trace_id)
+        except Exception:
+            pass
     try:
         with propagate_attributes(
             session_id=_loop_id, user_id=_app, tags=[_app, "autonomous-cycle"],
@@ -296,6 +358,7 @@ async def run_autonomous_cycle(
                 "outcome": getattr(_report, "summary", None) or getattr(_report, "outcome", None),
                 "cost_usd": getattr(_report, "total_cost_usd", None),
             })
+            _finish_loop_rollup(run_id, _report)
             return _report
     finally:
         # Bug #77: single full-document Firestore flush once this run reaches a
@@ -418,19 +481,16 @@ async def _run_autonomous_cycle_body(
                         turn_cost = message.total_cost_usd or 0.0
                         session.cost_usd += turn_cost
                         session.orchestrator_result_received = True
-                        # GitHub issue #74: this cost is real spend by the
-                        # orchestrator's own reasoning, not a sub-agent's --
-                        # record it as its own agent_steps entry (agent="cycle")
-                        # instead of only folding it into the invisible
-                        # session.cost_usd run aggregate, so the dashboard's
-                        # per-agent cost breakdown stops showing $0.00 for
-                        # "Orchestrator" despite real spend happening here.
+                        # GitHub issue #74: this is real spend by the orchestrator's
+                        # own reasoning, not a sub-agent's -- emit it as its own
+                        # Langfuse generation so the per-agent cost breakdown in the
+                        # trace attributes it correctly instead of hiding it in the
+                        # run's cost aggregate.
+                        _emit_orchestrator_generation(message, turn_cost)
                         session.note(
                             f"orchestrator reasoning: ok={not message.is_error} "
                             f"turns={message.num_turns} cost=${turn_cost:.4f}",
                             agent="cycle", ok=not message.is_error,
-                            cost_usd=turn_cost, turns=message.num_turns,
-                            **_sum_model_usage(message.model_usage),
                         )
         except Exception as exc:
             # GitHub issue #42: this is the exact spot a prior cycle crashed
