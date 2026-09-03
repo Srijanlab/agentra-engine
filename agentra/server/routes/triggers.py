@@ -243,9 +243,38 @@ async def _dispatch_cycle(
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
 
     run_key = _new_run_key(app_name, source, objective, feature=feature)
+    # The engine (Firestore-backed, read-only fs, 30s functions) records the run
+    # but can't execute a cycle -- the loop drains queued runs on its tick.
+    if registry.firestore_client() is not None:
+        registry.record_run(run_key, skip_deploy=skip_deploy)
+        _server_log(source, f"app={app_name!r} run_key={run_key} -- queued for the loop")
+        return {"triggered": True, "run_key": run_key, "queued": True}
     _server_log(source, f"app={app_name!r} run_key={run_key} objective={objective!r} -- dispatched")
     asyncio.create_task(_run_autonomous_background(run_key, app_name, repo, objective, feature, skip_deploy))
     return {"triggered": True, "run_key": run_key}
+
+
+async def _drain_queued_runs() -> None:
+    """On-demand runs the engine queued (it can't run cycles itself). The loop
+    claims and executes them on its scheduled tick."""
+    if registry.firestore_client() is not None:
+        return  # only the loop drains
+    for run in registry.list_runs(limit=40):
+        run_key = run.get("run_key")
+        if run.get("status") != "queued" or not run_key or run_key in _active_runs:
+            continue
+        if _lock_for(run.get("app") or "").locked():
+            continue
+        repo = registry.get_app_repo(run.get("app") or "")
+        if repo is None:
+            continue
+        objective = run.get("objective") or Memory(repo).get_objective()
+        if not objective:
+            continue
+        _server_log("scheduled", f"draining queued run {run_key} for app={run.get('app')!r}")
+        asyncio.create_task(_run_autonomous_background(
+            run_key, run["app"], repo, objective, run.get("feature"), bool(run.get("skip_deploy")),
+        ))
 
 
 def _reconcile_human_input_for_app(app_name: str) -> None:
@@ -303,6 +332,7 @@ def _reconcile_human_input_timeouts() -> None:
 @router.post("/trigger/scheduled")
 async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
     if payload.app is None:
+        await _drain_queued_runs()
         results = {}
         for app_name in registry.list_apps():
             try:
