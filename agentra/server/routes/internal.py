@@ -26,16 +26,24 @@ logger = logging.getLogger("agentra.server.internal")
 router = APIRouter(prefix="/internal")
 
 
-def _client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+def _client_ips(request: Request) -> set[str]:
+    """Trusted source addresses for the request. On Vercel `x-real-ip` and
+    `x-vercel-forwarded-for` are platform-set and overwrite any inbound value,
+    so they can't be spoofed. `x-forwarded-for` is deliberately NOT consulted --
+    its leftmost entry is client-controllable."""
+    ips: set[str] = set()
+    for header in ("x-real-ip", "x-vercel-forwarded-for"):
+        for part in request.headers.get(header, "").split(","):
+            if part.strip():
+                ips.add(part.strip())
+    if not ips and request.client:  # local/dev: no proxy in front
+        ips.add(request.client.host)
+    return ips
 
 
 def _require_token(request: Request, authorization: str | None = Header(default=None)) -> None:
     allowed = {ip.strip() for ip in os.environ.get("AGENTRA_INTERNAL_ALLOWED_IPS", "").split(",") if ip.strip()}
-    if allowed and _client_ip(request) not in allowed:
+    if allowed and not (_client_ips(request) & allowed):
         raise HTTPException(status_code=403, detail="not allowed from this address")
 
     expected = os.environ.get("AGENTRA_INTERNAL_TOKEN")

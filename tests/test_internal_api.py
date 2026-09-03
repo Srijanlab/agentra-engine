@@ -39,14 +39,22 @@ def test_wrong_token_401(client):
 def test_ip_allowlist_blocks_other_addresses(client, monkeypatch):
     monkeypatch.setenv("AGENTRA_INTERNAL_ALLOWED_IPS", "203.0.113.7, 203.0.113.8")
     r = client.post("/internal/rpc", json={"target": "registry", "method": "list_apps"},
-                    headers={"Authorization": f"Bearer {TOKEN}", "X-Forwarded-For": "198.51.100.1"})
+                    headers={"Authorization": f"Bearer {TOKEN}", "X-Real-IP": "198.51.100.1"})
+    assert r.status_code == 403
+
+
+def test_ip_allowlist_ignores_spoofable_x_forwarded_for(client, monkeypatch):
+    monkeypatch.setenv("AGENTRA_INTERNAL_ALLOWED_IPS", "203.0.113.7")
+    r = client.post("/internal/rpc", json={"target": "registry", "method": "list_apps"},
+                    headers={"Authorization": f"Bearer {TOKEN}",
+                             "X-Forwarded-For": "203.0.113.7", "X-Real-IP": "198.51.100.1"})
     assert r.status_code == 403
 
 
 def test_ip_allowlist_permits_a_listed_address(client, monkeypatch):
     monkeypatch.setenv("AGENTRA_INTERNAL_ALLOWED_IPS", "203.0.113.7")
     r = client.post("/internal/rpc", json={"target": "registry", "method": "list_apps"},
-                    headers={"Authorization": f"Bearer {TOKEN}", "X-Forwarded-For": "203.0.113.7, 70.1.2.3"})
+                    headers={"Authorization": f"Bearer {TOKEN}", "X-Vercel-Forwarded-For": "203.0.113.7"})
     assert r.status_code == 200
 
 
