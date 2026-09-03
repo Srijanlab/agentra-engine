@@ -14,7 +14,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from agentra import registry
@@ -26,7 +26,18 @@ logger = logging.getLogger("agentra.server.internal")
 router = APIRouter(prefix="/internal")
 
 
-def _require_token(authorization: str | None = Header(default=None)) -> None:
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+
+
+def _require_token(request: Request, authorization: str | None = Header(default=None)) -> None:
+    allowed = {ip.strip() for ip in os.environ.get("AGENTRA_INTERNAL_ALLOWED_IPS", "").split(",") if ip.strip()}
+    if allowed and _client_ip(request) not in allowed:
+        raise HTTPException(status_code=403, detail="not allowed from this address")
+
     expected = os.environ.get("AGENTRA_INTERNAL_TOKEN")
     if not expected:
         raise HTTPException(status_code=503, detail="internal API not configured")

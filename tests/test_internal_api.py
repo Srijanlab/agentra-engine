@@ -36,6 +36,20 @@ def test_wrong_token_401(client):
     assert _rpc(client, {"target": "registry", "method": "list_apps"}, token="nope").status_code == 401
 
 
+def test_ip_allowlist_blocks_other_addresses(client, monkeypatch):
+    monkeypatch.setenv("AGENTRA_INTERNAL_ALLOWED_IPS", "203.0.113.7, 203.0.113.8")
+    r = client.post("/internal/rpc", json={"target": "registry", "method": "list_apps"},
+                    headers={"Authorization": f"Bearer {TOKEN}", "X-Forwarded-For": "198.51.100.1"})
+    assert r.status_code == 403
+
+
+def test_ip_allowlist_permits_a_listed_address(client, monkeypatch):
+    monkeypatch.setenv("AGENTRA_INTERNAL_ALLOWED_IPS", "203.0.113.7")
+    r = client.post("/internal/rpc", json={"target": "registry", "method": "list_apps"},
+                    headers={"Authorization": f"Bearer {TOKEN}", "X-Forwarded-For": "203.0.113.7, 70.1.2.3"})
+    assert r.status_code == 200
+
+
 def test_registry_roundtrip(client):
     assert _rpc(client, {"target": "registry", "method": "list_apps"}).json() == {"result": {}}
     r = _rpc(client, {"target": "registry", "method": "register_app",
