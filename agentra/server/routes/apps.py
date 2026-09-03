@@ -112,10 +112,16 @@ def _apply_app_config(
             setattr(env_config, field, value)
     environments.save(dest, env_config)
 
-    if documentation_notes:
-        mem.write("architecture", "documentation", documentation_notes)
-    if testing_notes:
-        mem.write("architecture", "testing-notes", testing_notes)
+    for note_name, note in (("documentation", documentation_notes), ("testing-notes", testing_notes)):
+        if not note:
+            continue
+        try:
+            mem.write("architecture", note_name, note)
+        except OSError:
+            _server_log("register", f"{note_name} not persisted (no writable checkout -- cloud mode)")
+
+    if registry._db is not None:
+        return None  # cloud: no local checkout to commit .agentra/ from
 
     from agentra.agents.git_ops import GitOpError, commit_and_push
 

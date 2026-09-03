@@ -45,10 +45,16 @@ class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, 
         self.codebase_spec_commit_path = self.root / "codebase_spec_commit.json"
         self._log_buffers: dict[str, list[str]] = {}
         self._log_buffer_meta: dict[str, dict[str, float]] = {}
-        for category in CATEGORIES:
-            (self.memory_root / category).mkdir(parents=True, exist_ok=True)
-        self.log_root.mkdir(parents=True, exist_ok=True)
-        _ensure_gitignore(self.root)
+        # Cloud mode: the engine has no writable checkout dir. The GitHub- and
+        # Firestore-backed methods don't need these paths; the local-file ones
+        # will raise OSError at call time, which callers handle.
+        try:
+            for category in CATEGORIES:
+                (self.memory_root / category).mkdir(parents=True, exist_ok=True)
+            self.log_root.mkdir(parents=True, exist_ok=True)
+            _ensure_gitignore(self.root)
+        except OSError:
+            logger.debug("Memory(%s): read-only fs, skipping scaffold", repo)
 
     def write(self, category: str, name: str, content: str) -> Path:
         if category not in CATEGORIES:
