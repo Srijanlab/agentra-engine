@@ -154,6 +154,21 @@ async def run_log(run_id: str, req: RunLogRequest) -> dict:
     return {"ok": True, "lines": len(tail)}
 
 
+class SlackMessageRequest(BaseModel):
+    text: str
+    channel: str | None = None
+    thread_ts: str | None = None
+
+
+@router.post("/slack/message", dependencies=[Depends(_require_token)])
+async def slack_message(req: SlackMessageRequest) -> dict:
+    """The loop sends Slack via the engine so it never holds SLACK_BOT_TOKEN."""
+    from agentra.connectors import slack
+
+    data = slack._post_message(req.text, channel=req.channel, thread_ts=req.thread_ts)
+    return {"ok": data is not None, "data": data}
+
+
 class GitTokenRequest(BaseModel):
     repo_url: str
 
