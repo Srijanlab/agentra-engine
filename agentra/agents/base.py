@@ -56,6 +56,13 @@ def _friendly_error_text(raw: str) -> str:
         return "Claude Code isn't authenticated on this server right now -- that needs a human to fix (re-run /login or refresh credentials), not something asking again will resolve."
     return raw
 
+def _agent_model() -> str | None:
+    """Model for every agent turn (AGENTRA_AGENT_MODEL, e.g. "sonnet"). None
+    leaves the CLI's own default -- which on a bare `claude login` session is
+    Haiku, usually not what you want for real implementation work."""
+    return os.environ.get("AGENTRA_AGENT_MODEL") or None
+
+
 def _sdk_env() -> dict[str, str]:
     """Extra env for the Claude Agent SDK subprocess, per the dashboard's Model
     Backend toggle:
@@ -344,6 +351,7 @@ async def run_agent(
         include_hook_events=True,
         resume=resume,
         mcp_servers=mcp_servers or {},
+        model=_agent_model(),
         env=_sdk_env(),
     )
 
@@ -447,6 +455,7 @@ async def stream_chat_turn(
         max_turns=max_turns,
         include_partial_messages=True,
         resume=resume,
+        model=_agent_model(),
         env=_sdk_env(),
     )
 
