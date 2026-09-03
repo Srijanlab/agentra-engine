@@ -275,17 +275,16 @@ async def run_autonomous_cycle(
     run_id = run_id or uuid.uuid4().hex[:8]
     _loop_id = registry.loop_id_for(objective)
     _app = next((n for n, a in registry.list_apps().items() if a.get("repo_path") == str(repo)), repo.name)
-    get_client().update_current_trace(
+    get_client().update_current_span(
         name=f"cycle:{_app}",
-        session_id=_loop_id,
-        user_id=_app,
         input={"objective": objective, "feature": feature, "skip_deploy": skip_deploy,
                "resume": bool(human_answer), "backend": registry.get_llm_backend()},
-        tags=[_app, "autonomous-cycle"],
-        metadata={"run_id": run_id, "human_answer_issue": human_answer_issue},
     )
     try:
-        with propagate_attributes(session_id=_loop_id, user_id=_app, tags=[_app, "autonomous-cycle"]):
+        with propagate_attributes(
+            session_id=_loop_id, user_id=_app, tags=[_app, "autonomous-cycle"],
+            metadata={"run_id": run_id, "human_answer_issue": human_answer_issue},
+        ):
             return await _run_autonomous_cycle_body(
                 repo, mem, run_id, objective, env, analytics_summary, feature, skip_deploy,
                 max_turns, human_answer, human_answer_issue,
