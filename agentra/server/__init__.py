@@ -53,6 +53,17 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """Return a CORS-able JSON 500 instead of a bare ASGI crash (which reaches the
+    browser as an opaque 'NetworkError' with no CORS headers)."""
+    logger.error("unhandled error on %s: %s", request.url.path, exc, exc_info=True)
+    from starlette.responses import JSONResponse
+
+    detail = "quota exceeded -- try again shortly" if "429" in str(exc) else f"{type(exc).__name__}"
+    return JSONResponse({"detail": f"internal error: {detail}"}, status_code=500)
+
+
 WEB_DIST = Path(os.environ.get("AGENTRA_WEB_DIST") or (Path(__file__).resolve().parent.parent / "web" / "dist"))
 
 if (WEB_DIST / "assets").is_dir():
@@ -119,7 +130,10 @@ async def favicon() -> FileResponse:
 @app.get("/healthz")
 async def health() -> dict:
     """GitHub #113: /healthz is a pure alias so probes using either convention succeed."""
-    return {"status": "ok", "apps_registered": len(registry.list_apps())}
+    try:
+        return {"status": "ok", "apps_registered": len(registry.list_apps())}
+    except Exception as exc:  # never let a Firestore blip fail the liveness probe
+        return {"status": "degraded", "error": f"{type(exc).__name__}"}
 
 
 @app.get("/debug/firestore")

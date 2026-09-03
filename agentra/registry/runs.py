@@ -9,12 +9,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agentra.registry import core
+from agentra.registry import _cache, core
 
 logger = logging.getLogger(__name__)
 
 
 def record_run(run_key: str, **fields: Any) -> None:
+    _cache.clear()  # runs/loops summaries all shift
     if core._db is not None:
         core._db.collection("runs").document(run_key).set(fields, merge=True)
         return
@@ -25,22 +26,43 @@ def record_run(run_key: str, **fields: Any) -> None:
 
 def get_run(run_key: str) -> dict | None:
     if core._db is not None:
-        doc = core._db.collection("runs").document(run_key).get()
-        return doc.to_dict() if doc.exists else None
+        return _cache.get_or_set(
+            f"run:{run_key}",
+            lambda: (lambda d: d.to_dict() if d.exists else None)(
+                core._db.collection("runs").document(run_key).get()
+            ),
+            ttl=6,
+        )
     return _local_runs().get(run_key)
+
+
+def _stream_agent_steps(fetch_limit: int) -> list[dict]:
+    from google.cloud import firestore
+
+    docs = (
+        core._db.collection("agent_steps")
+        .order_by("ts", direction=firestore.Query.DESCENDING)
+        .limit(fetch_limit)
+        .stream()
+    )
+    return [d.to_dict() for d in docs]
+
+
+def _stream_runs(limit: int) -> list[dict]:
+    from google.cloud import firestore
+
+    docs = (
+        core._db.collection("runs")
+        .order_by("started_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+        .stream()
+    )
+    return [{"run_key": d.id, **d.to_dict()} for d in docs]
 
 
 def list_runs(limit: int = 50) -> list[dict]:
     if core._db is not None:
-        from google.cloud import firestore
-
-        docs = (
-            core._db.collection("runs")
-            .order_by("started_at", direction=firestore.Query.DESCENDING)
-            .limit(limit)
-            .stream()
-        )
-        return [{"run_key": d.id, **d.to_dict()} for d in docs]
+        return _cache.get_or_set(f"runs:{limit}", lambda: _stream_runs(limit), ttl=8)
 
     runs = _local_runs()
     ordered = sorted(
@@ -197,6 +219,7 @@ def record_agent_step(
         "cache_read_input_tokens": cache_read_input_tokens,
         "cache_creation_input_tokens": cache_creation_input_tokens,
     }
+    _cache.clear()
     if core._db is not None:
         core._db.collection("agent_steps").add(record)
         return
@@ -209,15 +232,7 @@ def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:
     fetch_limit = limit * 5 if app is not None else limit
 
     if core._db is not None:
-        from google.cloud import firestore
-
-        docs = (
-            core._db.collection("agent_steps")
-            .order_by("ts", direction=firestore.Query.DESCENDING)
-            .limit(fetch_limit)
-            .stream()
-        )
-        steps = [d.to_dict() for d in docs]
+        steps = _cache.get_or_set(f"steps:{fetch_limit}", lambda: _stream_agent_steps(fetch_limit), ttl=10)
     else:
         if not core._AGENT_STEPS_PATH.exists():
             return []

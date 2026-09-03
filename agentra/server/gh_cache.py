@@ -15,33 +15,44 @@ from typing import Any, Awaitable, Callable
 from agentra import registry
 
 _DEFAULT_TTL = 90.0
+_local: dict[str, tuple[float, Any]] = {}
 
 
 async def cached(key: str, producer: Callable[[], Awaitable[Any]], *, ttl: float = _DEFAULT_TTL) -> Any:
     db = registry.firestore_client()
-    if db is None:  # local/CLI -- no cache, just run it
+    if db is None:  # local/CLI/tests -- no quota pressure, no cache
         return await producer()
 
-    doc_ref = db.collection("gh_cache").document(key)
-    try:
-        snap = doc_ref.get()
-        if snap.exists:
-            data = snap.to_dict() or {}
-            if time.time() - (data.get("ts") or 0) < ttl:
-                return data.get("value")
-    except Exception:
-        pass  # cache read failed -- fall through to a live fetch
+    now = time.time()
+    hit = _local.get(key)
+    if hit is not None and now - hit[0] < ttl:
+        return hit[1]
+
+    if db is not None:
+        try:
+            snap = db.collection("gh_cache").document(key).get()
+            if snap.exists:
+                data = snap.to_dict() or {}
+                if now - (data.get("ts") or 0) < ttl:
+                    _local[key] = (now, data.get("value"))
+                    return data.get("value")
+        except Exception:
+            pass  # cache read failed (quota, offline) -- fall through to a live fetch
 
     value = await producer()
-    try:
-        doc_ref.set({"value": value, "ts": time.time()})
-    except Exception:
-        pass  # best-effort write
+    _local[key] = (now, value)
+    if db is not None:
+        try:
+            db.collection("gh_cache").document(key).set({"value": value, "ts": now})
+        except Exception:
+            pass  # best-effort write
     return value
 
 
 def invalidate(*keys: str) -> None:
     """Drop cache entries -- call after a write that changes what they cover."""
+    for key in keys:
+        _local.pop(key, None)
     db = registry.firestore_client()
     if db is None:
         return

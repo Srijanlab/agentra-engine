@@ -9,6 +9,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from agentra.registry import _cache
+
 logger = logging.getLogger("agentra.registry")
 
 _env_value = os.environ.get("AGENTRA_HOME")
@@ -120,7 +122,9 @@ def _local_save_apps(apps: dict[str, dict]) -> None:
 
 def list_apps() -> dict[str, dict]:
     if _db is not None:
-        return {doc.id: doc.to_dict() for doc in _db.collection("apps").stream()}
+        return _cache.get_or_set(
+            "apps", lambda: {doc.id: doc.to_dict() for doc in _db.collection("apps").stream()}, ttl=20
+        )
     return _local_apps()
 
 
@@ -131,6 +135,7 @@ def register_app(name: str, repo_path: str, repo_url: str | None = None, branch:
     if branch:
         entry["branch"] = branch
 
+    _cache.drop("apps")
     if _db is not None:
         _db.collection("apps").document(name).set(entry)
         return
@@ -143,6 +148,7 @@ def register_app(name: str, repo_path: str, repo_url: str | None = None, branch:
 
 
 def remove_app(name: str) -> bool:
+    _cache.drop("apps")
     if _db is not None:
         doc_ref = _db.collection("apps").document(name)
         if not doc_ref.get().exists:
@@ -163,6 +169,7 @@ def set_slack_channel(name: str, channel_id: str | None) -> None:
     directly on the app's registry entry (Firestore apps/{name}, or the local apps.json
     fallback) -- distinct from EnvironmentConfig (GitHub Variables) and Memory (git-committed
     notes), since this is registry-level routing config, not deploy or app-content config."""
+    _cache.drop("apps")
     if _db is not None:
         _db.collection("apps").document(name).set({"slack_channel_id": channel_id}, merge=True)
         return
@@ -273,10 +280,14 @@ def get_app_repo(name: str) -> Path | None:
     return repo if repo.exists() else None
 
 
+def _read_pause_doc() -> dict | None:
+    doc = _db.collection("system").document("pause").get()
+    return doc.to_dict() if doc.exists else None
+
+
 def is_paused() -> dict | None:
     if _db is not None:
-        doc = _db.collection("system").document("pause").get()
-        return doc.to_dict() if doc.exists else None
+        return _cache.get_or_set("pause", _read_pause_doc, ttl=10)
     if not PAUSE_PATH.exists():
         return None
     return json.loads(PAUSE_PATH.read_text())
@@ -284,6 +295,7 @@ def is_paused() -> dict | None:
 
 def pause(reason: str | None = None) -> None:
     record = {"paused_at": time.time(), "reason": reason}
+    _cache.drop("pause")
     if _db is not None:
         _db.collection("system").document("pause").set(record)
         return
@@ -292,6 +304,7 @@ def pause(reason: str | None = None) -> None:
 
 
 def resume() -> None:
+    _cache.drop("pause")
     if _db is not None:
         _db.collection("system").document("pause").delete()
         return
