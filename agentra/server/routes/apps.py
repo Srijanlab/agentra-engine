@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -30,8 +29,6 @@ class RegisterAppPayload(BaseModel):
     prod_branch: str | None = None
     schedule_hours: float | None = None
     alarm_enabled: bool | None = None
-    documentation_notes: str | None = None
-    testing_notes: str | None = None
     slack_channel_id: str | None = None
 
 
@@ -44,8 +41,6 @@ class UpdateAppPayload(BaseModel):
     prod_branch: str | None = None
     schedule_hours: float | None = None
     alarm_enabled: bool | None = None
-    documentation_notes: str | None = None
-    testing_notes: str | None = None
     slack_channel_id: str | None = None
 
 
@@ -54,27 +49,6 @@ class BacklogRequestPayload(BaseModel):
     title: str | None = None
     description: str
     severity: str | None = None
-
-
-def _mask_stale_machine_testing_notes(content: str | None) -> str | None:
-    """GitHub #112: the old run_local wrote its 'Lint:/Typecheck:/Notes:' summary into the
-    human-owned architecture/testing-notes key. Read-time mask only -- if `content` matches
-    that machine shape, return None (as if unset); otherwise return it verbatim. Pure, no writes.
-    Conservative: anything that isn't clearly the machine shape is treated as human text."""
-    if content is None:
-        return None
-    stripped = content.strip()
-    if not stripped:
-        return content
-    non_empty = [ln for ln in stripped.splitlines() if ln.strip()]
-    if len(non_empty) < 2:
-        return content
-    if not re.match(r"^Lint: .+", non_empty[0]) or not re.match(r"^Typecheck: .+", non_empty[1]):
-        return content
-    # Any further content must start with the machine summary's 'Notes:' line.
-    if len(non_empty) > 2 and not non_empty[2].startswith("Notes:"):
-        return content
-    return None
 
 
 def _apply_app_config(
@@ -89,8 +63,6 @@ def _apply_app_config(
     prod_branch: str | None,
     schedule_hours: float | None,
     alarm_enabled: bool | None,
-    documentation_notes: str | None,
-    testing_notes: str | None,
     detect_defaults: bool,
     commit_message: str,
 ) -> str | None:
@@ -111,14 +83,6 @@ def _apply_app_config(
         if value is not None:
             setattr(env_config, field, value)
     environments.save(dest, env_config)
-
-    for note_name, note in (("documentation", documentation_notes), ("testing-notes", testing_notes)):
-        if not note:
-            continue
-        try:
-            mem.write("architecture", note_name, note)
-        except OSError:
-            _server_log("register", f"{note_name} not persisted (no writable checkout -- cloud mode)")
 
     if registry._db is not None:
         return None  # cloud: no local checkout to commit .agentra/ from
@@ -279,8 +243,6 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         prod_branch=payload.prod_branch,
         schedule_hours=payload.schedule_hours,
         alarm_enabled=payload.alarm_enabled,
-        documentation_notes=payload.documentation_notes,
-        testing_notes=payload.testing_notes,
         detect_defaults=True,
         commit_message="agentra: register app (objective/environment/notes)",
     )
@@ -345,12 +307,8 @@ async def _build_app_detail(name: str, info: dict) -> dict:
         "prod_branch": env_config.prod_branch,
         "schedule_hours": env_config.schedule_hours,
         "alarm_enabled": env_config.alarm_enabled,
-        "documentation_notes": mem.read("architecture", "documentation"),
-        "testing_notes": _mask_stale_machine_testing_notes(mem.read("architecture", "testing-notes")),
-        # GitHub issue #84: the Testing Agent's auto-generated local-test summary now
-        # lives under its own key (agents/testing.py::run_local), separate from the
-        # human-authored testing_notes above -- read-only here, agent-written only,
-        # same as codebase/design steering entries.
+        # GitHub issue #84: the Testing Agent's auto-generated local-test summary,
+        # read-only here, agent-written only (same as codebase/design steering entries).
         "local_test_summary": mem.read("architecture", "local-test-summary"),
         "slack_channel_id": info.get("slack_channel_id"),
     }
@@ -378,8 +336,6 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
         prod_branch=payload.prod_branch,
         schedule_hours=payload.schedule_hours,
         alarm_enabled=payload.alarm_enabled,
-        documentation_notes=payload.documentation_notes,
-        testing_notes=payload.testing_notes,
         detect_defaults=False,
         commit_message="agentra: update app configuration",
     )
