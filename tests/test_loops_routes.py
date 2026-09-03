@@ -22,7 +22,8 @@ def _isolate(tmp_path: Path, monkeypatch):
 def test_loop_detail_route(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     registry.record_run("r1", app="app", status="completed", started_at=time.time())
-    loop_id = registry.bind_loop("r1", "app", 12, title="t")
+    loop_id = registry.bind_loop("app", 12, title="t")
+    registry.record_run("r1", loop_id=loop_id, issue_number="12")
 
     client = TestClient(server.app)
     assert client.get("/loops/does-not-exist").status_code == 404

@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from agentra.registry import _cache, core
-from agentra.registry.runs import list_runs, loop_id_for_issue, record_run
+from agentra.registry.runs import list_runs, loop_id_for_issue
 
 _LOOPS_LIST_LIMIT = 100
 _VALID_KINDS = ("feature", "bug", "objective")
@@ -15,7 +15,6 @@ _VALID_STATUSES = ("active", "waiting_for_human", "shipped", "released", "abando
 
 
 def bind_loop(
-    run_key: str,
     app: str,
     issue_number: int | str,
     *,
@@ -23,8 +22,8 @@ def bind_loop(
     kind: str = "feature",
     objective: str | None = None,
 ) -> str:
-    """Attach a run to the loop for `issue_number`, creating the loop doc on first
-    sight. Idempotent -- safe to call every time a run (re)binds its issue."""
+    """Create (or refresh) the loop doc for `issue_number` and return its id.
+    Idempotent. The caller links the run: `record_run(run_key, loop_id=<ret>)`."""
     if kind not in _VALID_KINDS:
         kind = "feature"
     loop_id = loop_id_for_issue(app, issue_number)
@@ -45,7 +44,6 @@ def bind_loop(
     if existing is None:
         fields.update(created_at=now, status="active", run_count=0, total_cost_usd=0.0)
     _write_loop(loop_id, fields)
-    record_run(run_key, loop_id=loop_id, issue_number=str(issue_number))
     return loop_id
 
 
@@ -130,4 +128,7 @@ def _write_loop(loop_id: str, fields: dict) -> None:
 def _local_loops() -> dict[str, dict]:
     if not core._LOOPS_PATH.exists():
         return {}
-    return json.loads(core._LOOPS_PATH.read_text())
+    try:
+        return json.loads(core._LOOPS_PATH.read_text())
+    except (ValueError, OSError):
+        return {}

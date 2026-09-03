@@ -155,7 +155,8 @@ def test_loops_are_scoped_per_app_even_on_the_same_issue_number(tmp_path, monkey
             run_key, app=app, source="on-demand", status="running",
             started_at=time.time(), objective="obj",
         )
-        registry.bind_loop(run_key, app, 42, title="same number", kind="feature")
+        lid = registry.bind_loop(app, 42, title="same number", kind="feature")
+        registry.record_run(run_key, loop_id=lid, issue_number="42")
 
     client = TestClient(server.app)
     loops = client.get("/loops").json()["loops"]
@@ -176,7 +177,8 @@ def test_loop_detail_returns_its_runs_newest_first(tmp_path, monkeypatch):
             run_key, app="app-one", source="on-demand", status="completed",
             started_at=base + offset, objective="obj",
         )
-        loop_id = registry.bind_loop(run_key, "app-one", 130, title="thing", kind="feature")
+        loop_id = registry.bind_loop("app-one", 130, title="thing", kind="feature")
+        registry.record_run(run_key, loop_id=loop_id, issue_number="130")
 
     detail = TestClient(server.app).get(f"/loops/{loop_id}").json()
     assert [r["run_key"] for r in detail["runs"]] == ["run-newest", "run-mid", "run-oldest"]
@@ -191,7 +193,8 @@ def test_bind_loop_stores_the_tracked_issue_number(tmp_path, monkeypatch):
         "run-impl", app="app-one", source="on-demand", status="running",
         started_at=time.time(), objective="obj",
     )
-    registry.bind_loop("run-impl", "app-one", 130, title="a long brief", kind="feature")
+    _lid = registry.bind_loop("app-one", 130, title="a long brief", kind="feature")
+    registry.record_run("run-impl", loop_id=_lid, issue_number="130")
 
     loops = TestClient(server.app).get("/apps/app-one/loops").json()["loops"]
     assert len(loops) == 1

@@ -187,7 +187,10 @@ def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:
 def _local_runs() -> dict[str, dict]:
     if not core._RUNS_PATH.exists():
         return {}
-    return json.loads(core._RUNS_PATH.read_text())
+    try:
+        return json.loads(core._RUNS_PATH.read_text())
+    except (ValueError, OSError):
+        return {}
 
 
 def _local_save_runs(runs: dict[str, dict]) -> None:

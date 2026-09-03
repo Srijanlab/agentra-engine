@@ -52,6 +52,7 @@ def registry_env(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
+    monkeypatch.setattr(registry, "REPOS_ROOT", tmp_path / "repos")
     monkeypatch.setattr(registry, "_db", None)
     yield registry
 
@@ -126,17 +127,18 @@ def test_existing_non_git_directory_with_repo_url_is_left_alone(tmp_path, regist
     assert (repo / "objective.yaml").read_text() == "objective: fixture\n"
 
 
-def test_clone_from_scratch_path_is_unaffected(tmp_path, registry_env):
-    """Registering an app whose repo_path doesn't exist yet still clones,
-    same as before this change -- the staleness check only applies to an
-    EXISTING checkout."""
+def test_clone_from_scratch_goes_to_this_runtime_repos_root(tmp_path, registry_env):
+    """When the stored repo_path has no checkout on this host, the fresh clone
+    goes to REPOS_ROOT/name -- never back to the (foreign, possibly unwritable)
+    stored path."""
     origin = _init_origin(tmp_path / "origin")
-    dest = tmp_path / "not_cloned_yet"
-    assert not dest.exists()
+    stored = tmp_path / "somewhere_else" / "not_cloned_yet"
+    assert not stored.exists()
 
-    registry_env.register_app("myapp", str(dest), repo_url=str(origin), branch="main")
+    registry_env.register_app("myapp", str(stored), repo_url=str(origin), branch="main")
     repo = registry_env.get_app_repo("myapp")
 
-    assert repo == dest
-    assert dest.exists()
-    assert _head_sha(dest) == _head_sha(origin)
+    assert repo == registry_env.REPOS_ROOT / "myapp"
+    assert repo.exists()
+    assert not stored.exists()
+    assert _head_sha(repo) == _head_sha(origin)
