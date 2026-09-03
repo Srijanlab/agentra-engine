@@ -115,6 +115,26 @@ def test_on_demand_run_bypasses_schedule_gate(tmp_path, monkeypatch):
     assert registry.get_run(response.json()["run_key"])["source"] == "on-demand"
 
 
+def test_engine_queues_on_demand_runs_instead_of_dispatching(tmp_path, monkeypatch):
+    """In Firestore/cloud mode the engine can't run cycles -- /apps/{name}/run
+    records a queued run and returns queued:true; the loop drains it."""
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.setattr(registry, "firestore_client", lambda: object())  # pretend we're the engine
+
+    dispatched = []
+    monkeypatch.setattr(
+        "agentra.server.routes.triggers._run_autonomous_background",
+        lambda *a, **k: dispatched.append(a),
+    )
+
+    body = TestClient(server.app).post("/apps/myapp/run").json()
+    assert body["triggered"] is True
+    assert body.get("queued") is True
+    assert dispatched == []
+    assert registry.get_run(body["run_key"])["status"] == "queued"
+
+
 def test_alarm_trigger_respects_per_app_alarm_enabled(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path)
