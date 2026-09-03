@@ -26,6 +26,10 @@ from agentra.server.routes.triggers import _record_production_release, _branch_h
 
 logger = logging.getLogger("agentra.server")
 
+from agentra import observability  # noqa: E402
+
+observability.init_observability()
+
 app = FastAPI(title="agentra orchestrator")
 
 

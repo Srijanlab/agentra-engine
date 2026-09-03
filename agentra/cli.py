@@ -2,7 +2,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from agentra import environments, registry
+from agentra import environments, observability, registry
 from agentra.agents.brain import run_autonomous_cycle
 from agentra.memory import Memory
 from agentra.orchestrator import run_cycle, run_prod_debug_cycle, run_promote
@@ -139,6 +139,10 @@ def _interactive_env_init(detected: environments.EnvironmentConfig) -> environme
 
 
 def main() -> None:
+    import atexit
+
+    observability.init_observability()
+    atexit.register(observability.flush)
     parser = argparse.ArgumentParser(prog="agentra")
     sub = parser.add_subparsers(dest="command", required=True)
 

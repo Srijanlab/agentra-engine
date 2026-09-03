@@ -18,6 +18,7 @@ from agentra.agents import architecture_review, codebase, codegraph, deployment,
 from agentra.agents.base import _sdk_env, _sum_model_usage, log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.brain.tools import _file_incidental_findings, _format_spec, _tools_for, MAX_SELF_HEAL_ATTEMPTS
 from agentra.agents.brain.prompts import SYSTEM_PROMPT
+from agentra.observability import get_client, observe, propagate_attributes
 from agentra.agents.safety import make_hooks
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
@@ -253,6 +254,7 @@ class AutonomousCycleReport:
     human_input: dict | None = None
 
 
+@observe(name="autonomous-cycle")
 async def run_autonomous_cycle(
     repo: Path,
     objective: str,
@@ -268,12 +270,26 @@ async def run_autonomous_cycle(
     """human_answer/human_answer_issue: set only when this call is itself a resume dispatched from a human's HUMAN_INPUT_REQUIRED answer (dashboard submission or a GitHub issue comment -- see server/routes/human_input.py)."""
     repo = repo.resolve()
     mem = Memory(repo)
+    from agentra import registry
+
     run_id = run_id or uuid.uuid4().hex[:8]
+    _loop_id = registry.loop_id_for(objective)
+    _app = next((n for n, a in registry.list_apps().items() if a.get("repo_path") == str(repo)), repo.name)
+    get_client().update_current_trace(
+        name=f"cycle:{_app}",
+        session_id=_loop_id,
+        user_id=_app,
+        input={"objective": objective, "feature": feature, "skip_deploy": skip_deploy,
+               "resume": bool(human_answer), "backend": registry.get_llm_backend()},
+        tags=[_app, "autonomous-cycle"],
+        metadata={"run_id": run_id, "human_answer_issue": human_answer_issue},
+    )
     try:
-        return await _run_autonomous_cycle_body(
-            repo, mem, run_id, objective, env, analytics_summary, feature, skip_deploy,
-            max_turns, human_answer, human_answer_issue,
-        )
+        with propagate_attributes(session_id=_loop_id, user_id=_app, tags=[_app, "autonomous-cycle"]):
+            return await _run_autonomous_cycle_body(
+                repo, mem, run_id, objective, env, analytics_summary, feature, skip_deploy,
+                max_turns, human_answer, human_answer_issue,
+            )
     finally:
         # Bug #77: single full-document Firestore flush once this run reaches a
         # terminal state (completed/failed/waiting_for_human) rather than a

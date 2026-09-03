@@ -10,6 +10,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from agentra.observability import get_client, observe
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -55,20 +57,28 @@ def _friendly_error_text(raw: str) -> str:
     return raw
 
 def _sdk_env() -> dict[str, str]:
-    """Extra env for the Claude Agent SDK subprocess. Empty for the default Claude
-    backend (SDK reaches api.anthropic.com with the login session); points at the
-    self-hosted NIM proxy when the dashboard toggle selects it."""
+    """Extra env for the Claude Agent SDK subprocess, per the dashboard's Model
+    Backend toggle:
+      "claude"       -- the interactive `claude login` session (nothing to add)
+      "claude_token" -- a headless CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
+      "nim"          -- the self-hosted NVIDIA NIM proxy
+    The container's base env must NOT carry CLAUDE_CODE_OAUTH_TOKEN, or the SDK
+    subprocess inherits it and the "claude" login path can never win."""
     from agentra import registry
 
-    if registry.get_llm_backend() != "nim":
-        return {}
-    base_url = os.environ.get("NIM_PROXY_URL", "")
-    if not base_url:
-        return {}
-    return {
-        "ANTHROPIC_BASE_URL": base_url,
-        "ANTHROPIC_API_KEY": os.environ.get("NIM_PROXY_API_KEY", "nim-proxy"),
-    }
+    backend = registry.get_llm_backend()
+    if backend == "nim":
+        base_url = os.environ.get("NIM_PROXY_URL", "")
+        if not base_url:
+            return {}
+        return {
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_API_KEY": os.environ.get("NIM_PROXY_API_KEY", "nim-proxy"),
+        }
+    if backend == "claude_token":
+        token = os.environ.get("AGENTRA_CLAUDE_TOKEN") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+        return {"CLAUDE_CODE_OAUTH_TOKEN": token} if token else {}
+    return {}
 
 
 RunLogger = Callable[[str], None]
@@ -256,6 +266,7 @@ def extract_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
+@observe(name="agent", as_type="agent")
 async def run_agent(
     *,
     prompt: str,
@@ -271,6 +282,12 @@ async def run_agent(
     mcp_servers: dict[str, Any] | None = None,
 ) -> AgentResult:
     """Run one agent to completion and return its final result message."""
+    _lf = get_client()
+    _lf.update_current_span(
+        name=agent_label or "agent",
+        input={"task": prompt, "cwd": str(cwd), "allowed_tools": allowed_tools,
+               "permission_mode": permission_mode, "max_turns": max_turns, "resume": bool(resume)},
+    )
     # tools= (built-in tool *availability*) is distinct from allowed_tools=
     built_in_tools = [t for t in allowed_tools if not t.startswith("mcp__")]
     options = ClaudeAgentOptions(
