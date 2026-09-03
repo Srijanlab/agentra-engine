@@ -81,5 +81,7 @@ async def auth_middleware(request: Request, call_next):
 
 CORS_ORIGIN_REGEX = os.environ.get(
     "AGENTRA_WEB_ORIGIN_REGEX",
-    r"^(https://[a-z0-9-]+(--[a-z0-9-]+)?\.(web\.app|firebaseapp\.com)|http://localhost:5173)$",
+    r"^(https://([a-z0-9-]+\.)?srijanlab\.com"
+    r"|https://[a-z0-9-]+(--[a-z0-9-]+)?\.(web\.app|firebaseapp\.com)"
+    r"|http://localhost:5173)$",
 )
