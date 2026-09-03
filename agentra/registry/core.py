@@ -246,8 +246,10 @@ def repo_url_for_path(repo: Path) -> str | None:
     """The GitHub URL for a checkout path -- the registry's stored repo_url (works
     with no local git), falling back to `git remote get-url origin` for local use."""
     try:
-        for app in list_apps().values():
-            if app.get("repo_path") == str(repo) and app.get("repo_url"):
+        from agentra import registry as _reg
+
+        for app in _reg.list_apps().values():
+            if (app.get("repo_path") == str(repo) or Path(app.get("repo_path", "")).name == repo.name) and app.get("repo_url"):
                 return app["repo_url"]
     except Exception:
         pass
@@ -262,7 +264,12 @@ def repo_url_for_path(repo: Path) -> str | None:
 
 
 def get_app_repo(name: str) -> Path | None:
-    app = list_apps().get(name)
+    # Go through the registry facade, not core.list_apps: on the loop the app
+    # registry lives in the engine and is reachable only via the RPC proxy
+    # (core.list_apps() there is an empty local store).
+    from agentra import registry as _reg
+
+    app = _reg.list_apps().get(name)
     if app is None:
         return None
     repo = Path(app["repo_path"])
