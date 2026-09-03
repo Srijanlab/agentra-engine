@@ -114,18 +114,3 @@ async def get_signals(limit: int = 100) -> dict:
     
     return {"signals": signals}
 
-
-@router.get("/server-logs")
-async def get_server_logs(limit: int = 100) -> dict:
-    db = registry.firestore_client()
-    if db is None:
-        return {"logs": []}
-    from google.cloud import firestore
-
-    docs = (
-        db.collection("server_logs")
-        .order_by("ts", direction=firestore.Query.DESCENDING)
-        .limit(limit)
-        .stream()
-    )
-    return {"logs": [d.to_dict() for d in docs]}

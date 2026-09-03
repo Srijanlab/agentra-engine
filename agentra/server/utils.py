@@ -35,19 +35,8 @@ def _set_run(run_key: str, **fields: Any) -> None:
 
 
 def _server_log(channel: str, message: str) -> None:
-    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
-    line = f"[server:{channel}] {message}"
-    logger.info(line)
-    db = registry.firestore_client()
-    if db is not None:
-        try:
-            db.collection("server_logs").add({
-                "ts": timestamp,
-                "channel": channel,
-                "message": message,
-            })
-        except Exception:
-            logger.warning("failed to log to firestore: %s", line, exc_info=True)
+    """Structured server-side event log -- stdout / CloudWatch only."""
+    logger.info("[server:%s] %s", channel, message)
 
 
 def _paused_response(source: str) -> dict:
