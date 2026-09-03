@@ -353,7 +353,7 @@ def slack_thread_for(app: str, issue_number: int) -> str | None:
     return None
 
 
-VALID_LLM_BACKENDS = ("claude", "nim")
+VALID_LLM_BACKENDS = ("claude", "claude_token", "nim")
 _DEFAULT_LLM_BACKEND = "claude"
 _LLM_BACKEND_CACHE_TTL_SECONDS = 30
 _llm_backend_cache: tuple[float, str] | None = None
