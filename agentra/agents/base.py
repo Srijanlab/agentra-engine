@@ -266,6 +266,48 @@ def extract_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
+
+def _emit_agent_observability(lf, result_msg, res, retries: int, resume_fallback: bool) -> None:
+    """One aggregate `generation` per agent run (model, tokens, cost) + a sparse
+    event per denied tool call. Cheap and no-op without Langfuse credentials."""
+    try:
+        models = list((result_msg.model_usage or {}).keys())
+        u = _sum_model_usage(result_msg.model_usage)
+        lf.start_observation(
+            as_type="generation",
+            name="claude",
+            model=models[0] if models else None,
+            output=(res.text or "")[:4000],
+            usage_details={
+                "input": u["input_tokens"],
+                "output": u["output_tokens"],
+                "cache_read_input_tokens": u["cache_read_input_tokens"],
+                "cache_creation_input_tokens": u["cache_creation_input_tokens"],
+            },
+            cost_details={"total": res.cost_usd},
+            metadata={
+                "turns": res.turns,
+                "stop_reason": getattr(result_msg, "stop_reason", None),
+                "terminal_reason": getattr(result_msg, "terminal_reason", None),
+                "contradictory_retries": retries,
+                "resume_fallback": resume_fallback,
+            },
+            level="ERROR" if res.ok is False else "DEFAULT",
+        ).end()
+        for d in (getattr(result_msg, "permission_denials", None) or []):
+            lf.create_event(
+                name="permission-denied",
+                metadata={"tool": d.get("tool_name") if isinstance(d, dict) else str(d)},
+                level="WARNING",
+            )
+        lf.update_current_span(output={
+            "ok": res.ok, "turns": res.turns, "cost_usd": res.cost_usd,
+            "summary": (res.text or "")[:2000],
+        })
+    except Exception:
+        pass
+
+
 @observe(name="agent", as_type="agent")
 async def run_agent(
     *,
@@ -285,7 +327,7 @@ async def run_agent(
     _lf = get_client()
     _lf.update_current_span(
         name=agent_label or "agent",
-        input={"task": prompt, "cwd": str(cwd), "allowed_tools": allowed_tools,
+        input={"task": prompt[:2000], "cwd": str(cwd), "allowed_tools": allowed_tools,
                "permission_mode": permission_mode, "max_turns": max_turns, "resume": bool(resume)},
     )
     # tools= (built-in tool *availability*) is distinct from allowed_tools=
@@ -380,9 +422,11 @@ async def run_agent(
         session_id=result_msg.session_id,
         **_sum_model_usage(result_msg.model_usage),
     )
+    _emit_agent_observability(_lf, result_msg, res, contradictory_attempts_used, resume_fallback_used)
     return res
 
 
+@observe(name="chat-turn", as_type="agent")
 async def stream_chat_turn(
     *,
     prompt: str,
@@ -406,6 +450,8 @@ async def stream_chat_turn(
         env=_sdk_env(),
     )
 
+    _lf = get_client()
+    _lf.update_current_span(name=agent_label or "chat", input={"message": prompt[:2000]})
     raw_logger = _RUN_LOGGER.get()
     label = agent_label or "Agent"
     logger = (lambda line: raw_logger(f"[{label}] {line}")) if raw_logger else None
@@ -436,6 +482,21 @@ async def stream_chat_turn(
         return
 
     text = result_msg.result or ""
+    _u = _sum_model_usage(result_msg.model_usage)
+    try:
+        _models = list((result_msg.model_usage or {}).keys())
+        _lf.start_observation(
+            as_type="generation", name="claude", model=_models[0] if _models else None,
+            output=text[:4000],
+            usage_details={"input": _u["input_tokens"], "output": _u["output_tokens"],
+                           "cache_read_input_tokens": _u["cache_read_input_tokens"],
+                           "cache_creation_input_tokens": _u["cache_creation_input_tokens"]},
+            cost_details={"total": result_msg.total_cost_usd or 0.0},
+            metadata={"turns": result_msg.num_turns},
+        ).end()
+        _lf.update_current_span(output={"ok": not result_msg.is_error, "cost_usd": result_msg.total_cost_usd or 0.0})
+    except Exception:
+        pass
     yield {
         "type": "done",
         "ok": not result_msg.is_error,
@@ -444,5 +505,5 @@ async def stream_chat_turn(
         "cost_usd": result_msg.total_cost_usd or 0.0,
         "turns": result_msg.num_turns,
         "session_id": result_msg.session_id,
-        **_sum_model_usage(result_msg.model_usage),
+        **_u,
     }

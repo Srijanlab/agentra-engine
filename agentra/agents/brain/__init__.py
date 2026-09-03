@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import hashlib
 import json
 import logging
@@ -283,12 +284,19 @@ async def run_autonomous_cycle(
     try:
         with propagate_attributes(
             session_id=_loop_id, user_id=_app, tags=[_app, "autonomous-cycle"],
+            environment=os.environ.get("LANGFUSE_TRACING_ENVIRONMENT", "production"),
             metadata={"run_id": run_id, "human_answer_issue": human_answer_issue},
         ):
-            return await _run_autonomous_cycle_body(
+            _report = await _run_autonomous_cycle_body(
                 repo, mem, run_id, objective, env, analytics_summary, feature, skip_deploy,
                 max_turns, human_answer, human_answer_issue,
             )
+            get_client().update_current_span(output={
+                "status": getattr(_report, "status", None),
+                "outcome": getattr(_report, "summary", None) or getattr(_report, "outcome", None),
+                "cost_usd": getattr(_report, "total_cost_usd", None),
+            })
+            return _report
     finally:
         # Bug #77: single full-document Firestore flush once this run reaches a
         # terminal state (completed/failed/waiting_for_human) rather than a

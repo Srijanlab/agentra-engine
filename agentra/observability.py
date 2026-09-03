@@ -49,13 +49,13 @@ def init_observability() -> None:
     # langfuse-cli / SDK read LANGFUSE_HOST; we standardise on LANGFUSE_BASE_URL.
     if os.environ.get("LANGFUSE_BASE_URL") and not os.environ.get("LANGFUSE_HOST"):
         os.environ["LANGFUSE_HOST"] = os.environ["LANGFUSE_BASE_URL"]
+    os.environ.setdefault("OTEL_SERVICE_NAME", "agentra")
 
     try:
         from langfuse import Langfuse
-        from openinference.instrumentation.claude_agent_sdk import ClaudeAgentSDKInstrumentor
 
-        Langfuse(mask=_mask)  # singleton; get_client() returns it
-        ClaudeAgentSDKInstrumentor().instrument()
+        Langfuse(mask=_mask)  # singleton; get_client() returns it. We emit our
+        # own aggregate generations (one per agent), so no SDK auto-instrumentor.
         _initialized = True
         logger.info("Langfuse tracing enabled (%s)", os.environ.get("LANGFUSE_HOST"))
     except Exception:
