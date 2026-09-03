@@ -88,10 +88,12 @@ def loop_id_for_issue(app: str, issue_number: int | str) -> str:
     return hashlib.sha1(f"{app}#{issue_number}".encode("utf-8")).hexdigest()[:10]
 
 
+_LOOPS_RUN_SCAN = 300  # Firestore free tier is 50k reads/day -- bound how deep loop views read
+
 def list_loops(app: str | None = None) -> list[dict]:
     """Group runs by loop_id and return loop summaries, newest loop first."""
-    runs = [r for r in list_runs(limit=1000) if (app is None or r.get("app") == app) and r.get("loop_id")]
-    steps = list_agent_steps(app=app, limit=2000)
+    runs = [r for r in list_runs(limit=_LOOPS_RUN_SCAN) if (app is None or r.get("app") == app) and r.get("loop_id")]
+    steps = list_agent_steps(app=app, limit=400)
     steps_by_run_key: dict[str, list[dict]] = {}
     for s in steps:
         steps_by_run_key.setdefault(s.get("run_id"), []).append(s)
@@ -228,8 +230,10 @@ def record_agent_step(
         f.write(json.dumps(record) + "\n")
 
 
+_AGENT_STEPS_MAX_SCAN = 500  # cap Firestore reads -- the old `limit*5` for app filtering read up to 10k docs
+
 def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:
-    fetch_limit = limit * 5 if app is not None else limit
+    fetch_limit = min(limit * 5 if app is not None else limit, _AGENT_STEPS_MAX_SCAN)
 
     if core._db is not None:
         steps = _cache.get_or_set(f"steps:{fetch_limit}", lambda: _stream_agent_steps(fetch_limit), ttl=10)

@@ -350,14 +350,22 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
 
 @router.get("/apps/{name}/loops")
 async def get_app_loops(name: str) -> dict:
+    from agentra.server.gh_cache import cached
+
     if name not in registry.list_apps():
         raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
-    return {"loops": registry.list_loops(name)}
+    return await cached(f"loops:{name}", lambda: _loops_async(name), ttl=60)
 
 
 @router.get("/loops")
 async def get_all_loops() -> dict:
-    return {"loops": registry.list_loops(None)}
+    from agentra.server.gh_cache import cached
+
+    return await cached("loops:*", lambda: _loops_async(None), ttl=60)
+
+
+async def _loops_async(name: str | None) -> dict:
+    return {"loops": await asyncio.to_thread(registry.list_loops, name)}
 
 
 @router.post("/apps/{name}/backlog")
