@@ -106,6 +106,16 @@ def get_installation_token(repo_url: str) -> str:
         installation_id = _get_installation_id(owner_repo)
         return _mint_token_for_installation(installation_id)
     except GitHubAppNotConfigured:
+        # The loop holds no App key -- the engine mints installation tokens for
+        # it (same token that already covers git push; it also reads Actions
+        # Variables and the Projects board). engine_client is loop-only.
+        try:
+            from agentra import engine_client
+
+            if engine_client.enabled():
+                return engine_client.git_token(repo_url)
+        except ImportError:
+            pass
         token = os.environ.get("GITHUB_TOKEN")
         if token:
             return token
