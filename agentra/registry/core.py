@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentra.registry import _cache
@@ -131,12 +132,25 @@ def list_apps() -> dict[str, dict]:
     return _local_apps()
 
 
-def register_app(name: str, repo_path: str, repo_url: str | None = None, branch: str | None = None) -> None:
-    entry: dict = {"repo_path": str(Path(repo_path).resolve())}
-    if repo_url:
-        entry["repo_url"] = repo_url
-    if branch:
-        entry["branch"] = branch
+def register_app(
+    name: str,
+    repo_path: str | None = None,
+    repo_url: str | None = None,
+    branch: str | None = None,
+    repos: list[dict] | None = None,
+) -> None:
+    """`repos`, when given, registers a multi-repo app (each entry: name, repo_url,
+    branch, role -- exactly one "coordination" -- and optional deploy_strategy);
+    otherwise this is a legacy single-repo app, its one repo implicitly both
+    coordination and code."""
+    if repos:
+        entry: dict = {"repos": repos}
+    else:
+        entry = {"repo_path": str(Path(repo_path).resolve())}
+        if repo_url:
+            entry["repo_url"] = repo_url
+        if branch:
+            entry["branch"] = branch
 
     _cache.drop("apps")
     if _db is not None:
@@ -242,15 +256,126 @@ def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
         )
 
 
+@dataclass
+class RepoSpec:
+    """One repo of an app. `role` is "coordination" (issues, .agentra/memory, the
+    app's objective -- exactly one per app) or "code" (deployable). A legacy
+    single-repo app has exactly one RepoSpec that is both."""
+
+    name: str
+    path: Path | None
+    repo_url: str | None
+    branch: str
+    role: str
+    deploy_strategy: str | None = None
+
+
+def _repo_specs(app_name: str, entry: dict) -> list[RepoSpec]:
+    """Every repo in an app entry, as unresolved specs (path = the stored path, not
+    necessarily a checkout that exists on this host) -- the legacy shape
+    ({repo_path, repo_url, branch}, one repo that is both coordination and code) or
+    the multi-repo shape ({"repos": [...]})."""
+    raw = entry.get("repos")
+    if not raw:
+        return [
+            RepoSpec(
+                name=app_name,
+                path=Path(entry["repo_path"]),
+                repo_url=entry.get("repo_url"),
+                branch=entry.get("branch", "main"),
+                role="coordination",
+                deploy_strategy=entry.get("deploy_strategy"),
+            )
+        ]
+    return [
+        RepoSpec(
+            name=r["name"],
+            path=Path(r["path"]) if r.get("path") else REPOS_ROOT / app_name / r["name"],
+            repo_url=r.get("repo_url"),
+            branch=r.get("branch", "main"),
+            role=r.get("role", "code"),
+            deploy_strategy=r.get("deploy_strategy"),
+        )
+        for r in raw
+    ]
+
+
+def _resolve_repo(repo_url: str | None, branch: str, stored_path: Path, clone_dest: Path) -> Path | None:
+    """Ensure one repo's checkout exists on this host and return its path -- cloning
+    to `clone_dest` if the stored path isn't here, resyncing if stale. Cloud mode
+    (Firestore-backed, no persistent disk) just returns the stored path unresolved."""
+    if _db is not None:
+        return stored_path
+    if stored_path.exists() and repo_url:
+        _sync_if_stale(stored_path, repo_url, branch)
+        return stored_path
+    if not repo_url:
+        return stored_path if stored_path.exists() else None
+    # The stored path has no checkout on THIS host -- it's from wherever the app
+    # last ran (GCP VM, Vercel sandbox, ...). A fresh clone goes to this runtime's
+    # REPOS_ROOT, never back to that foreign (often unwritable) path, which used to
+    # fail every cycle with a read-only-filesystem mkdir.
+    if clone_dest.exists():
+        _sync_if_stale(clone_dest, repo_url, branch)
+        return clone_dest
+    from agentra.agents.git_ops import GitOpError, clone_repo
+
+    try:
+        clone_repo(repo_url, clone_dest, branch=branch)
+    except GitOpError:
+        return None
+    return clone_dest if clone_dest.exists() else None
+
+
+def get_app_repos(name: str) -> dict[str, RepoSpec]:
+    """Every repo of `name`, resolved to a checkout on this host. A legacy
+    single-repo app resolves its one (coordination+code) repo to REPOS_ROOT/name,
+    exactly as get_app_repo always has; a multi-repo app resolves each repo to
+    REPOS_ROOT/name/<repo-name>."""
+    # Go through the registry facade, not core.list_apps: on the loop the app
+    # registry lives in the engine and is reachable only via the RPC proxy
+    # (core.list_apps() there is an empty local store).
+    from agentra import registry as _reg
+
+    app = _reg.list_apps().get(name)
+    if app is None:
+        return {}
+    legacy = "repos" not in app
+    out: dict[str, RepoSpec] = {}
+    for spec in _repo_specs(name, app):
+        clone_dest = REPOS_ROOT / name if legacy else REPOS_ROOT / name / spec.name
+        resolved = _resolve_repo(spec.repo_url, spec.branch, spec.path, clone_dest)
+        out[spec.name] = RepoSpec(
+            name=spec.name, path=resolved, repo_url=spec.repo_url,
+            branch=spec.branch, role=spec.role, deploy_strategy=spec.deploy_strategy,
+        )
+    return out
+
+
+def get_coordination_repo(name: str) -> RepoSpec | None:
+    for spec in get_app_repos(name).values():
+        if spec.role == "coordination":
+            return spec
+    return None
+
+
+def get_app_repo(name: str) -> Path | None:
+    spec = get_coordination_repo(name)
+    return spec.path if spec else None
+
+
 def repo_url_for_path(repo: Path) -> str | None:
     """The GitHub URL for a checkout path -- the registry's stored repo_url (works
     with no local git), falling back to `git remote get-url origin` for local use."""
     try:
         from agentra import registry as _reg
 
-        for app in _reg.list_apps().values():
-            if (app.get("repo_path") == str(repo) or Path(app.get("repo_path", "")).name == repo.name) and app.get("repo_url"):
-                return app["repo_url"]
+        for app_name, app in _reg.list_apps().items():
+            for spec in _repo_specs(app_name, app):
+                if not spec.repo_url:
+                    continue
+                if spec.path == repo or (spec.path is not None and spec.path.name == repo.name):
+                    return spec.repo_url
     except Exception:
         pass
     try:
@@ -261,43 +386,6 @@ def repo_url_for_path(repo: Path) -> str | None:
     except (subprocess.SubprocessError, OSError):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
-
-
-def get_app_repo(name: str) -> Path | None:
-    # Go through the registry facade, not core.list_apps: on the loop the app
-    # registry lives in the engine and is reachable only via the RPC proxy
-    # (core.list_apps() there is an empty local store).
-    from agentra import registry as _reg
-
-    app = _reg.list_apps().get(name)
-    if app is None:
-        return None
-    repo = Path(app["repo_path"])
-    # Cloud mode (Firestore-backed): the engine never reads working-tree files --
-    # backlog/issue data comes from the GitHub API, run state from Firestore. Skip
-    # the clone/pull entirely; there's no git binary or persistent disk here.
-    if _db is not None:
-        return repo
-    if repo.exists() and app.get("repo_url"):
-        _sync_if_stale(repo, app["repo_url"], app.get("branch", "main"))
-        return repo
-    if not app.get("repo_url"):
-        return repo if repo.exists() else None
-    # The stored repo_path has no checkout on THIS host -- it's from wherever the
-    # app last ran (GCP VM, Vercel sandbox, ...). A fresh clone goes to this
-    # runtime's REPOS_ROOT/name, never back to that foreign (often unwritable)
-    # path, which used to fail every cycle with a read-only-filesystem mkdir.
-    dest = REPOS_ROOT / name
-    if dest.exists():
-        _sync_if_stale(dest, app["repo_url"], app.get("branch", "main"))
-        return dest
-    from agentra.agents.git_ops import GitOpError, clone_repo
-
-    try:
-        clone_repo(app["repo_url"], dest, branch=app.get("branch", "main"))
-    except GitOpError:
-        return None
-    return dest if dest.exists() else None
 
 
 def _read_pause_doc() -> dict | None:
