@@ -9,8 +9,11 @@ from typing import Any
 from agentra.registry import core
 from agentra.registry.core import (
     VALID_LLM_BACKENDS,
+    RepoSpec,
     firestore_client,
     get_app_repo,
+    get_app_repos,
+    get_coordination_repo,
     get_llm_backend,
     get_slack_channel,
     is_paused,
@@ -93,8 +96,11 @@ sys.modules[__name__].__class__ = RegistryModule
 __all__ = [
     "DispatchSummary",
     "VALID_LLM_BACKENDS",
+    "RepoSpec",
     "firestore_client",
     "get_app_repo",
+    "get_app_repos",
+    "get_coordination_repo",
     "get_llm_backend",
     "get_run",
     "get_slack_channel",

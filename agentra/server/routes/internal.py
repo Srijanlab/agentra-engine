@@ -119,9 +119,13 @@ class _UrlMemory(Memory):
 
 
 def _memory_for(repo_url: str) -> Memory:
-    for app in registry.list_apps().values():
-        if app.get("repo_url") == repo_url and Path(app.get("repo_path", "")).is_dir():
-            return Memory(Path(app["repo_path"]))
+    # Memory is always the coordination repo (issues, .agentra/memory, objective) --
+    # the loop sends its coord url for every memory RPC, single-repo apps included
+    # (there the one repo is both coordination and code).
+    for app_name, app in registry.list_apps().items():
+        for spec in registry.core._repo_specs(app_name, app):
+            if spec.role == "coordination" and spec.repo_url == repo_url and spec.path is not None and spec.path.is_dir():
+                return Memory(spec.path)
     return _UrlMemory(repo_url)
 
 
