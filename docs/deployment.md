@@ -277,12 +277,15 @@ thread** — a real back-and-forth until the decision is settled.
 Inbound path: `POST /slack/events` (`agentra/server/routes/slack.py`), Slack
 request-signature verified. To enable:
 
-1. Create the `agentra-slack-signing-secret` Secret Manager secret (the app's
-   Signing Secret). `compute.tf` already fetches it into `SLACK_SIGNING_SECRET`
-   (best-effort — a missing secret just leaves the endpoint returning 403).
-2. In the Slack app config, add an Event Subscription request URL of
-   `https://agentra.srijanlab.com/slack/events` and subscribe the bot to
-   `message.channels` (and `message.groups` for private channels).
+1. Create the Slack app by importing `docs/slack-app-manifest.json` (Slack API
+   dashboard → *Create New App* → *From a manifest*). This is the canonical
+   setup: it configures the bot user, event subscriptions (`app_mention`,
+   `message.im`, `message.channels`, `message.groups`) and bot scopes in one
+   step — no hand-configuring. The manifest's `request_url` placeholder is
+   `https://agentra.srijanlab.com/slack/events`; adjust for your host.
+2. Set `SLACK_SIGNING_SECRET` (the app's Signing Secret) as a Vercel
+   environment variable on the engine deployment — a missing value just
+   leaves the endpoint returning 403.
 
 `SLACK_BOT_TOKEN` (from `agentra-slack-bot-token`) is what posts messages;
 thread→run mapping lives at `registry` `system/slack_threads`.
@@ -298,10 +301,26 @@ Each Slack thread keeps its own agent session; history is under
 `AGENTRA_HOME/chat_store/agentra/`. Implementation:
 `agentra/agents/slack_assistant.py`.
 
-To enable, add `app_mention` and `message.im` to the Slack app's Event
-Subscriptions (in addition to `message.channels`) and grant `app_mentions:read`
-+ `im:history`/`im:read`/`chat:write`. Distinct from the #68 human-input thread
-flow above — a reply inside a HUMAN_INPUT_REQUIRED thread still resumes that run.
+Importing `docs/slack-app-manifest.json` (see above) already enables the
+`app_mention` / `message.im` events and the `app_mentions:read`,
+`im:history`, `im:read`, `chat:write` scopes it needs. Distinct from the #68
+human-input thread flow above — a reply inside a HUMAN_INPUT_REQUIRED thread
+still resumes that run.
+
+### `SLACK_ALLOWED_USERS` (sender allowlist)
+
+Optional, comma-separated Slack user IDs (e.g. `U0ABC123,U0DEF456`). It gates
+**both** paths of the inbound endpoint: the ask/act assistant **and** the #68
+escalation-reply resume path. It must therefore list every human who answers
+escalations from Slack — an unlisted user's thread reply will **not** resume a
+blocked run (they get a denial pointing at the dashboard / GitHub issue).
+
+Enforced synchronously before any work is dispatched; a match is exact and
+case-sensitive. Unlisted (or missing-`user`) senders get a plain-text denial in
+the same channel/thread and nothing runs. Leaving it **unset means open access**
+to all senders, with a one-time `slack`-channel warning logged at first use.
+Set as a Vercel environment variable (`SLACK_ALLOWED_USERS`) on the engine
+deployment; unset/empty is equivalent to "no allowlist".
 
 ## Model backend: Claude vs NIMS API
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agentra import chat_store, registry
 from agentra.agents.base import run_agent
+from agentra.server.utils import _server_log
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,19 @@ def _agentra_repo() -> Path | None:
     return None
 
 
-def _system_prompt() -> str:
+def _system_prompt(slack_user_id: str | None = None) -> str:
     base = _api_base()
+    who = (
+        f"You are talking to Slack user {slack_user_id}."
+        if slack_user_id
+        else "You are talking to a human operator."
+    )
     return f"""You are the agentra assistant, reachable in Slack by DM or @mention. \
 agentra is a self-hosted autonomous SDLC system: specialized agents (Orchestrator, \
 Codebase, Discovery, Implementation, Testing, Deployment, ...) run cycles against \
 registered apps, tracked as GitHub issues and Firestore runs.
 
-You are talking to a human operator. Two things you can do:
+{who} Two things you can do:
 
 1. Answer questions about the system. Its own HTTP API is at {base} (no auth needed \
    from this host). Use `curl -s` for reads. Useful endpoints (read the route files \
@@ -66,7 +72,10 @@ Rules:
   did (which endpoint, the response) rather than narrating plans."""
 
 
-async def answer(user_text: str, *, thread_key: str) -> str:
+_FRIENDLY_ERROR = "Sorry — I couldn't finish that turn. Try rephrasing, or check the dashboard."
+
+
+async def answer(user_text: str, *, thread_key: str, slack_user_id: str | None = None) -> str:
     """Run one assistant turn for a Slack conversation, resuming the thread's prior
     session when there is one. Returns the reply text to post back."""
     agent_id = f"slack-assistant:{thread_key}"
@@ -82,13 +91,17 @@ async def answer(user_text: str, *, thread_key: str) -> str:
 
     result = await run_agent(
         prompt=user_text,
-        system_prompt=_system_prompt(),
+        system_prompt=_system_prompt(slack_user_id),
         cwd=repo,
         allowed_tools=["Bash", "Read", "Grep", "Glob"],
         max_turns=_MAX_TURNS,
         agent_label="Slack Assistant",
         resume=resume_session_id,
     )
+
+    if not result.ok:
+        _server_log("slack", f"assistant turn not ok user={slack_user_id}: {(result.text or '')!r}")
+        return _FRIENDLY_ERROR
 
     reply = (result.text or "").strip() or "(no response)"
     if result.session_id:

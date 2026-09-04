@@ -1,0 +1,39 @@
+{
+  "display_information": {
+    "name": "agentra",
+    "description": "Talk to the agentra autonomous SDLC system: ask questions, trigger actions, and answer HUMAN_INPUT_REQUIRED escalations.",
+    "background_color": "#1f2937"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "agentra",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "im:history",
+        "im:read",
+        "chat:write",
+        "channels:history",
+        "groups:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://agentra.srijanlab.com/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.im",
+        "message.channels",
+        "message.groups"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
