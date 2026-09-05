@@ -270,7 +270,11 @@ def test_persist_audit_trail_works_when_head_is_already_on_branch(tmp_path, monk
     assert (verify / ".agentra" / "note.txt").read_text() == "already on beta\n"
 
 
-def test_persist_audit_trail_reports_an_error_when_branch_does_not_exist_anywhere(tmp_path, monkeypatch):
+def test_persist_audit_trail_falls_back_to_the_checked_out_branch_when_the_target_is_missing(tmp_path, monkeypatch):
+    """A multi-repo app's coordination repo has no pre-prod/prod split -- env.pre_prod_branch
+    defaults to 'beta', which doesn't exist there. Rather than fail the whole persist on a
+    missing ref (and lose the .agentra/memory bookkeeping), fall back to whatever branch is
+    checked out (its default, e.g. 'main')."""
     origin = _bare_origin_with_branches(tmp_path, "main")
     repo = _clone_single_branch(origin, tmp_path / "repo", "main")
     monkeypatch.setattr(git_ops, "_extra_auth_args", lambda repo_url: [])
@@ -278,10 +282,12 @@ def test_persist_audit_trail_reports_an_error_when_branch_does_not_exist_anywher
     (repo / ".agentra").mkdir()
     (repo / ".agentra" / "note.txt").write_text("dirty\n")
 
-    error = deployment.persist_audit_trail(repo, "does-not-exist")
+    error = deployment.persist_audit_trail(repo, "beta")  # no 'beta' on the remote
 
-    assert error is not None
-    assert "does-not-exist" in error
+    assert error is None
+    assert _current_branch(repo) == "main"
+    verify = _clone_single_branch(origin, tmp_path / "verify", "main")
+    assert (verify / ".agentra" / "note.txt").read_text() == "dirty\n"
 
 
 # -- deploy_pre_prod: must never reach prod_branch -----------------------------------
