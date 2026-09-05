@@ -44,7 +44,21 @@ def bind_loop(
     if existing is None:
         fields.update(created_at=now, status="active", run_count=0, total_cost_usd=0.0)
     _write_loop(loop_id, fields)
+    _retire_objective_placeholders(app, keep=loop_id)
     return loop_id
+
+
+def _retire_objective_placeholders(app: str, keep: str) -> None:
+    """check_backlog binds an objective-keyed placeholder before the cycle picks an
+    issue; once bind_loop creates the real issue loop it's a never-rolled-up ghost
+    (run_count 0) cluttering the dashboard -- drop it."""
+    for loop in list_loops(app=app, limit=_LOOPS_LIST_LIMIT):
+        if (
+            loop.get("loop_id") != keep
+            and loop.get("kind") == "objective"
+            and int(loop.get("run_count", 0) or 0) == 0
+        ):
+            _delete_loop(loop["loop_id"])
 
 
 def bind_loop_for_run(app: str, objective: str) -> str:
@@ -175,6 +189,18 @@ def _write_loop(loop_id: str, fields: dict) -> None:
     loops.setdefault(loop_id, {}).update(fields)
     core._LOOPS_PATH.parent.mkdir(parents=True, exist_ok=True)
     core._LOOPS_PATH.write_text(json.dumps(loops, indent=2))
+
+
+def _delete_loop(loop_id: str) -> None:
+    _cache.clear()
+    if core._ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.table("loops").delete_item(Key={"loop_id": loop_id})
+        return
+    loops = _local_loops()
+    if loops.pop(loop_id, None) is not None:
+        core._LOOPS_PATH.write_text(json.dumps(loops, indent=2))
 
 
 def _local_loops() -> dict[str, dict]:
