@@ -1006,11 +1006,20 @@ async def _promote_prod_external(repo: Path, env: EnvironmentConfig, run_id: str
     """Promotion for an "external" repo is only a pre_prod_branch -> prod_branch PR,
     opened and merged (never a direct push) -- the merge, after any required CI checks
     on the PR itself, is what triggers that repo's own push-to-prod_branch deploy
-    workflow. See connectors/github_pulls.py."""
-    from agentra.connectors import github_pulls
-    from agentra.registry import repo_url_for_path
+    workflow. See connectors/github_pulls.py.
 
-    repo_url = repo_url_for_path(repo)
+    repo_url is read directly off the checkout's own `origin` remote (not
+    registry.repo_url_for_path) -- this only ever runs where `repo` is a real checkout
+    (the loop, mid-cycle; the engine has no disk in cloud mode and never reaches this
+    call), and registry.repo_url_for_path isn't consistently available across both
+    processes anyway (the loop's own Memory._repo_url resolves the same way, for the
+    same reason)."""
+    from agentra.connectors import github_pulls
+
+    result = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "origin"], capture_output=True, text=True, timeout=10,
+    )
+    repo_url = result.stdout.strip() if result.returncode == 0 else None
     if not repo_url:
         return AgentResult(
             ok=False, text=f"{repo} has no github.com remote -- cannot open a promotion PR.",

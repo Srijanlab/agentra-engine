@@ -94,14 +94,22 @@ def test_deploy_pre_prod_external_merge_conflict_is_reported_and_never_pushes(tm
 # -- promotion: open/merge a PR, nothing else ----------------------------------------
 
 
+def _repo_with_origin(tmp_path: Path, url: str | None) -> Path:
+    """repo_url is read directly off the checkout's own `origin` remote (see
+    _promote_prod_external's docstring) -- a real local repo with (or without) that
+    remote configured, not a registry.repo_url_for_path mock, is what actually proves
+    the behavior."""
+    repo = _init_repo(tmp_path / "repo")
+    if url is not None:
+        _git(repo, "remote", "add", "origin", url)
+    return repo
+
+
 def test_promote_prod_external_opens_and_merges_a_promotion_pr(tmp_path, monkeypatch):
-    from agentra import registry
     from agentra.connectors import github_pulls
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/loop.git")
     env = _env()
-    monkeypatch.setattr(registry, "repo_url_for_path", lambda r: "https://github.com/acme/loop.git")
     calls = []
 
     def fake_open_or_merge(repo_url, head, base, *, title):
@@ -118,13 +126,9 @@ def test_promote_prod_external_opens_and_merges_a_promotion_pr(tmp_path, monkeyp
     assert "Merged PR #7" in result.text
 
 
-def test_promote_prod_external_fails_cleanly_without_a_github_remote(tmp_path, monkeypatch):
-    from agentra import registry
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_promote_prod_external_fails_cleanly_without_a_github_remote(tmp_path):
+    repo = _repo_with_origin(tmp_path, None)
     env = _env()
-    monkeypatch.setattr(registry, "repo_url_for_path", lambda r: None)
 
     strategy = deployment.PROD_STRATEGIES["external"]
     result = asyncio.run(strategy(repo, env, "run1", "sess1"))
@@ -134,13 +138,10 @@ def test_promote_prod_external_fails_cleanly_without_a_github_remote(tmp_path, m
 
 
 def test_promote_prod_external_reports_a_not_yet_mergeable_pr_without_raising(tmp_path, monkeypatch):
-    from agentra import registry
     from agentra.connectors import github_pulls
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/loop.git")
     env = _env()
-    monkeypatch.setattr(registry, "repo_url_for_path", lambda r: "https://github.com/acme/loop.git")
     monkeypatch.setattr(
         github_pulls, "open_or_merge_promotion_pr",
         lambda *a, **k: "PR #7 (https://github.com/acme/loop/pull/7) is open but not mergeable yet (checks pending, or a conflict) -- not merged this cycle.",
