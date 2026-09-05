@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27",
     "google-cloud-firestore>=2.19",
     "langfuse>=4.0",
+    "boto3>=1.35",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,7 @@ dev = [
     "google-cloud-texttospeech>=2.16",
     "playwright>=1.48",
     "graphifyy[mcp]>=0.9.46",
+    "moto[dynamodb]>=5.0",
 ]
 
 [project.scripts]
