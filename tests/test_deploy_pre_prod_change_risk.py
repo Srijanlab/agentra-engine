@@ -64,7 +64,7 @@ def test_deploy_pre_prod_merges_only_for_a_trivial_change(tmp_path, monkeypatch)
     result = asyncio.run(_tool(session, "deploy_pre_prod").handler({}))
 
     assert result.get("is_error") is not True
-    assert "No verify_pre_prod call needed" in result["content"][0]["text"]
+    assert "Next: end the run" in result["content"][0]["text"]
     assert merge_calls == [(session.repo, session.env, session.feature_branch)]
     assert strategy_calls == []
     assert session.change_risk == "trivial"
