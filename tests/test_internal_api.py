@@ -92,26 +92,27 @@ def test_git_token_calls_github_app(client, monkeypatch):
     assert r.json() == {"token": "tok-for-https://github.com/x/y"}
 
 
-def test_run_log_writes_to_firestore(client, monkeypatch):
-    written = {}
+def test_run_log_writes_to_dynamodb(client, monkeypatch):
+    import boto3
+    from moto import mock_aws
 
-    class _Doc:
-        def set(self, data):
-            written.update(data)
+    from agentra.registry import _dynamo
 
-    class _Col:
-        def document(self, key):
-            written["key"] = key
-            return _Doc()
+    with mock_aws():
+        monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "")
+        resource = boto3.resource("dynamodb", region_name="us-west-2")
+        resource.create_table(
+            TableName="run-logs",
+            KeySchema=[{"AttributeName": "run_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "run_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        monkeypatch.setattr(internal.registry, "_ddb", resource)
+        _dynamo._table_cache.clear()
 
-    class _DB:
-        def collection(self, name):
-            written["collection"] = name
-            return _Col()
+        r = client.post("/internal/runs/run-9/log", json={"lines": ["a", "b"]},
+                        headers={"Authorization": f"Bearer {TOKEN}"})
 
-    monkeypatch.setattr(internal.registry, "firestore_client", lambda: _DB())
-    r = client.post("/internal/runs/run-9/log", json={"lines": ["a", "b"]},
-                    headers={"Authorization": f"Bearer {TOKEN}"})
-    assert r.json() == {"ok": True, "lines": 2}
-    assert written["collection"] == "run_logs" and written["key"] == "run-9"
-    assert written["lines"] == ["a", "b"]
+        assert r.json() == {"ok": True, "lines": 2}
+        item = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run-9"})
+        assert item["lines"] == ["a", "b"]

@@ -23,13 +23,13 @@ from agentra.memory.settings import MemorySettingsMixin
 
 logger = logging.getLogger(__name__)
 
-# Bug #77: a per-line Firestore read+write (blocking the async agent loop
+# Bug #77: a per-line durable read+write (blocking the async agent loop
 # every ~200-300ms during SDK streaming) was replaced with an in-memory
-# per-run buffer that is flushed to Firestore as a single full-document
+# per-run buffer that is flushed to the registry as a single full-item
 # write only periodically and once at run completion.
-FIRESTORE_FLUSH_MAX_LINES = 200
-FIRESTORE_FLUSH_INTERVAL_SECONDS = 300
-FIRESTORE_MAX_LINES = 500
+RUN_LOG_FLUSH_MAX_LINES = 200
+RUN_LOG_FLUSH_INTERVAL_SECONDS = 300
+RUN_LOG_MAX_LINES = 500
 
 
 class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, MemorySettingsMixin):
@@ -46,7 +46,7 @@ class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, 
         self._log_buffers: dict[str, list[str]] = {}
         self._log_buffer_meta: dict[str, dict[str, float]] = {}
         # Cloud mode: the engine has no writable checkout dir. The GitHub- and
-        # Firestore-backed methods don't need these paths; the local-file ones
+        # registry-backed methods don't need these paths; the local-file ones
         # will raise OSError at call time, which callers handle.
         try:
             for category in CATEGORIES:
@@ -80,25 +80,25 @@ class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, 
         return path
 
     def _buffer_log_line(self, run_id: str, line: str) -> None:
-        """Appends to the run's in-memory buffer and triggers a periodic Firestore safety flush at a bounded cadence (default: every 200 lines or 5 minutes, whichever comes first) instead of on every call."""
+        """Appends to the run's in-memory buffer and triggers a periodic safety flush at a bounded cadence (default: every 200 lines or 5 minutes, whichever comes first) instead of on every call."""
         self._log_buffers.setdefault(run_id, []).append(line)
         meta = self._log_buffer_meta.setdefault(
             run_id, {"lines_since_flush": 0, "last_flush": time.monotonic()}
         )
         meta["lines_since_flush"] += 1
-        due_by_lines = meta["lines_since_flush"] >= FIRESTORE_FLUSH_MAX_LINES
-        due_by_time = (time.monotonic() - meta["last_flush"]) >= FIRESTORE_FLUSH_INTERVAL_SECONDS
+        due_by_lines = meta["lines_since_flush"] >= RUN_LOG_FLUSH_MAX_LINES
+        due_by_time = (time.monotonic() - meta["last_flush"]) >= RUN_LOG_FLUSH_INTERVAL_SECONDS
         if due_by_lines or due_by_time:
-            self._flush_run_log_to_firestore(run_id)
+            self._flush_run_log(run_id)
 
     def finalize_run_log(self, run_id: str) -> None:
-        """Best-effort final Firestore durability flush for `run_id`, called once a run reaches a terminal state (completed, failed, or waiting_for_human)."""
-        self._flush_run_log_to_firestore(run_id)
+        """Best-effort final durability flush for `run_id`, called once a run reaches a terminal state (completed, failed, or waiting_for_human)."""
+        self._flush_run_log(run_id)
         self._log_buffers.pop(run_id, None)
         self._log_buffer_meta.pop(run_id, None)
 
-    def _flush_run_log_to_firestore(self, run_id: str) -> None:
-        """Per-run logs were the one data type with no durable copy anywhere — .agentra/logs/ is gitignored (verbose, not audit-trail material) and REPOS_ROOT is VM-local-only, so a run's log was permanently gone the moment its VM rebuilt. Writes the buffered lines as a single full-document overwrite (no per-line read-modify-write)."""
+    def _flush_run_log(self, run_id: str) -> None:
+        """Per-run logs were the one data type with no durable copy anywhere — .agentra/logs/ is gitignored (verbose, not audit-trail material) and REPOS_ROOT is VM-local-only, so a run's log was permanently gone the moment its VM rebuilt. Writes the buffered lines as a single full-item overwrite (no per-line read-modify-write)."""
         meta = self._log_buffer_meta.get(run_id)
         try:
             lines = self._log_buffers.get(run_id) or []
@@ -106,13 +106,15 @@ class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, 
                 return
             from agentra import registry
 
-            db = registry.firestore_client()
-            if db is None:
+            ddb = registry.dynamodb_resource()
+            if ddb is None:
                 return
-            tail = lines[-FIRESTORE_MAX_LINES:]
-            db.collection("run_logs").document(run_id).set({"lines": tail})
+            from agentra.registry import _dynamo
+
+            tail = lines[-RUN_LOG_MAX_LINES:]
+            _dynamo.put_item(_dynamo.table("run-logs"), {"run_id": run_id, "lines": tail})
         except Exception:
-            logger.warning("log: failed to flush run %s log to Firestore", run_id, exc_info=True)
+            logger.warning("log: failed to flush run %s log", run_id, exc_info=True)
         finally:
             if meta is not None:
                 meta["lines_since_flush"] = 0

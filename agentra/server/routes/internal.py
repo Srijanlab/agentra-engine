@@ -66,7 +66,7 @@ _REGISTRY_METHODS = frozenset({
     "get_run", "list_runs", "record_run", "last_run_at",
     "list_loops", "get_loop", "bind_loop", "roll_up_loop", "set_loop_status",
     "loop_id_for", "loop_id_for_issue",
-    "list_agent_steps", "record_agent_step",
+    "list_agent_steps",
     "list_waiting_for_human", "reconcile_stale_runs", "reconcile_waiting_for_human",
     "submit_request", "dispatch_once",
 })
@@ -170,11 +170,13 @@ class RunLogRequest(BaseModel):
 async def run_log(run_id: str, req: RunLogRequest) -> dict:
     """Durable copy of a run's log tail (the loop's disk is ephemeral); the
     dashboard streams it back from here via /runs/{key}/logs."""
-    db = registry.firestore_client()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Firestore unavailable")
+    ddb = registry.dynamodb_resource()
+    if ddb is None:
+        raise HTTPException(status_code=503, detail="DynamoDB unavailable")
+    from agentra.registry import _dynamo
+
     tail = req.lines[-500:]
-    db.collection("run_logs").document(run_id).set({"lines": tail})
+    _dynamo.put_item(_dynamo.table("run-logs"), {"run_id": run_id, "lines": tail})
     return {"ok": True, "lines": len(tail)}
 
 

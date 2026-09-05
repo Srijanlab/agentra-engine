@@ -1,10 +1,12 @@
-"""server/gh_cache.py — a small Firestore-backed TTL cache so the dashboard's
+"""server/gh_cache.py — a small DynamoDB-backed TTL cache so the dashboard's
 read endpoints don't hit the GitHub API on every request.
 
-Keyed docs live under the `gh_cache` collection: {value, ts}. On a serverless
-host each request may be a cold instance, so an in-process cache barely helps --
-Firestore is the shared layer. One Firestore read (free-tier cheap) replaces N
-GitHub calls on a hit.
+Keyed items live in the agentra-gh-cache table: {value, ts, expires_at}. On a
+serverless host each request may be a cold instance, so an in-process cache
+barely helps -- DynamoDB is the shared layer. One read replaces N GitHub
+calls on a hit. expires_at is DynamoDB's native item-TTL attribute (enabled
+on the table via CDK) -- expired entries are reclaimed automatically, unlike
+under Firestore where nothing ever garbage-collected an old entry.
 """
 
 from __future__ import annotations
@@ -19,8 +21,8 @@ _local: dict[str, tuple[float, Any]] = {}
 
 
 async def cached(key: str, producer: Callable[[], Awaitable[Any]], *, ttl: float = _DEFAULT_TTL) -> Any:
-    db = registry.firestore_client()
-    if db is None:  # local/CLI/tests -- no quota pressure, no cache
+    ddb = registry.dynamodb_resource()
+    if ddb is None:  # local/CLI/tests -- no quota pressure, no cache
         return await producer()
 
     now = time.time()
@@ -28,24 +30,24 @@ async def cached(key: str, producer: Callable[[], Awaitable[Any]], *, ttl: float
     if hit is not None and now - hit[0] < ttl:
         return hit[1]
 
-    if db is not None:
-        try:
-            snap = db.collection("gh_cache").document(key).get()
-            if snap.exists:
-                data = snap.to_dict() or {}
-                if now - (data.get("ts") or 0) < ttl:
-                    _local[key] = (now, data.get("value"))
-                    return data.get("value")
-        except Exception:
-            pass  # cache read failed (quota, offline) -- fall through to a live fetch
+    from agentra.registry import _dynamo
+
+    try:
+        item = _dynamo.get_item(_dynamo.table("gh-cache"), {"key": key})
+        if item is not None and now - (item.get("ts") or 0) < ttl:
+            _local[key] = (now, item.get("value"))
+            return item.get("value")
+    except Exception:
+        pass  # cache read failed (offline, throttled) -- fall through to a live fetch
 
     value = await producer()
     _local[key] = (now, value)
-    if db is not None:
-        try:
-            db.collection("gh_cache").document(key).set({"value": value, "ts": now})
-        except Exception:
-            pass  # best-effort write
+    try:
+        _dynamo.put_item(
+            _dynamo.table("gh-cache"), {"key": key, "value": value, "ts": now, "expires_at": int(now + ttl)}
+        )
+    except Exception:
+        pass  # best-effort write
     return value
 
 
@@ -53,11 +55,14 @@ def invalidate(*keys: str) -> None:
     """Drop cache entries -- call after a write that changes what they cover."""
     for key in keys:
         _local.pop(key, None)
-    db = registry.firestore_client()
-    if db is None:
+    ddb = registry.dynamodb_resource()
+    if ddb is None:
         return
+    from agentra.registry import _dynamo
+
+    tbl = _dynamo.table("gh-cache")
     for key in keys:
         try:
-            db.collection("gh_cache").document(key).delete()
+            tbl.delete_item(Key={"key": key})
         except Exception:
             pass

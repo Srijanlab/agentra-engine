@@ -4,32 +4,68 @@ gitignored on purpose, and REPOS_ROOT itself is VM-local-only (registry.py)
 -- a run's log was permanently gone the moment its VM/container instance
 rebuilt (which happens on every redeploy).
 
-Bug #77: Memory.log() used to do a synchronous Firestore read+write on
+Bug #77: Memory.log() used to do a synchronous durable read+write on
 *every* call (every SDK stream event, ~200-300ms), blocking the async agent
-loop. It now only appends to a local per-run buffer; Firestore gets a single
-full-document write via a periodic safety flush (line/time threshold) and
+loop. It now only appends to a local per-run buffer; the registry gets a
+single full-item write via a periodic safety flush (line/time threshold) and
 once more when the run reaches a terminal state (Memory.finalize_run_log).
-server.py's stream_run_logs falls back to that Firestore copy only when the
+server.py's stream_run_logs falls back to that durable copy only when the
 local file is missing.
+
+Uses a real (moto-mocked) DynamoDB table rather than a hand-shaped fake --
+the whole point of these tests is real persistence semantics (single
+full-item overwrite, not a per-line write), not just a truthiness branch.
 """
 
 import re
-from pathlib import Path
-from unittest.mock import MagicMock
 
+import boto3
+import pytest
 from fastapi.testclient import TestClient
+from moto import mock_aws
 
 from agentra import registry, server
 import agentra.memory as memory_module
+from agentra.registry import _dynamo
 from agentra.memory import Memory
 from agentra.server import _strip_log_timestamp
 
 
-def test_log_always_appends_to_the_local_file(tmp_path, monkeypatch):
+@pytest.fixture
+def ddb_run_logs(monkeypatch):
+    with mock_aws():
+        monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "")
+        resource = boto3.resource("dynamodb", region_name="us-west-2")
+        resource.create_table(
+            TableName="run-logs",
+            KeySchema=[{"AttributeName": "run_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "run_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        # apps/runs share the same _ddb sentinel (already ported in earlier
+        # phases) -- register_app()/get_app_repo()/record_run() all need
+        # somewhere to write even though this file is only testing run-logs.
+        resource.create_table(
+            TableName="apps",
+            KeySchema=[{"AttributeName": "name", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "name", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        resource.create_table(
+            TableName="runs",
+            KeySchema=[{"AttributeName": "run_key", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "run_key", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        monkeypatch.setattr(registry, "_ddb", resource)
+        _dynamo._table_cache.clear()
+        yield resource
+        _dynamo._table_cache.clear()
+
+
+def test_log_always_appends_to_the_local_file(tmp_path, ddb_run_logs):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    monkeypatch.setattr(registry, "_db", fake_db)
 
     mem = Memory(repo)
     for i in range(5):
@@ -40,113 +76,97 @@ def test_log_always_appends_to_the_local_file(tmp_path, monkeypatch):
     assert len(log_path.read_text().splitlines()) == 5
 
 
-def test_log_does_not_write_to_firestore_per_call(tmp_path, monkeypatch):
+def test_log_does_not_write_to_the_registry_per_call(tmp_path, ddb_run_logs):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    monkeypatch.setattr(registry, "_db", fake_db)
 
     mem = Memory(repo)
     for i in range(10):
         mem.log("run123", f"line {i}")
 
     # No per-line read+write: well under the periodic-flush thresholds, so
-    # Firestore should not have been touched at all yet.
-    fake_db.collection.assert_not_called()
+    # the table should not have been touched at all yet.
+    assert _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"}) is None
 
 
-def test_finalize_run_log_writes_once_with_the_full_buffered_log(tmp_path, monkeypatch):
+def test_finalize_run_log_writes_once_with_the_full_buffered_log(tmp_path, ddb_run_logs):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    monkeypatch.setattr(registry, "_db", fake_db)
 
     mem = Memory(repo)
     for i in range(10):
         mem.log("run123", f"line {i}")
     mem.finalize_run_log("run123")
 
-    fake_db.collection.assert_any_call("run_logs")
-    doc_ref = fake_db.collection.return_value.document.return_value
-    assert doc_ref.set.call_count == 1
-    (payload,), kwargs = doc_ref.set.call_args
-    assert kwargs == {}  # a single full overwrite, not a merge/read-modify-write
-    assert len(payload["lines"]) == 10
-    assert payload["lines"][0].endswith("line 0")
-    assert payload["lines"][-1].endswith("line 9")
+    item = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"})
+    assert len(item["lines"]) == 10
+    assert item["lines"][0].endswith("line 0")
+    assert item["lines"][-1].endswith("line 9")
 
-    # A second finalize on the (now-cleared) buffer is a no-op -- no
-    # duplicate/empty write.
+    # A second finalize on the (now-cleared) buffer is a no-op -- nothing
+    # left to flush, so the stored item is untouched (not overwritten empty).
     mem.finalize_run_log("run123")
-    assert doc_ref.set.call_count == 1
+    item_again = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"})
+    assert item_again == item
 
 
-def test_finalize_run_log_caps_at_500_lines(tmp_path, monkeypatch):
+def test_finalize_run_log_caps_at_500_lines(tmp_path, ddb_run_logs):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    monkeypatch.setattr(registry, "_db", fake_db)
 
     mem = Memory(repo)
     for i in range(600):
         mem.log("run123", f"line {i}")
     mem.finalize_run_log("run123")
 
-    doc_ref = fake_db.collection.return_value.document.return_value
-    (payload,), _ = doc_ref.set.call_args
-    assert len(payload["lines"]) == 500
-    assert payload["lines"][-1].endswith("line 599")
+    item = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"})
+    assert len(item["lines"]) == 500
+    assert item["lines"][-1].endswith("line 599")
 
 
-def test_periodic_safety_flush_fires_once_the_line_threshold_is_crossed(tmp_path, monkeypatch):
+def test_periodic_safety_flush_fires_once_the_line_threshold_is_crossed(tmp_path, ddb_run_logs, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    monkeypatch.setattr(registry, "_db", fake_db)
-    monkeypatch.setattr(memory_module, "FIRESTORE_FLUSH_MAX_LINES", 5)
+    monkeypatch.setattr(memory_module, "RUN_LOG_FLUSH_MAX_LINES", 5)
 
     mem = Memory(repo)
     for i in range(4):
         mem.log("run123", f"line {i}")
-    fake_db.collection.assert_not_called()
+    assert _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"}) is None
 
     mem.log("run123", "line 4")  # crosses the (patched) 5-line threshold
 
-    fake_db.collection.assert_any_call("run_logs")
-    doc_ref = fake_db.collection.return_value.document.return_value
-    assert doc_ref.set.call_count == 1
-    (payload,), _ = doc_ref.set.call_args
-    assert len(payload["lines"]) == 5
+    item = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"})
+    assert len(item["lines"]) == 5
 
 
-def test_periodic_safety_flush_fires_once_the_time_threshold_is_crossed(tmp_path, monkeypatch):
+def test_periodic_safety_flush_fires_once_the_time_threshold_is_crossed(tmp_path, ddb_run_logs, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    monkeypatch.setattr(registry, "_db", fake_db)
-    monkeypatch.setattr(memory_module, "FIRESTORE_FLUSH_INTERVAL_SECONDS", 60)
+    monkeypatch.setattr(memory_module, "RUN_LOG_FLUSH_INTERVAL_SECONDS", 60)
 
     fake_clock = {"t": 1000.0}
     monkeypatch.setattr(memory_module.time, "monotonic", lambda: fake_clock["t"])
 
     mem = Memory(repo)
     mem.log("run123", "line 0")
-    fake_db.collection.assert_not_called()
+    assert _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"}) is None
 
     fake_clock["t"] += 61  # crosses the (patched) 60s threshold
     mem.log("run123", "line 1")
 
-    fake_db.collection.assert_any_call("run_logs")
-    doc_ref = fake_db.collection.return_value.document.return_value
-    assert doc_ref.set.call_count == 1
+    item = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": "run123"})
+    assert item is not None
 
 
-def test_log_does_not_raise_when_firestore_write_fails(tmp_path, monkeypatch):
+def test_log_does_not_raise_when_the_registry_write_fails(tmp_path, ddb_run_logs, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    fake_db = MagicMock()
-    fake_db.collection.return_value.document.return_value.set.side_effect = RuntimeError("boom")
-    monkeypatch.setattr(registry, "_db", fake_db)
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_dynamo, "put_item", _boom)
 
     mem = Memory(repo)
     mem.log("run123", "cycle start")  # must not raise
@@ -155,10 +175,10 @@ def test_log_does_not_raise_when_firestore_write_fails(tmp_path, monkeypatch):
     assert (repo / ".agentra" / "logs" / "run123.log").exists()
 
 
-def test_log_skips_firestore_when_not_configured(tmp_path, monkeypatch):
+def test_log_skips_the_registry_when_not_configured(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
 
     mem = Memory(repo)
     path = mem.log("run123", "cycle start")  # must not raise
@@ -189,14 +209,13 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
     monkeypatch.setattr(registry, "PAUSE_PATH", home / "paused.json")
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
-    monkeypatch.setattr(registry, "_AGENT_STEPS_PATH", home / "agent_steps.jsonl")
     server._active_runs.clear()
     server._app_locks.clear()
 
 
-def test_stream_run_logs_falls_back_to_firestore_when_local_file_missing(tmp_path, monkeypatch):
+def test_stream_run_logs_falls_back_to_the_registry_when_local_file_missing(tmp_path, ddb_run_logs, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
-    monkeypatch.setattr(registry, "_db", None)  # local-only registry for run/app bookkeeping
+    monkeypatch.setattr(registry, "_db", None)  # local-only for run/app bookkeeping -- only run-logs is DynamoDB-backed here
 
     repo = tmp_path / "myapp"
     repo.mkdir()
@@ -207,14 +226,9 @@ def test_stream_run_logs_falls_back_to_firestore_when_local_file_missing(tmp_pat
         started_at=0, objective="Ship things.", loop_id="loop1",
     )
     # No local log file was ever written for this run_key (simulating a
-    # redeploy that wiped REPOS_ROOT since the run finished) -- only
-    # Firestore has it.
-    fake_doc = MagicMock()
-    fake_doc.exists = True
-    fake_doc.to_dict.return_value = {"lines": ["[t1] cycle start", "[t2] cycle complete"]}
-    fake_db = MagicMock()
-    fake_db.collection.return_value.document.return_value.get.return_value = fake_doc
-    monkeypatch.setattr(server.registry, "firestore_client", lambda: fake_db)
+    # redeploy that wiped REPOS_ROOT since the run finished) -- only the
+    # registry has it.
+    _dynamo.put_item(_dynamo.table("run-logs"), {"run_id": "run123", "lines": ["[t1] cycle start", "[t2] cycle complete"]})
 
     client = TestClient(server.app)
     with client.stream("GET", "/runs/run123/logs") as response:
@@ -225,7 +239,7 @@ def test_stream_run_logs_falls_back_to_firestore_when_local_file_missing(tmp_pat
     assert "event: done" in body
 
 
-def test_stream_run_logs_strips_the_timestamp_from_a_locally_tailed_line(tmp_path, monkeypatch):
+def test_stream_run_logs_strips_the_timestamp_from_a_locally_tailed_line(tmp_path, ddb_run_logs, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     monkeypatch.setattr(registry, "_db", None)
 
