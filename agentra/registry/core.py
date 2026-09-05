@@ -419,6 +419,17 @@ def get_coordination_repo(name: str) -> RepoSpec | None:
     return None
 
 
+def get_code_repos(name: str) -> dict[str, RepoSpec]:
+    """The deployable repos of `name`, keyed by RepoSpec.name. A legacy single-repo
+    app's one repo serves as both coordination and code, so it's returned here too
+    (no behavior change for any existing single-repo app); a multi-repo app returns
+    only its role="code" repos."""
+    all_repos = get_app_repos(name)
+    if not any(spec.role == "code" for spec in all_repos.values()):
+        return all_repos
+    return {n: spec for n, spec in all_repos.items() if spec.role == "code"}
+
+
 def get_app_repo(name: str) -> Path | None:
     spec = get_coordination_repo(name)
     return spec.path if spec else None

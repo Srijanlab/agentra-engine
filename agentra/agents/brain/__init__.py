@@ -24,6 +24,7 @@ from agentra.agents.safety import make_hooks
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
 from agentra.memory.core import is_login_required_failure
+from agentra.registry.core import RepoSpec
 
 logger = logging.getLogger(__name__)
 
@@ -169,10 +170,55 @@ class OrchestratorSession:
     # Last time note() bumped the run's updated_at (throttled -- reconcile_stale_runs
     # only needs a coarse liveness signal, per-agent detail lives in Langfuse now).
     _last_touch: float = 0.0
+    # The app's real registry name, threaded in by run_autonomous_cycle -- see its
+    # docstring for why this can't just be repo.name (a multi-repo app's coordination
+    # repo isn't named after the app). None only for tests that construct a session
+    # directly without going through the registry; app_name below falls back to
+    # repo.name for those, preserving every existing test's behavior untouched.
+    _app_name: str | None = None
+    # Every code (deployable) repo of this app, keyed by RepoSpec.name -- resolved
+    # once via registry.get_code_repos(app_name). Empty for a session built without
+    # going through the registry (tests); implement_feature falls back to session.repo
+    # directly whenever this is empty, so nothing here changes any existing test's
+    # behavior. A legacy single-repo app still gets exactly one entry here (that repo
+    # serves as both coordination and code), so real single-repo apps flow through the
+    # same target-repo resolution path as multi-repo apps, just with nothing to choose.
+    code_repos: dict[str, RepoSpec] = field(default_factory=dict)
+    # Which code_repos entry the current feature targets -- set once by
+    # implement_feature (via set_active_repo) and reused by every tool downstream in
+    # the same cycle (run_local_tests, deploy_pre_prod, verify_pre_prod).
+    active_repo: str | None = None
+    # Per-code-repo codebase-understanding summary, keyed the same way as code_repos.
+    # cb_summary (below) always mirrors whichever repo is active; for a legacy/single-
+    # entry app this dict has exactly one item and cb_summary is pre-seeded from it.
+    cb_summaries: dict[str, str] = field(default_factory=dict)
+    _env_cache: dict[str, EnvironmentConfig] = field(default_factory=dict, repr=False)
 
     @property
     def app_name(self) -> str:
-        return self.repo.name
+        return self._app_name or self.repo.name
+
+    def env_for(self, name: str) -> EnvironmentConfig:
+        """The real per-repo deploy config for one code_repos entry, lazily loaded from
+        that repo's own GitHub Actions Variables (environments.load) and cached for the
+        rest of this session -- EnvironmentConfig is stored per-repo, not per-app, so a
+        multi-repo app's code repos each have their own (confirmed in environments.py)."""
+        if name not in self._env_cache:
+            from agentra import environments
+
+            spec = self.code_repos[name]
+            self._env_cache[name] = (environments.load(spec.path) if spec.path else None) or EnvironmentConfig()
+        return self._env_cache[name]
+
+    def set_active_repo(self, name: str) -> None:
+        """Called once by implement_feature right after it resolves which code_repos
+        entry a feature targets, before anything reads session.env/cb_summary for that
+        feature -- every tool downstream this cycle (feature_branch_name, run_local_tests,
+        deploy_pre_prod, verify_pre_prod) reads env/cb_summary as plain fields, unchanged,
+        so this is the one place that has to get the ordering right."""
+        self.active_repo = name
+        self.env = self.env_for(name)
+        self.cb_summary = self.cb_summaries.get(name)
 
     def mark_waiting_for_human(
         self,
@@ -323,15 +369,16 @@ async def run_autonomous_cycle(
     run_id: str | None = None,
     human_answer: str | None = None,
     human_answer_issue: int | None = None,
+    app_name: str | None = None,
 ) -> AutonomousCycleReport:
-    """human_answer/human_answer_issue: set only when this call is itself a resume dispatched from a human's HUMAN_INPUT_REQUIRED answer (dashboard submission or a GitHub issue comment -- see server/routes/human_input.py)."""
+    """human_answer/human_answer_issue: set only when this call is itself a resume dispatched from a human's HUMAN_INPUT_REQUIRED answer (dashboard submission or a GitHub issue comment -- see server/routes/human_input.py). app_name: the app's real registry name, passed by every caller that has it (triggers.py, human_input.py) -- required for get_code_repos to resolve the right entry; a multi-repo app's coordination repo is NOT named after the app (e.g. agentra's coordination RepoSpec is named "backlog"), so the old repo_path/repo.name-matching fallback below is wrong for those and only kept for CLI callers that have no app registered at all."""
     repo = repo.resolve()
     mem = Memory(repo)
     from agentra import registry
 
     run_id = run_id or uuid.uuid4().hex[:8]
     _loop_id = registry.loop_id_for(objective)
-    _app = next((n for n, a in registry.list_apps().items() if a.get("repo_path") == str(repo)), repo.name)
+    _app = app_name or next((n for n, a in registry.list_apps().items() if a.get("repo_path") == str(repo)), repo.name)
     get_client().update_current_span(
         name=f"cycle:{_app}",
         input={"objective": objective, "feature": feature, "skip_deploy": skip_deploy,
@@ -351,7 +398,7 @@ async def run_autonomous_cycle(
         ):
             _report = await _run_autonomous_cycle_body(
                 repo, mem, run_id, objective, env, analytics_summary, feature, skip_deploy,
-                max_turns, human_answer, human_answer_issue,
+                max_turns, human_answer, human_answer_issue, _app,
             )
             get_client().update_current_span(output={
                 "status": getattr(_report, "status", None),
@@ -379,7 +426,11 @@ async def _run_autonomous_cycle_body(
     max_turns: int,
     human_answer: str | None,
     human_answer_issue: int | None,
+    app_name: str,
 ) -> AutonomousCycleReport:
+    from agentra import registry
+
+    code_repos = registry.get_code_repos(app_name)
     session = OrchestratorSession(
         repo=repo,
         objective=objective,
@@ -390,9 +441,26 @@ async def _run_autonomous_cycle_body(
         skip_deploy=skip_deploy,
         human_answer=human_answer,
         human_answer_issue=human_answer_issue,
+        code_repos=code_repos,
+        _app_name=app_name,
     )
     # Pre-seed from any existing cached scan so the model doesn't have to spend
-    session.cb_summary = mem.read("architecture", "codebase") or None
+    # a real LLM turn re-discovering what's already known -- per code repo when
+    # this is a multi-repo app (code_repos has >1 entry), a single legacy slot
+    # otherwise (cache_key defaults to "codebase", byte-identical to before).
+    # code_repos is empty when this app isn't registered at all (CLI/tests calling
+    # run_autonomous_cycle directly against a bare repo path) -- exactly today's
+    # pre-Phase-2 behavior, a single direct read against whatever `repo` was passed.
+    if not code_repos:
+        session.cb_summary = mem.read("architecture", "codebase") or None
+    else:
+        for _name in code_repos:
+            _key = "codebase" if len(code_repos) == 1 else f"codebase_{_name}"
+            _cached = mem.read("architecture", _key)
+            if _cached:
+                session.cb_summaries[_name] = _cached
+        if len(code_repos) == 1:
+            session.cb_summary = next(iter(session.cb_summaries.values()), None)
     # Same reasoning applies to the code graph: codebase.run_cached is the only
     if session.cb_summary:
         graph_summary = codegraph.load_or_build(repo)
