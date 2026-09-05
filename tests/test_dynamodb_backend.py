@@ -34,6 +34,24 @@ def ddb_env(monkeypatch):
             AttributeDefinitions=[{"AttributeName": "name", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        resource.create_table(
+            TableName="slack-threads",
+            KeySchema=[{"AttributeName": "thread_ts", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "thread_ts", "AttributeType": "S"},
+                {"AttributeName": "app", "AttributeType": "S"},
+                {"AttributeName": "issue_number", "AttributeType": "N"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "by-app-issue",
+                "KeySchema": [
+                    {"AttributeName": "app", "KeyType": "HASH"},
+                    {"AttributeName": "issue_number", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            BillingMode="PAY_PER_REQUEST",
+        )
         monkeypatch.setattr(core, "_ddb", resource)
         monkeypatch.setattr(core, "_llm_backend_cache", None)
         _dynamo._table_cache.clear()
@@ -201,3 +219,21 @@ def test_cloud_mode_true_with_either_backend_configured(monkeypatch):
     monkeypatch.setattr(core, "_db", None)
     monkeypatch.setattr(core, "_ddb", object())
     assert registry.cloud_mode() is True
+
+
+def test_slack_thread_round_trip(ddb_env):
+    assert core.resolve_slack_thread("T123") is None
+
+    core.record_slack_thread("T123", app="myapp", issue_number=42)
+
+    assert core.resolve_slack_thread("T123") == {"app": "myapp", "issue_number": 42}
+
+
+def test_slack_thread_for_finds_by_app_and_issue(ddb_env):
+    core.record_slack_thread("T111", app="myapp", issue_number=1)
+    core.record_slack_thread("T222", app="myapp", issue_number=42)
+    core.record_slack_thread("T333", app="otherapp", issue_number=42)
+
+    assert core.slack_thread_for("myapp", 42) == "T222"
+    assert core.slack_thread_for("myapp", 999) is None
+    assert core.slack_thread_for("otherapp", 42) == "T333"
