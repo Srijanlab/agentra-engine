@@ -486,7 +486,6 @@ def test_deploy_pre_prod_self_hosted_builds_runs_and_returns_the_internal_previe
     # GitHub #101/#93: reap zombies + cap a runaway process leak on the shared host
     assert "--init" in run_cmd
     assert "--pids-limit" in run_cmd and "512" in run_cmd
-    assert "AGENTRA_FIRESTORE_PROJECT=widget-prod" in run_cmd
     assert "/mnt/disks/widget-data/claude:/home/agentuser/.claude:ro" in run_cmd
     # GitHub issue #45: 8080 is published to a Docker-assigned free host
     # port (bare "-p 8080", no host port hardcoded/derived) so preview_url
@@ -561,6 +560,45 @@ def test_deploy_pre_prod_self_hosted_passes_through_the_github_app_credentials(t
         if c[:2] == ["docker", "inspect"] and "{{json .Config.Env}}" in c
     ]
     assert env_inspect_calls == [["docker", "inspect", "widget-app-blue", "--format", "{{json .Config.Env}}"]]
+
+
+def test_deploy_pre_prod_self_hosted_passes_through_the_dynamodb_credentials(tmp_path, monkeypatch):
+    """The AWS credentials (DynamoDB registry access) must never land in the
+    committed self-hosted-vm-config YAML the way a non-secret Firestore
+    project id once could -- inherited from this process's own live
+    container instead, the same trust boundary as the GitHub App keys."""
+    feature_branch = "dev/1234-feature"
+    repo = _setup_pre_prod_repo(tmp_path, feature_branch)
+    env = _env()
+    config = _self_hosted_config()
+
+    pull_calls, push_calls, docker_calls = [], [], []
+    monkeypatch.setattr(git_ops, "pull_latest", _guarded_pull_latest(pull_calls, env.pre_prod_branch))
+    monkeypatch.setattr(git_ops, "push_branch", _guarded_push_branch(push_calls, env.pre_prod_branch))
+    monkeypatch.setattr(environments, "load_self_hosted_vm_config", lambda repo: config)
+    monkeypatch.setattr(
+        deployment.subprocess, "run",
+        _fake_docker_run(
+            docker_calls,
+            inspect_env=[
+                "AGENTRA_DYNAMODB_TABLE_PREFIX=agentra-",
+                "AGENTRA_AWS_ACCESS_KEY_ID=AKIAFAKE",
+                "AGENTRA_AWS_SECRET_ACCESS_KEY=fake-secret",
+                "AGENTRA_AWS_REGION=us-west-2",
+            ],
+        ),
+    )
+    monkeypatch.setattr(deployment.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(deployment, "_own_container_name", lambda: "widget-app-blue")
+
+    result = asyncio.run(deployment.deploy_pre_prod_self_hosted(repo, env, feature_branch, "run123"))
+
+    assert result.ok is True
+    run_cmd = next(c for c in docker_calls if c[:2] == ["docker", "run"])
+    assert "AGENTRA_DYNAMODB_TABLE_PREFIX=agentra-" in run_cmd
+    assert "AGENTRA_AWS_ACCESS_KEY_ID=AKIAFAKE" in run_cmd
+    assert "AGENTRA_AWS_SECRET_ACCESS_KEY=fake-secret" in run_cmd
+    assert "AGENTRA_AWS_REGION=us-west-2" in run_cmd
 
 
 def test_deploy_pre_prod_self_hosted_returns_a_url_reachable_via_a_plain_socket_connection(tmp_path, monkeypatch):
