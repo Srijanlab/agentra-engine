@@ -142,12 +142,12 @@ async def _run_autonomous_background(
                 feature=report.feature,
             )
             _server_log(
-                _active_runs[run_key]["source"],
+                (_active_runs.get(run_key) or {}).get("source", "run"),
                 f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} completed | cost=${report.cost_usd:.4f}",
             )
         except Exception as exc:
             _set_run(run_key, status="failed", ended_at=time.time(), error=str(exc), summary=str(exc)[:2000])
-            _server_log(_active_runs[run_key]["source"], f"app={app_name!r} run_key={run_key} raised: {exc!r}")
+            _server_log((_active_runs.get(run_key) or {}).get("source", "run"), f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
 async def _run_prod_debug_background(
@@ -282,6 +282,10 @@ async def _drain_queued_runs() -> None:
         objective = run.get("objective") or Memory(repo).get_objective()
         if not objective:
             continue
+        # The run was created (and _active_runs-populated) wherever it was queued -- mirror
+        # it into this process's _active_runs so _run_autonomous_background's own lookups
+        # (source for logging, the re-entrancy guard above) work for drained runs too.
+        _active_runs[run_key] = dict(run)
         _server_log("scheduled", f"draining queued run {run_key} for app={run.get('app')!r}")
         asyncio.create_task(_run_autonomous_background(
             run_key, run["app"], repo, objective, run.get("feature"), bool(run.get("skip_deploy")),
