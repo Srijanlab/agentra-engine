@@ -203,11 +203,13 @@ async def stream_run_logs(run_key: str) -> StreamingResponse:
 
     async def event_stream():
         if not log_path.exists():
-            db = registry.firestore_client()
-            if db is not None:
-                doc = db.collection("run_logs").document(run_key).get()
-                if doc.exists:
-                    for line in doc.to_dict().get("lines", []):
+            ddb = registry.dynamodb_resource()
+            if ddb is not None:
+                from agentra.registry import _dynamo
+
+                item = _dynamo.get_item(_dynamo.table("run-logs"), {"run_id": run_key})
+                if item is not None:
+                    for line in item.get("lines", []):
                         yield f"data: {json.dumps({'line': _strip_log_timestamp(line)})}\n\n"
                     yield "event: done\ndata: {}\n\n"
                     return
