@@ -5,6 +5,8 @@ llm_backend) plus the shared _dynamo.py helpers every later collection will
 build on (merge_update, try_conditional_update).
 """
 
+import time
+
 import boto3
 import pytest
 from moto import mock_aws
@@ -47,6 +49,27 @@ def ddb_env(monkeypatch):
                 "KeySchema": [
                     {"AttributeName": "app", "KeyType": "HASH"},
                     {"AttributeName": "issue_number", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        resource.create_table(
+            TableName="requests",
+            KeySchema=[
+                {"AttributeName": "app", "KeyType": "HASH"},
+                {"AttributeName": "request_id", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "app", "AttributeType": "S"},
+                {"AttributeName": "request_id", "AttributeType": "S"},
+                {"AttributeName": "status", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "by-status",
+                "KeySchema": [
+                    {"AttributeName": "app", "KeyType": "HASH"},
+                    {"AttributeName": "status", "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "ALL"},
             }],
@@ -237,3 +260,73 @@ def test_slack_thread_for_finds_by_app_and_issue(ddb_env):
     assert core.slack_thread_for("myapp", 42) == "T222"
     assert core.slack_thread_for("myapp", 999) is None
     assert core.slack_thread_for("otherapp", 42) == "T333"
+
+
+def _register_app_with_repo(tmp_path, monkeypatch, name: str = "myapp"):
+    """A real repo dir (Memory writes local files under its .agentra/) plus a
+    fake GitHub backend (record_feature_request/set_objective both call out
+    to GitHub -- no real network in tests)."""
+    from agentra.connectors import github_fake
+
+    repo = tmp_path / name
+    repo.mkdir()
+    repo_url = f"https://github.com/acme/{name}.git"
+    core.register_app(name, str(repo), repo_url=repo_url, branch="main")
+    return repo, github_fake.install(monkeypatch=monkeypatch)
+
+
+def test_submit_and_dispatch_applies_a_feature_request(ddb_env, tmp_path, monkeypatch):
+    from agentra.registry import inbox
+
+    _register_app_with_repo(tmp_path, monkeypatch)
+
+    request_id = inbox.submit_request("myapp", "feature_request", "Add dark mode")
+
+    tbl = _dynamo.table("requests")
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": request_id})
+    assert item["status"] == "pending"
+
+    summary = inbox.dispatch_once()
+
+    assert summary.processed == 1
+    assert summary.errors == []
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": request_id})
+    assert item["status"] == "done"
+
+
+def test_dispatch_once_resumes_a_stale_processing_claim(ddb_env, tmp_path, monkeypatch):
+    from agentra.registry import inbox
+
+    _register_app_with_repo(tmp_path, monkeypatch)
+    tbl = _dynamo.table("requests")
+    _dynamo.put_item(tbl, {
+        "app": "myapp", "request_id": "req1", "id": "req1", "type": "feature_request",
+        "title": None, "description": "stale one", "severity": None, "screenshot_url": None,
+        "received_at": 0.0, "status": "processing", "claimed_at": 0.0,  # ancient claim
+    })
+
+    summary = inbox.dispatch_once()
+
+    assert summary.resumed_stale == 1
+    assert summary.processed == 1  # resumed, then picked up and completed in the same pass
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": "req1"})
+    assert item["status"] == "done"
+
+
+def test_dispatch_once_leaves_a_fresh_processing_claim_alone(ddb_env, tmp_path, monkeypatch):
+    from agentra.registry import inbox
+
+    _register_app_with_repo(tmp_path, monkeypatch)
+    tbl = _dynamo.table("requests")
+    _dynamo.put_item(tbl, {
+        "app": "myapp", "request_id": "req1", "id": "req1", "type": "feature_request",
+        "title": None, "description": "in flight", "severity": None, "screenshot_url": None,
+        "received_at": time.time(), "status": "processing", "claimed_at": time.time(),
+    })
+
+    summary = inbox.dispatch_once()
+
+    assert summary.resumed_stale == 0
+    assert summary.processed == 0
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": "req1"})
+    assert item["status"] == "processing"  # untouched -- another worker owns it
