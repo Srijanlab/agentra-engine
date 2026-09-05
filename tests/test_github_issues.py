@@ -334,12 +334,41 @@ def test_ensure_labels_tolerates_a_concurrent_create(monkeypatch):
         return _fake_response([])
 
     def fake_post(url, headers, json, timeout):
-        return _fake_response({"message": "already_exists"}, status_code=422)
+        return _fake_response(
+            {"message": "Validation Failed", "errors": [{"code": "already_exists", "field": "name"}]},
+            status_code=422,
+        )
 
     monkeypatch.setattr(github_issues.httpx, "get", fake_get)
     monkeypatch.setattr(github_issues.httpx, "post", fake_post)
 
     github_issues.ensure_labels("https://github.com/acme/app.git")  # must not raise
+
+
+def test_ensure_labels_raises_on_a_genuine_validation_error(monkeypatch):
+    """A 422 that isn't "already exists" (e.g. a too-long description) must not be
+    silently swallowed -- that's exactly the bug that let the required "agentra"
+    label silently never get created on any repo."""
+    import httpx as real_httpx
+
+    def fake_get(url, headers, params, timeout):
+        return _fake_response([])
+
+    def fake_post(url, headers, json, timeout):
+        request = real_httpx.Request("POST", url)
+        response = real_httpx.Response(
+            422,
+            json={"message": "Validation Failed",
+                  "errors": [{"code": "custom", "field": "description", "message": "description is too long"}]},
+            request=request,
+        )
+        return response
+
+    monkeypatch.setattr(github_issues.httpx, "get", fake_get)
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    with pytest.raises(real_httpx.HTTPStatusError):
+        github_issues.ensure_labels("https://github.com/acme/app.git")
 
 
 def test_add_labels_posts_the_given_labels(monkeypatch):
