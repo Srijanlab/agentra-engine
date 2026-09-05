@@ -109,6 +109,17 @@ def _issue_description(issue: dict) -> str:
     return match.group(1) if match else issue["title"]
 
 
+def _target_repo_label(labels: set[str]) -> str | None:
+    """A multi-repo app's issues may carry a repo:<name> label (applied by
+    discover_opportunities' auto-filing, or by a human filing an issue) naming which
+    code repo the item belongs to -- implement_feature's target_repo argument defaults
+    to this when the caller doesn't pass one explicitly."""
+    for label in labels:
+        if label.startswith("repo:"):
+            return label[len("repo:"):]
+    return None
+
+
 def _github_bug_to_dict(issue: dict) -> dict:
     # run_id set to the same value as external_id (not None): discovery.py's
     issue_number = str(issue["number"])
@@ -124,6 +135,7 @@ def _github_bug_to_dict(issue: dict) -> dict:
         "html_url": issue.get("html_url"),
         "needs_human": _NEED_HUMAN_LABEL in labels,
         "blocking_agentra": _BLOCKING_AGENTRA_LABEL in labels,
+        "target_repo": _target_repo_label(labels),
     }
 
 
@@ -152,6 +164,7 @@ def _github_feature_to_dict(issue: dict) -> dict:
         "source": "github",
         "external_id": str(issue["number"]),
         "html_url": issue.get("html_url"),
+        "target_repo": _target_repo_label(_label_names(issue)),
     }
 
 
