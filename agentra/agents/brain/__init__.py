@@ -198,6 +198,15 @@ class OrchestratorSession:
     def app_name(self) -> str:
         return self._app_name or self.repo.name
 
+    @property
+    def active_repo_path(self) -> Path:
+        """Whichever repo is currently in play: the active code repo once implement_feature
+        has resolved one, else the coordination repo (== the only repo there is, for a
+        legacy/unregistered app that hasn't picked a target yet)."""
+        if self.active_repo is not None:
+            return self.code_repos[self.active_repo].path
+        return self.repo
+
     def env_for(self, name: str) -> EnvironmentConfig:
         """The real per-repo deploy config for one code_repos entry, lazily loaded from
         that repo's own GitHub Actions Variables (environments.load) and cached for the
