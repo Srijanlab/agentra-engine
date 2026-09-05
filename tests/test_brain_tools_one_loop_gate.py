@@ -38,7 +38,6 @@ def _tool(session, name):
 
 @pytest.fixture(autouse=True)
 def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr(registry, "record_run", lambda *a, **k: None)
 
 

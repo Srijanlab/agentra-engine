@@ -37,12 +37,7 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def test_assess_design_impact_calls_architecture_review_run_with_the_brief_and_codebase_summary(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     captured = {}
@@ -73,7 +68,6 @@ def test_assess_design_impact_requires_codebase_summary_first(tmp_path):
 
 
 def test_assess_design_impact_failure_calls_record_failure(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     async def failing_run(*a, **k):

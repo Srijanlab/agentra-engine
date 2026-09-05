@@ -43,10 +43,6 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def _patch_issue_url(monkeypatch, session):
     monkeypatch.setattr(session.mem, "issue_html_url", lambda n: f"https://github.com/acme/app/issues/{n}")
 
@@ -58,7 +54,6 @@ def _capture_notify_shipped(monkeypatch):
 
 
 def test_deploy_pre_prod_trivial_merge_success_notifies_once_per_pending_item(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path,
         pending_shipped_notifications=[
@@ -95,7 +90,6 @@ def test_deploy_pre_prod_trivial_merge_success_notifies_once_per_pending_item(tm
 def test_deploy_pre_prod_trivial_merge_passes_the_app_s_own_slack_channel(tmp_path, monkeypatch):
     """GitHub issue #69's "more requirement": notifications route to the app's own configured
     Slack channel (registry.get_slack_channel), not just whatever the global env var says."""
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path,
         pending_shipped_notifications=[{"issue_number": "5", "board_issue_number": 5, "title": "Fix flaky test"}],
@@ -123,7 +117,6 @@ def test_deploy_pre_prod_trivial_merge_passes_the_app_s_own_slack_channel(tmp_pa
 
 
 def test_deploy_pre_prod_trivial_merge_failure_does_not_notify(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path,
         pending_shipped_notifications=[{"issue_number": "5", "board_issue_number": 5, "title": "Fix flaky test"}],
@@ -146,7 +139,6 @@ def test_deploy_pre_prod_trivial_merge_failure_does_not_notify(tmp_path, monkeyp
 
 
 def test_deploy_pre_prod_non_trivial_success_alone_does_not_notify(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path,
         pending_shipped_notifications=[{"issue_number": "7", "board_issue_number": 7, "title": "Big feature"}],
@@ -168,7 +160,6 @@ def test_deploy_pre_prod_non_trivial_success_alone_does_not_notify(tmp_path, mon
 
 
 def test_verify_pre_prod_pass_notifies_and_includes_preview_url(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path,
         change_risk="standard",
@@ -195,7 +186,6 @@ def test_verify_pre_prod_pass_notifies_and_includes_preview_url(tmp_path, monkey
 
 
 def test_verify_pre_prod_failure_does_not_notify(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path,
         change_risk="standard",
@@ -218,7 +208,6 @@ def test_verify_pre_prod_failure_does_not_notify(tmp_path, monkeypatch):
 
 
 def test_no_pending_notifications_means_no_slack_call(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, change_risk="trivial")
     calls = _capture_notify_shipped(monkeypatch)
 

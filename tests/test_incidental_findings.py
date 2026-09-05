@@ -53,7 +53,6 @@ def _fake_result(status: str, incidental_findings=None, **extra) -> AgentResult:
 
 
 def _patch_common(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     known_bug_calls = []
     failure_calls = []
     monkeypatch.setattr(

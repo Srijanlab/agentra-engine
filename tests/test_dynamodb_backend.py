@@ -5,6 +5,8 @@ llm_backend) plus the shared _dynamo.py helpers every later collection will
 build on (merge_update, try_conditional_update).
 """
 
+import time
+
 import boto3
 import pytest
 from moto import mock_aws
@@ -47,6 +49,74 @@ def ddb_env(monkeypatch):
                 "KeySchema": [
                     {"AttributeName": "app", "KeyType": "HASH"},
                     {"AttributeName": "issue_number", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        resource.create_table(
+            TableName="requests",
+            KeySchema=[
+                {"AttributeName": "app", "KeyType": "HASH"},
+                {"AttributeName": "request_id", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "app", "AttributeType": "S"},
+                {"AttributeName": "request_id", "AttributeType": "S"},
+                {"AttributeName": "status", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "by-status",
+                "KeySchema": [
+                    {"AttributeName": "app", "KeyType": "HASH"},
+                    {"AttributeName": "status", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        resource.create_table(
+            TableName="runs",
+            KeySchema=[{"AttributeName": "run_key", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "run_key", "AttributeType": "S"},
+                {"AttributeName": "shard", "AttributeType": "S"},
+                {"AttributeName": "started_at", "AttributeType": "N"},
+                {"AttributeName": "app", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "by-recency",
+                    "KeySchema": [
+                        {"AttributeName": "shard", "KeyType": "HASH"},
+                        {"AttributeName": "started_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+                {
+                    "IndexName": "by-app-recency",
+                    "KeySchema": [
+                        {"AttributeName": "app", "KeyType": "HASH"},
+                        {"AttributeName": "started_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        resource.create_table(
+            TableName="loops",
+            KeySchema=[{"AttributeName": "loop_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "loop_id", "AttributeType": "S"},
+                {"AttributeName": "app", "AttributeType": "S"},
+                {"AttributeName": "updated_at", "AttributeType": "N"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "by-app-recency",
+                "KeySchema": [
+                    {"AttributeName": "app", "KeyType": "HASH"},
+                    {"AttributeName": "updated_at", "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "ALL"},
             }],
@@ -237,3 +307,248 @@ def test_slack_thread_for_finds_by_app_and_issue(ddb_env):
     assert core.slack_thread_for("myapp", 42) == "T222"
     assert core.slack_thread_for("myapp", 999) is None
     assert core.slack_thread_for("otherapp", 42) == "T333"
+
+
+def _register_app_with_repo(tmp_path, monkeypatch, name: str = "myapp"):
+    """A real repo dir (Memory writes local files under its .agentra/) plus a
+    fake GitHub backend (record_feature_request/set_objective both call out
+    to GitHub -- no real network in tests)."""
+    from agentra.connectors import github_fake
+
+    repo = tmp_path / name
+    repo.mkdir()
+    repo_url = f"https://github.com/acme/{name}.git"
+    core.register_app(name, str(repo), repo_url=repo_url, branch="main")
+    return repo, github_fake.install(monkeypatch=monkeypatch)
+
+
+def test_submit_and_dispatch_applies_a_feature_request(ddb_env, tmp_path, monkeypatch):
+    from agentra.registry import inbox
+
+    _register_app_with_repo(tmp_path, monkeypatch)
+
+    request_id = inbox.submit_request("myapp", "feature_request", "Add dark mode")
+
+    tbl = _dynamo.table("requests")
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": request_id})
+    assert item["status"] == "pending"
+
+    summary = inbox.dispatch_once()
+
+    assert summary.processed == 1
+    assert summary.errors == []
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": request_id})
+    assert item["status"] == "done"
+
+
+def test_dispatch_once_resumes_a_stale_processing_claim(ddb_env, tmp_path, monkeypatch):
+    from agentra.registry import inbox
+
+    _register_app_with_repo(tmp_path, monkeypatch)
+    tbl = _dynamo.table("requests")
+    _dynamo.put_item(tbl, {
+        "app": "myapp", "request_id": "req1", "id": "req1", "type": "feature_request",
+        "title": None, "description": "stale one", "severity": None, "screenshot_url": None,
+        "received_at": 0.0, "status": "processing", "claimed_at": 0.0,  # ancient claim
+    })
+
+    summary = inbox.dispatch_once()
+
+    assert summary.resumed_stale == 1
+    assert summary.processed == 1  # resumed, then picked up and completed in the same pass
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": "req1"})
+    assert item["status"] == "done"
+
+
+def test_dispatch_once_leaves_a_fresh_processing_claim_alone(ddb_env, tmp_path, monkeypatch):
+    from agentra.registry import inbox
+
+    _register_app_with_repo(tmp_path, monkeypatch)
+    tbl = _dynamo.table("requests")
+    _dynamo.put_item(tbl, {
+        "app": "myapp", "request_id": "req1", "id": "req1", "type": "feature_request",
+        "title": None, "description": "in flight", "severity": None, "screenshot_url": None,
+        "received_at": time.time(), "status": "processing", "claimed_at": time.time(),
+    })
+
+    summary = inbox.dispatch_once()
+
+    assert summary.resumed_stale == 0
+    assert summary.processed == 0
+    item = _dynamo.get_item(tbl, {"app": "myapp", "request_id": "req1"})
+    assert item["status"] == "processing"  # untouched -- another worker owns it
+
+
+def test_record_and_get_run_round_trips(ddb_env):
+    from agentra.registry import runs
+
+    assert runs.get_run("run1") is None
+
+    runs.record_run("run1", app="myapp", source="scheduled", status="queued", started_at=100.0)
+
+    run = runs.get_run("run1")
+    assert run["app"] == "myapp"
+    assert run["status"] == "queued"
+    assert run["started_at"] == 100.0
+    assert "shard" not in run  # internal indexing attribute never leaks out
+
+
+def test_record_run_merges_without_clobbering(ddb_env):
+    from agentra.registry import runs
+
+    runs.record_run("run1", app="myapp", source="scheduled", status="queued", started_at=100.0)
+    runs.record_run("run1", status="running")
+
+    run = runs.get_run("run1")
+    assert run["status"] == "running"
+    assert run["app"] == "myapp"  # untouched
+
+
+def test_list_runs_orders_by_recency_descending(ddb_env):
+    from agentra.registry import runs
+
+    runs.record_run("run1", app="myapp", source="scheduled", status="completed", started_at=100.0)
+    runs.record_run("run2", app="myapp", source="scheduled", status="completed", started_at=300.0)
+    runs.record_run("run3", app="myapp", source="scheduled", status="completed", started_at=200.0)
+
+    ordered = [r["run_key"] for r in runs.list_runs(limit=10)]
+
+    assert ordered == ["run2", "run3", "run1"]
+
+
+def test_last_run_at_filters_by_app_and_source(ddb_env):
+    from agentra.registry import runs
+
+    runs.record_run("run1", app="myapp", source="scheduled", status="completed", started_at=100.0)
+    runs.record_run("run2", app="myapp", source="on-demand", status="completed", started_at=300.0)
+    runs.record_run("run3", app="otherapp", source="scheduled", status="completed", started_at=500.0)
+
+    assert runs.last_run_at("myapp") == 300.0
+    assert runs.last_run_at("myapp", source="scheduled") == 100.0
+    assert runs.last_run_at("otherapp") == 500.0
+    assert runs.last_run_at("nonexistent") is None
+
+
+def test_reconcile_stale_runs_marks_orphaned_runs_failed(ddb_env):
+    from agentra.registry import runs
+
+    now = time.time()
+    runs.record_run("stale1", app="myapp", source="scheduled", status="running", started_at=now - 7200, updated_at=now - 7200)
+    runs.record_run("fresh1", app="myapp", source="scheduled", status="running", started_at=now - 10, updated_at=now - 10)
+
+    marked = runs.reconcile_stale_runs()
+
+    assert marked == ["stale1"]
+    assert runs.get_run("stale1")["status"] == "failed"
+    assert runs.get_run("fresh1")["status"] == "running"
+
+
+def test_list_waiting_for_human(ddb_env):
+    from agentra.registry import runs
+
+    runs.record_run("run1", app="myapp", source="scheduled", status="waiting_for_human", started_at=100.0)
+    runs.record_run("run2", app="myapp", source="scheduled", status="escalated", started_at=200.0)
+    runs.record_run("run3", app="myapp", source="scheduled", status="completed", started_at=300.0)
+
+    waiting = {r["run_key"] for r in runs.list_waiting_for_human()}
+
+    assert waiting == {"run1", "run2"}
+
+
+def test_reconcile_waiting_for_human_escalates_past_the_deadline(ddb_env):
+    from agentra.registry import runs
+
+    now = time.time()
+    runs.record_run(
+        "run1", app="myapp", source="scheduled", status="waiting_for_human", started_at=now - 100000,
+        human_input={"waiting_since": now - 100000},
+    )
+
+    escalated = runs.reconcile_waiting_for_human()
+
+    assert [r["run_key"] for r in escalated] == ["run1"]
+    assert runs.get_run("run1")["status"] == "escalated"
+
+
+def test_bind_loop_roll_up_and_status(ddb_env):
+    from agentra.registry import loops
+
+    loop_id = loops.bind_loop("myapp", 42, title="A feature", objective="ship it")
+    loop = loops.get_loop(loop_id)
+    assert loop["app"] == "myapp"
+    assert loop["status"] == "active"
+    assert loop["run_count"] == 0
+
+    loops.roll_up_loop(loop_id, "run1", "completed", 0.5)
+    loop = loops.get_loop(loop_id)
+    assert loop["run_count"] == 1
+    assert loop["total_cost_usd"] == 0.5
+    assert loop["last_run_key"] == "run1"
+
+    loops.set_loop_status(loop_id, "shipped")
+    assert loops.get_loop(loop_id)["status"] == "shipped"
+
+
+def test_bind_loop_is_idempotent(ddb_env):
+    from agentra.registry import loops
+
+    loop_id1 = loops.bind_loop("myapp", 42)
+    loops.roll_up_loop(loop_id1, "run1", "completed", 1.0)
+    loop_id2 = loops.bind_loop("myapp", 42)  # same issue -- refresh, not recreate
+
+    assert loop_id1 == loop_id2
+    assert loops.get_loop(loop_id1)["run_count"] == 1  # not reset back to 0
+
+
+def test_get_loop_includes_its_runs_newest_first(ddb_env):
+    from agentra.registry import loops, runs
+
+    loop_id = loops.bind_loop("myapp", 42)
+    runs.record_run("run1", app="myapp", source="scheduled", status="completed", started_at=100.0, loop_id=loop_id)
+    runs.record_run("run2", app="myapp", source="scheduled", status="completed", started_at=200.0, loop_id=loop_id)
+    runs.record_run("run3", app="myapp", source="scheduled", status="completed", started_at=50.0, loop_id="other-loop")
+
+    loop = loops.get_loop(loop_id)
+
+    assert [r["run_key"] for r in loop["runs"]] == ["run2", "run1"]
+
+
+def test_list_loops_filters_by_app_via_the_gsi(ddb_env):
+    from agentra.registry import loops
+
+    loops.bind_loop("myapp", 1)
+    loops.bind_loop("myapp", 2)
+    loops.bind_loop("otherapp", 3)
+
+    mine = loops.list_loops(app="myapp")
+
+    assert {l["loop_id"] for l in mine} == {loops.bind_loop("myapp", 1), loops.bind_loop("myapp", 2)}
+
+
+def test_list_loops_unfiltered_scans_and_sorts_by_recency(ddb_env):
+    from agentra.registry import loops
+
+    loops.bind_loop("myapp", 1)
+    loops.bind_loop("otherapp", 2)
+
+    all_loops = loops.list_loops()
+
+    assert len(all_loops) == 2
+
+
+def test_list_agent_steps_delegates_to_langfuse(ddb_env, monkeypatch):
+    from agentra.registry import runs
+
+    captured = {}
+
+    def fake_list_recent_generations(app=None, limit=100):
+        captured["app"] = app
+        captured["limit"] = limit
+        return [{"app": app, "agent": "implement_feature", "ok": True}]
+
+    monkeypatch.setattr("agentra.langfuse_api.list_recent_generations", fake_list_recent_generations)
+
+    steps = runs.list_agent_steps(app="myapp", limit=50)
+
+    assert captured == {"app": "myapp", "limit": 50}
+    assert steps == [{"app": "myapp", "agent": "implement_feature", "ok": True}]

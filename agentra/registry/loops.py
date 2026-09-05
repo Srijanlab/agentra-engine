@@ -82,12 +82,15 @@ def get_loop(loop_id: str) -> dict | None:
 
 
 def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[dict]:
-    """Stored loop summaries, most recently active first. One indexed query -- no
-    per-run scan (that was the free-tier read blowout)."""
-    if core._db is not None:
-        loops = _cache.get_or_set(f"loops:{limit}", lambda: _stream_loops(limit), ttl=15)
-    else:
-        loops = sorted(_local_loops().values(), key=lambda l: l.get("updated_at", 0), reverse=True)[:limit]
+    """Stored loop summaries, most recently active first. The app-filtered case
+    (the common one -- already tuned once against Firestore quota, hence no
+    per-run scan) is a real indexed Query, not a fetch-then-filter."""
+    if core._ddb is not None:
+        if app is not None:
+            return _cache.get_or_set(f"loops:{app}:{limit}", lambda: _query_loops_by_app(app, limit), ttl=15)
+        return _cache.get_or_set(f"loops:{limit}", lambda: _scan_loops(limit), ttl=15)
+
+    loops = sorted(_local_loops().values(), key=lambda l: l.get("updated_at", 0), reverse=True)[:limit]
     if app is not None:
         loops = [l for l in loops if l.get("app") == app]
     return loops
@@ -95,29 +98,40 @@ def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[d
 
 # --- storage -----------------------------------------------------------------
 
-def _stream_loops(limit: int) -> list[dict]:
-    from google.cloud import firestore
+def _scan_loops(limit: int) -> list[dict]:
+    """Unfiltered case only -- small table, cold path, not worth a GSI."""
+    from agentra.registry import _dynamo
 
-    docs = (
-        core._db.collection("loops")
-        .order_by("updated_at", direction=firestore.Query.DESCENDING)
-        .limit(limit)
-        .stream()
+    items = _dynamo.scan_all(_dynamo.table("loops"))
+    items.sort(key=lambda l: l.get("updated_at", 0), reverse=True)
+    return items[:limit]
+
+
+def _query_loops_by_app(app: str, limit: int) -> list[dict]:
+    from boto3.dynamodb.conditions import Key
+
+    from agentra.registry import _dynamo
+
+    resp = _dynamo.table("loops").query(
+        IndexName="by-app-recency", KeyConditionExpression=Key("app").eq(app), ScanIndexForward=False, Limit=limit
     )
-    return [d.to_dict() for d in docs]
+    return [_dynamo.from_item(i) for i in resp.get("Items", [])]
 
 
 def _get_loop_doc(loop_id: str) -> dict | None:
-    if core._db is not None:
-        snap = core._db.collection("loops").document(loop_id).get()
-        return snap.to_dict() if snap.exists else None
+    if core._ddb is not None:
+        from agentra.registry import _dynamo
+
+        return _dynamo.get_item(_dynamo.table("loops"), {"loop_id": loop_id})
     return _local_loops().get(loop_id)
 
 
 def _write_loop(loop_id: str, fields: dict) -> None:
     _cache.clear()
-    if core._db is not None:
-        core._db.collection("loops").document(loop_id).set(fields, merge=True)
+    if core._ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.merge_update(_dynamo.table("loops"), {"loop_id": loop_id}, fields)
         return
     loops = _local_loops()
     loops.setdefault(loop_id, {}).update(fields)

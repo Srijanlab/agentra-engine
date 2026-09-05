@@ -41,12 +41,7 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def test_deploy_pre_prod_routes_human_input_required_through_record_known_bug(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     async def fake_deploy(*a, **k):
@@ -84,7 +79,6 @@ def test_deploy_pre_prod_routes_human_input_required_through_record_known_bug(tm
 
 
 def test_deploy_pre_prod_human_input_required_does_not_touch_the_failure_counter(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     async def fake_deploy(*a, **k):

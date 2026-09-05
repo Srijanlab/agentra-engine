@@ -44,12 +44,7 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def test_deploy_pre_prod_merges_only_for_a_trivial_change(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
     monkeypatch.setattr(brain.tools.change_risk, "classify_change", lambda *a, **k: "trivial")
 
@@ -83,7 +78,6 @@ def test_skip_verify_merge_stamps_the_issue_tested_not_just_shipped(tmp_path, mo
     itself must advance the issue past status:shipped -- otherwise it sits forever as
     check_backlog's "shipped, pending live testing" #1 priority and every run re-picks it
     (confirmed live: GitHub #130 ground through 5 runs this way)."""
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, code_complete_issue_numbers=["130"])
     monkeypatch.setattr(brain.tools.change_risk, "classify_change", lambda *a, **k: "minor")
 
@@ -102,7 +96,6 @@ def test_skip_verify_merge_stamps_the_issue_tested_not_just_shipped(tmp_path, mo
 
 
 def test_deploy_pre_prod_uses_the_full_strategy_for_a_standard_change(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
     monkeypatch.setattr(brain.tools.change_risk, "classify_change", lambda *a, **k: "standard")
 
@@ -125,7 +118,6 @@ def test_deploy_pre_prod_uses_the_full_strategy_for_a_standard_change(tmp_path, 
 
 
 def test_verify_pre_prod_skips_when_change_was_classified_trivial(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, change_risk="trivial", pre_prod_url=None)
 
     monkeypatch.setattr(
@@ -140,7 +132,6 @@ def test_verify_pre_prod_skips_when_change_was_classified_trivial(tmp_path, monk
 
 
 def test_check_backlog_tells_the_orchestrator_to_work_only_one_item(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
     monkeypatch.setattr(session.mem, "shipped_features", lambda: [])
     monkeypatch.setattr(session.mem, "in_progress_features", lambda: [])
@@ -161,7 +152,6 @@ def test_check_backlog_tells_the_orchestrator_to_work_only_one_item(tmp_path, mo
 
 
 def test_check_backlog_has_no_batching_hint_with_a_single_item(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
     monkeypatch.setattr(session.mem, "shipped_features", lambda: [])
     monkeypatch.setattr(session.mem, "in_progress_features", lambda: [])
