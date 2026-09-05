@@ -959,9 +959,34 @@ async def _deploy_pre_prod_self_hosted_adapter(
     return await deploy_pre_prod_self_hosted(repo, env, feature_branch, run_id)
 
 
+async def _deploy_pre_prod_external(
+    repo: Path, env: EnvironmentConfig, feature_branch: str, run_id: str, session_id: str | None
+) -> AgentResult:
+    """For a code repo with no Vercel/Firebase/self-hosted-VM target agentra can drive
+    directly (e.g. agentra-loop, deployed via its own push-triggered GitHub Actions
+    workflow to AWS): merge the feature branch to pre_prod_branch and push, nothing
+    else. That push is what triggers the repo's own CI/CD -- agentra never invokes a
+    deploy CLI here, unlike the other two strategies."""
+    _sync_branch_to_remote(repo, env.pre_prod_branch)
+    error = _merge_and_push(repo, feature_branch, env.pre_prod_branch)
+    if error:
+        return AgentResult(ok=False, text=error, json_data=None, cost_usd=0.0, turns=0)
+    return AgentResult(
+        ok=True,
+        text=(
+            f"Merged to {env.pre_prod_branch!r} and pushed. This repo's own CI/CD "
+            f"(a GitHub Actions workflow triggered on push to {env.pre_prod_branch!r}) "
+            "handles the actual deploy -- not something agentra drives directly."
+        ),
+        json_data={"status": "external", "preview_url": None},
+        cost_usd=0.0, turns=0,
+    )
+
+
 PRE_PROD_STRATEGIES = {
     "vercel_firebase": _deploy_pre_prod_vercel_firebase,
     "self_hosted_vm": _deploy_pre_prod_self_hosted_adapter,
+    "external": _deploy_pre_prod_external,
 }
 
 
@@ -977,7 +1002,32 @@ async def _promote_prod_self_hosted_adapter(
     return await promote_prod_self_hosted(repo, env, run_id)
 
 
+async def _promote_prod_external(repo: Path, env: EnvironmentConfig, run_id: str, session_id: str | None) -> AgentResult:
+    """Promotion for an "external" repo is only a pre_prod_branch -> prod_branch PR,
+    opened and merged (never a direct push) -- the merge, after any required CI checks
+    on the PR itself, is what triggers that repo's own push-to-prod_branch deploy
+    workflow. See connectors/github_pulls.py."""
+    from agentra.connectors import github_pulls
+    from agentra.registry import repo_url_for_path
+
+    repo_url = repo_url_for_path(repo)
+    if not repo_url:
+        return AgentResult(
+            ok=False, text=f"{repo} has no github.com remote -- cannot open a promotion PR.",
+            json_data=None, cost_usd=0.0, turns=0,
+        )
+    try:
+        status = github_pulls.open_or_merge_promotion_pr(
+            repo_url, env.pre_prod_branch, env.prod_branch,
+            title=f"Promote {env.pre_prod_branch} to {env.prod_branch}",
+        )
+    except Exception as exc:
+        return AgentResult(ok=False, text=f"Promotion PR failed: {exc}", json_data=None, cost_usd=0.0, turns=0)
+    return AgentResult(ok=True, text=status, json_data={"status": "external"}, cost_usd=0.0, turns=0)
+
+
 PROD_STRATEGIES = {
     "vercel_firebase": _promote_prod_vercel_firebase,
     "self_hosted_vm": _promote_prod_self_hosted_adapter,
+    "external": _promote_prod_external,
 }
