@@ -82,7 +82,11 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
     if session.mem.in_progress_features() or _actionable_bugs(session.mem.known_bugs()) or session.mem.feature_queue():
         return None
     # Also check for active feature branches (in-progress work that may not have sub-issues yet)
-    if _has_active_feature_branches(session.repo):
+    # -- for a multi-repo app, feature branches live in the code repos, not the coordination
+    # repo (session.repo), so check every one; empty code_repos means an unregistered app
+    # (CLI/tests), where session.repo is the only repo there is anyway.
+    branch_check_repos = [spec.path for spec in session.code_repos.values() if spec.path] or [session.repo]
+    if any(_has_active_feature_branches(repo) for repo in branch_check_repos):
         return None
     top = opportunities[0]
     feature = (top.get("feature") or "").strip() or "New opportunity"
@@ -94,7 +98,11 @@ def _file_top_opportunity_as_feature_request(session: OrchestratorSession, oppor
     impact, effort = top.get("impact"), top.get("effort")
     if impact or effort:
         body += f"\n\nImpact: {impact or 'unspecified'}, Effort: {effort or 'unspecified'}"
-    return session.mem.record_feature_request(body, source="github", title=feature, extra_labels=[_DISCOVERY_LABEL])
+    extra_labels = [_DISCOVERY_LABEL]
+    target_repo = top.get("repo")
+    if target_repo:
+        extra_labels.append(f"repo:{target_repo}")
+    return session.mem.record_feature_request(body, source="github", title=feature, extra_labels=extra_labels)
 
 
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
@@ -319,31 +327,57 @@ def _file_incidental_findings(mem: Memory, run_id: str, data: dict, source: str)
 def _tools_for(session: OrchestratorSession) -> list:
     @tool(
         "understand_codebase",
-        "Scan the repo and produce the codebase understanding summary. Usually "
-        "NOT needed: if one was already generated in a prior cycle, it's already "
-        "loaded into context below and check_backlog/discover_opportunities/"
-        "implement_feature all work without calling this again. Call it only if "
-        "no summary is shown below (first-ever run for this repo) or you have a "
-        "specific reason to believe it's now significantly out of date.",
+        "Scan the repo (every code repo, for a multi-repo app) and produce the codebase "
+        "understanding summary. Usually NOT needed: if one was already generated in a "
+        "prior cycle, it's already loaded into context below and check_backlog/"
+        "discover_opportunities/implement_feature all work without calling this again. "
+        "Call it only if no summary is shown below (first-ever run for this repo) or you "
+        "have a specific reason to believe it's now significantly out of date.",
         {},
     )
     async def understand_codebase(_args):
         if stop := session.check_hard_stop():
             return stop
-        cb = await codebase.run_cached(session.repo, session.mem)
-        if stop := _check_auth_failure(session, "understand_codebase", cb):
-            return stop
-        session.cost_usd += cb.cost_usd
-        if cb.ok:
-            session.cb_summary = cb.text
+        if not session.code_repos:
+            # Unregistered app (CLI/tests calling run_autonomous_cycle directly against
+            # a bare repo path) -- exactly today's pre-Phase-2 behavior, one scan.
+            cb = await codebase.run_cached(session.repo, session.mem)
+            if stop := _check_auth_failure(session, "understand_codebase", cb):
+                return stop
+            session.cost_usd += cb.cost_usd
+            if cb.ok:
+                session.cb_summary = cb.text
+                session.record_success("understand_codebase")
+            else:
+                session.record_failure("understand_codebase")
+            session.note(f"understand_codebase: ok={cb.ok}", ok=cb.ok, cost_usd=cb.cost_usd, turns=cb.turns)
+            return {
+                "content": [{"type": "text", "text": f"[{'ok' if cb.ok else 'failed'}] {cb.text[:4000]}"}],
+                "is_error": not cb.ok,
+            }
+        # Multi-repo (or a real registered single-repo app, which has exactly one
+        # code_repos entry): scan every code repo -- each is a distinct codebase.
+        multi = len(session.code_repos) > 1
+        any_ok = False
+        parts = []
+        for name, spec in session.code_repos.items():
+            cache_key = f"codebase_{name}" if multi else "codebase"
+            cb = await codebase.run_cached(spec.path, session.mem, cache_key=cache_key)
+            if stop := _check_auth_failure(session, "understand_codebase", cb):
+                return stop
+            session.cost_usd += cb.cost_usd
+            if cb.ok:
+                session.cb_summaries[name] = cb.text
+                any_ok = True
+            parts.append(f"[{name}: {'ok' if cb.ok else 'failed'}] {cb.text[:4000]}")
+        if not multi:
+            session.cb_summary = next(iter(session.cb_summaries.values()), None)
+        if any_ok:
             session.record_success("understand_codebase")
         else:
             session.record_failure("understand_codebase")
-        session.note(f"understand_codebase: ok={cb.ok}", ok=cb.ok, cost_usd=cb.cost_usd, turns=cb.turns)
-        return {
-            "content": [{"type": "text", "text": f"[{'ok' if cb.ok else 'failed'}] {cb.text[:4000]}"}],
-            "is_error": not cb.ok,
-        }
+        session.note(f"understand_codebase: any_ok={any_ok} repos={list(session.code_repos)}", ok=any_ok)
+        return {"content": [{"type": "text", "text": "\n\n".join(parts)}], "is_error": not any_ok}
 
     @tool(
         "check_backlog",
@@ -429,58 +463,77 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def discover_opportunities(_args):
         if stop := session.check_hard_stop():
             return stop
-        if session.cb_summary is None:
+        if session.cb_summary is None and not session.cb_summaries:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
-        disc = await discovery.run(
-            session.repo,
-            session.objective,
-            session.cb_summary,
-            session.analytics_summary,
-            [f["feature"] for f in session.mem.shipped_features()],
-            _actionable_bugs(session.mem.known_bugs()),
-            session.mem.feature_queue(),
+        # One repo (legacy/unregistered) -- exactly today's single call. Several code
+        # repos -- run Discovery Agent once per repo and tag each opportunity with where
+        # it came from, so the repo choice flows straight into implement_feature without
+        # the orchestrating model having to re-derive it.
+        targets = (
+            [(name, spec.path) for name, spec in session.code_repos.items()]
+            if session.code_repos else [(None, session.repo)]
         )
-        if stop := _check_auth_failure(session, "discover_opportunities", disc):
-            return stop
-        session.cost_usd += disc.cost_usd
-        data = disc.json_data or {}
-
-        if data.get("status") == "HUMAN_INPUT_REQUIRED":
-            reason = data.get("reason") or "Discovery Agent flagged this objective as needing a strategic decision outside its authority."
-            question = data.get("question") or ""
-            options = data.get("options") or []
-            diagnosis = reason
-            if question:
-                diagnosis += f"\n\nQuestion for a human: {question}"
-            if options:
-                diagnosis += f"\n\nOptions considered: {options}"
-            # No resume contract for discover_opportunities (out of scope for this
-            _escalate_to_human(
-                session,
-                category="product_direction",
-                diagnosis=diagnosis,
-                question=question or reason,
-                source="discovery-agent-human-input-required",
-                title="Human input required: product direction",
+        shipped = [f["feature"] for f in session.mem.shipped_features()]
+        actionable_bugs = _actionable_bugs(session.mem.known_bugs())
+        feature_queue = session.mem.feature_queue()
+        all_opportunities: list[dict] = []
+        total_cost = 0.0
+        any_ok = False
+        for name, path in targets:
+            cb_summary = session.cb_summaries.get(name) if name else session.cb_summary
+            if cb_summary is None:
+                continue
+            disc = await discovery.run(
+                path, session.objective, cb_summary, session.analytics_summary,
+                shipped, actionable_bugs, feature_queue,
             )
-            session.note(f"discover_opportunities: human input required -- {reason[:200]}", ok=None)
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human) and notified via "
-                    "Slack (if configured); this run is now waiting_for_human.",
-                }],
-                "is_error": True,
-            }
+            if stop := _check_auth_failure(session, "discover_opportunities", disc):
+                return stop
+            total_cost += disc.cost_usd
+            data = disc.json_data or {}
 
-        opportunities = rank(data.get("opportunities", []))
+            if data.get("status") == "HUMAN_INPUT_REQUIRED":
+                reason = data.get("reason") or "Discovery Agent flagged this objective as needing a strategic decision outside its authority."
+                question = data.get("question") or ""
+                options = data.get("options") or []
+                diagnosis = reason
+                if question:
+                    diagnosis += f"\n\nQuestion for a human: {question}"
+                if options:
+                    diagnosis += f"\n\nOptions considered: {options}"
+                # No resume contract for discover_opportunities (out of scope for this
+                _escalate_to_human(
+                    session,
+                    category="product_direction",
+                    diagnosis=diagnosis,
+                    question=question or reason,
+                    source="discovery-agent-human-input-required",
+                    title="Human input required: product direction",
+                )
+                session.note(f"discover_opportunities: human input required -- {reason[:200]}", ok=None)
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": f"Escalated to a human: {reason} Filed as a GitHub issue (needs_human) and notified via "
+                        "Slack (if configured); this run is now waiting_for_human.",
+                    }],
+                    "is_error": True,
+                }
+
+            any_ok = any_ok or disc.ok
+            for opp in data.get("opportunities", []):
+                if name:
+                    opp["repo"] = name
+                all_opportunities.append(opp)
+
+        session.cost_usd += total_cost
+        opportunities = rank(all_opportunities)
         session.note(
             f"discover_opportunities: {len(opportunities)} candidates",
-            ok=disc.ok and bool(opportunities),
-            cost_usd=disc.cost_usd,
-            turns=disc.turns,
+            ok=any_ok and bool(opportunities),
+            cost_usd=total_cost,
         )
-        if not disc.ok or not opportunities:
+        if not any_ok or not opportunities:
             session.record_failure("discover_opportunities")
             return {"content": [{"type": "text", "text": "Discovery failed to produce opportunities."}], "is_error": True}
         session.record_success("discover_opportunities")
@@ -514,7 +567,7 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def assess_design_impact(args):
         if stop := session.check_hard_stop():
             return stop
-        if session.cb_summary is None:
+        if session.cb_summary is None and not session.cb_summaries:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         brief = args.get("feature_brief", "")
         if brief:
@@ -548,7 +601,7 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def implement_feature(args):
         if stop := session.check_hard_stop():
             return stop
-        if session.cb_summary is None:
+        if session.cb_summary is None and not session.cb_summaries:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         brief = args["feature_brief"]
         session.current_feature = brief
@@ -889,7 +942,7 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def run_local_tests(_args):
         if stop := session.check_hard_stop():
             return stop
-        if session.cb_summary is None:
+        if session.cb_summary is None and not session.cb_summaries:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
         test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
         if stop := _check_auth_failure(session, "run_local_tests", test):

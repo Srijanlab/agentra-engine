@@ -61,7 +61,7 @@ async def run_design_review(
     is a tool-result dict the caller should return immediately on an auth failure, review is the
     raw agent result (None only when stop is set). check_auth_failure is injected (rather than
     imported) to avoid a circular import with tools.py, which owns it."""
-    review = await architecture_review.run(session.repo, session.objective, feature_brief, session.cb_summary)
+    review = await architecture_review.run(session.active_repo_path, session.objective, feature_brief, session.cb_summary)
     if stop := check_auth_failure(session, "assess_design_impact", review):
         return stop, None
     session.cost_usd += review.cost_usd
