@@ -153,6 +153,14 @@ def dynamodb_resource():
     return _ddb
 
 
+def cloud_mode() -> bool:
+    """True on the engine (Vercel, no persistent disk), regardless of which
+    backend serves the registry -- during the Firestore->DynamoDB migration
+    both `_db` and `_ddb` may be configured at once, and this must stay true
+    either way. False everywhere else (CLI, tests, the loop's own process)."""
+    return _db is not None or _ddb is not None
+
+
 def _local_apps() -> dict[str, dict]:
     if not APPS_PATH.exists():
         return {}
@@ -164,11 +172,16 @@ def _local_save_apps(apps: dict[str, dict]) -> None:
     APPS_PATH.write_text(json.dumps(apps, indent=2))
 
 
+def _scan_apps() -> dict[str, dict]:
+    from agentra.registry import _dynamo
+
+    items = _dynamo.scan_all(_dynamo.table("apps"))
+    return {item["name"]: {k: v for k, v in item.items() if k != "name"} for item in items}
+
+
 def list_apps() -> dict[str, dict]:
-    if _db is not None:
-        return _cache.get_or_set(
-            "apps", lambda: {doc.id: doc.to_dict() for doc in _db.collection("apps").stream()}, ttl=20
-        )
+    if _ddb is not None:
+        return _cache.get_or_set("apps", _scan_apps, ttl=20)
     return _local_apps()
 
 
@@ -193,8 +206,10 @@ def register_app(
             entry["branch"] = branch
 
     _cache.drop("apps")
-    if _db is not None:
-        _db.collection("apps").document(name).set(entry)
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(_dynamo.table("apps"), {"name": name, **entry})
         return
 
     apps = _local_apps()
@@ -206,11 +221,13 @@ def register_app(
 
 def remove_app(name: str) -> bool:
     _cache.drop("apps")
-    if _db is not None:
-        doc_ref = _db.collection("apps").document(name)
-        if not doc_ref.get().exists:
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        tbl = _dynamo.table("apps")
+        if _dynamo.get_item(tbl, {"name": name}) is None:
             return False
-        doc_ref.delete()
+        tbl.delete_item(Key={"name": name})
         return True
 
     apps = _local_apps()
@@ -223,12 +240,14 @@ def remove_app(name: str) -> bool:
 
 def set_slack_channel(name: str, channel_id: str | None) -> None:
     """Per-app Slack channel override for notify_shipped/notify_human_input_required, stored
-    directly on the app's registry entry (Firestore apps/{name}, or the local apps.json
-    fallback) -- distinct from EnvironmentConfig (GitHub Variables) and Memory (git-committed
-    notes), since this is registry-level routing config, not deploy or app-content config."""
+    directly on the app's registry entry (the apps table, or the local apps.json fallback)
+    -- distinct from EnvironmentConfig (GitHub Variables) and Memory (git-committed notes),
+    since this is registry-level routing config, not deploy or app-content config."""
     _cache.drop("apps")
-    if _db is not None:
-        _db.collection("apps").document(name).set({"slack_channel_id": channel_id}, merge=True)
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.merge_update(_dynamo.table("apps"), {"name": name}, {"slack_channel_id": channel_id})
         return
     apps = _local_apps()
     if name in apps:
@@ -343,8 +362,9 @@ def _repo_specs(app_name: str, entry: dict) -> list[RepoSpec]:
 def _resolve_repo(repo_url: str | None, branch: str, stored_path: Path, clone_dest: Path) -> Path | None:
     """Ensure one repo's checkout exists on this host and return its path -- cloning
     to `clone_dest` if the stored path isn't here, resyncing if stale. Cloud mode
-    (Firestore-backed, no persistent disk) just returns the stored path unresolved."""
-    if _db is not None:
+    (the engine, Vercel -- no persistent disk regardless of which backend serves
+    the registry) just returns the stored path unresolved."""
+    if _db is not None or _ddb is not None:
         return stored_path
     if stored_path.exists() and repo_url:
         _sync_if_stale(stored_path, repo_url, branch)
