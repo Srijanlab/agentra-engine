@@ -45,8 +45,8 @@ def _paused_response(source: str) -> dict:
 
 
 def _app_branch(app_name: str) -> str:
-    app = registry.list_apps().get(app_name)
-    return app.get("branch") or "main" if app else "main"
+    coord = registry.get_coordination_repo(app_name)
+    return coord.branch if coord else "main"
 
 
 def _chat_agent_label(agent_id: str) -> str:

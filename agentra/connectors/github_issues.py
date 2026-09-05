@@ -322,11 +322,11 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
 
 
 _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
-    "agentra": ("5319e7", "Created by agentra, or for agentra to work on -- everything agentra's dashboard/backlog reads is filtered to this"),
+    "agentra": ("5319e7", "Required on every tracked issue -- the backlog GraphQL filter looks for this label"),
     "bug": ("d73a4a", "Something isn't working"),
     "feature": ("a2eeef", "A whole feature -- may have multiple 'story' sub-issues"),
     "story": ("c5def5", "One part of a multi-part feature"),
-    "discovery": ("0052cc", "Self-originated by the Product Discovery Agent when the backlog was empty, not customer/dashboard-submitted"),
+    "discovery": ("0052cc", "Self-originated by Discovery when the backlog was empty, not customer/dashboard-submitted"),
     "need_human": ("fbca04", "Needs a human decision or action -- agentra should not attempt this"),
     "blocking_agentra": ("b60205", "Blocks agentra's own further progress until a human resolves it"),
     "status:in-progress": ("fef2c0", "Real work has started -- see In-Progress-Branch comment for where"),
@@ -353,8 +353,11 @@ def ensure_labels(repo_url: str) -> None:
             json={"name": name, "color": color, "description": description},
             timeout=15,
         )
-        if create_resp.status_code != 422:  # 422 = already exists from a concurrent create
-            create_resp.raise_for_status()
+        if create_resp.status_code == 422 and any(
+            e.get("code") == "already_exists" for e in create_resp.json().get("errors", [])
+        ):
+            continue  # a concurrent create won the race
+        create_resp.raise_for_status()
 
 
 def add_labels(repo_url: str, issue_number: int, labels: list[str]) -> None:
