@@ -43,6 +43,10 @@ class AlarmTrigger(BaseModel):
     objective: str | None = None
 
 
+class PromoteTrigger(BaseModel):
+    target_repo: str | None = None
+
+
 def _branch_head_sha(repo: Path, branch: str) -> str | None:
     try:
         result = subprocess.run(
@@ -57,17 +61,23 @@ def _branch_head_sha(repo: Path, branch: str) -> str | None:
     return sha or None
 
 
-def _record_production_release(repo: Path, run_id: str) -> list[str]:
+def _record_production_release(repo: Path, run_id: str, code_repo: Path | None = None) -> list[str]:
+    """`repo` is always the coordination repo -- Memory (the released.json ledger,
+    status:done labels) always operates there. `code_repo` is the repo that was actually
+    promoted (defaults to `repo`, i.e. a legacy single-repo app where they're the same);
+    its own prod_branch is what actually moved, and what persist_audit_trail's dirty-check
+    against `repo` needs to be told about is `repo`'s own branch, not code_repo's."""
     from agentra.agents import deployment
 
-    env = environments.load(repo) or environments.EnvironmentConfig()
+    code_repo = code_repo or repo
+    env = environments.load(code_repo) or environments.EnvironmentConfig()
     mem = Memory(repo)
     prod_sha = sys.modules.get("agentra.server", None)
     if prod_sha is not None:
         _sha_fn = getattr(prod_sha, "_branch_head_sha", _branch_head_sha)
     else:
         _sha_fn = _branch_head_sha
-    prod_sha = _sha_fn(repo, env.prod_branch)
+    prod_sha = _sha_fn(code_repo, env.prod_branch)
     newly_released: list[str] = []
 
     for feature in mem.pending_promotion_features():
@@ -88,7 +98,8 @@ def _record_production_release(repo: Path, run_id: str) -> list[str]:
             mem.mark_status_done(int(bug["external_id"]))
 
     if newly_released:
-        persist_error = deployment.persist_audit_trail(repo, env.prod_branch)
+        coord_env = environments.load(repo) or environments.EnvironmentConfig()
+        persist_error = deployment.persist_audit_trail(repo, coord_env.prod_branch)
         if persist_error:
             _server_log("promote", f"release ledger persisted locally but push failed: {persist_error}")
     return newly_released
@@ -176,17 +187,17 @@ async def _run_prod_debug_background(
             _server_log("alarm", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
-async def _run_promote_background(run_key: str, app_name: str, repo: Path) -> None:
+async def _run_promote_background(run_key: str, app_name: str, repo: Path, code_repo: Path | None = None) -> None:
     from agentra.agents import deployment
 
     lock = _lock_for(app_name)
     async with lock:
         _set_run(run_key, status="running")
         try:
-            result = await run_promote(repo, run_id=run_key)
+            result = await run_promote(repo, run_id=run_key, code_repo=code_repo)
             released_features: list[str] = []
             if result["ok"]:
-                released_features = _record_production_release(repo, run_key)
+                released_features = _record_production_release(repo, run_key, code_repo=code_repo)
             _set_run(
                 run_key,
                 status="completed" if result["ok"] else "failed",
@@ -358,7 +369,7 @@ async def run_app_now(app_name: str, payload: ScheduledTrigger | None = None) ->
 
 
 @router.post("/apps/{app_name}/promote")
-async def promote_app(app_name: str) -> dict:
+async def promote_app(app_name: str, payload: PromoteTrigger | None = None) -> dict:
     if app_name not in registry.list_apps():
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
     if registry.is_paused():
@@ -368,14 +379,37 @@ async def promote_app(app_name: str) -> dict:
     if repo is None:
         raise HTTPException(status_code=409, detail=f"local checkout for {app_name!r} is missing and could not be recovered")
 
+    code_repos = registry.get_code_repos(app_name)
+    target_repo = (payload or PromoteTrigger()).target_repo
+    code_repo: Path | None = None
+    if code_repos:
+        if not target_repo and len(code_repos) == 1:
+            target_repo = next(iter(code_repos))
+        if not target_repo:
+            raise HTTPException(
+                status_code=400,
+                detail=f"app {app_name!r} has multiple code repos ({', '.join(code_repos)}) -- set target_repo.",
+            )
+        if target_repo not in code_repos:
+            raise HTTPException(
+                status_code=400,
+                detail=f"target_repo={target_repo!r} is not one of {app_name!r}'s code repos: {', '.join(code_repos)}.",
+            )
+        code_repo = code_repos[target_repo].path
+        if code_repo is None:
+            raise HTTPException(status_code=409, detail=f"local checkout for {app_name!r}'s {target_repo!r} repo is missing and could not be recovered")
+
     if _lock_for(app_name).locked():
         _server_log("promote", f"app={app_name!r} already has a cycle running -- skipped")
         return {"triggered": False, "reason": "a cycle for this app is already running"}
 
     objective = Memory(repo).get_objective() or ""
     run_key = _new_run_key(app_name, "promote", objective)
-    _server_log("promote", f"app={app_name!r} run_key={run_key} -- promotion to prod dispatched")
-    asyncio.create_task(_run_promote_background(run_key, app_name, repo))
+    _server_log(
+        "promote",
+        f"app={app_name!r} run_key={run_key} target_repo={target_repo!r} -- promotion to prod dispatched",
+    )
+    asyncio.create_task(_run_promote_background(run_key, app_name, repo, code_repo=code_repo))
     return {"triggered": True, "run_key": run_key}
 
 

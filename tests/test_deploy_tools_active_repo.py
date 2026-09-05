@@ -90,6 +90,37 @@ def test_deploy_pre_prod_trivial_merge_uses_the_active_repo(tmp_path, monkeypatc
     assert captured["repo"] == session.code_repos["ui"].path
 
 
+def test_deploy_pre_prod_external_strategy_skips_verify_pre_prod_entirely(tmp_path, monkeypatch):
+    """The "external" strategy never produces a preview_url (the repo's own CI/CD deploys
+    asynchronously, on infra agentra has no live URL for) -- verify_pre_prod would refuse
+    forever ("no live URL to verify yet") if deploy_pre_prod didn't treat a successful
+    external deploy as the terminal pre-prod confirmation itself, same as the change-risk
+    skip path."""
+    _patch_registry(monkeypatch)
+    session = _multi_repo_session(tmp_path)
+    session.env.deploy_strategy = "external"
+    session.tests_passed = True
+    monkeypatch.setattr(brain.tools.change_risk, "classify_change", lambda repo, *a, **k: "standard")
+
+    async def fake_external_strategy(repo, env, feature_branch, run_id, session_id):
+        return AgentResult(
+            ok=True, text="merged, external CI/CD handles the deploy",
+            json_data={"status": "external", "preview_url": None}, cost_usd=0.0, turns=0,
+        )
+
+    monkeypatch.setattr(brain.deployment, "PRE_PROD_STRATEGIES", {"external": fake_external_strategy})
+
+    deploy_result = asyncio.run(_tool(session, "deploy_pre_prod").handler({}))
+
+    assert deploy_result.get("is_error") is not True
+    assert "No verify_pre_prod call needed" in deploy_result["content"][0]["text"]
+    assert session.pre_prod_verified is True
+    assert session.pre_prod_url is None
+
+    verify_result = asyncio.run(_tool(session, "verify_pre_prod").handler({}))
+    assert verify_result.get("is_error") is not True  # would refuse ("no live URL") without the fix
+
+
 def test_verify_pre_prod_uses_the_active_repo(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _multi_repo_session(tmp_path)

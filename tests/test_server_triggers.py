@@ -369,7 +369,7 @@ def test_promote_background_triggers_teardown_only_after_the_status_write_lands_
     run_key = "promote-run-92"
     events: list[str] = []
 
-    def _slow_record_production_release(_repo, _run_id):
+    def _slow_record_production_release(_repo, _run_id, code_repo=None):
         # Stands in for many pending features/bugs, each needing its own GitHub API call.
         events.append("release_bookkeeping_ran")
         return ["Feature A", "Feature B", "Feature C"]
