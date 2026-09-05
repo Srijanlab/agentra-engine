@@ -984,7 +984,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         if session.cb_summary is None and not session.cb_summaries:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
-        test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+        test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
         if stop := _check_auth_failure(session, "run_local_tests", test):
             return stop
         session.cost_usd += test.cost_usd
@@ -1008,7 +1008,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                     "retrying the test run instead of dispatching a bogus fix",
                     ok=False, cost_usd=test.cost_usd, turns=test.turns,
                 )
-                test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+                test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
                 if stop := _check_auth_failure(session, "run_local_tests", test):
                     return stop
                 session.cost_usd += test.cost_usd
@@ -1018,7 +1018,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                 continue
             failing = data.get("failed_tests") or [test.text[:1000]]
             fix = await implementation.run(
-                session.repo,
+                session.active_repo_path,
                 session.objective,
                 f"Fix the currently failing local tests: {failing}. "
                 "Do not change unrelated code or tests that are already passing.",
@@ -1042,7 +1042,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             )
             if not fix.ok:
                 break
-            test = await testing.run_local(session.repo, session.cb_summary, session.mem, session_id=session.session_id)
+            test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
             if stop := _check_auth_failure(session, "run_local_tests", test):
                 return stop
             session.cost_usd += test.cost_usd
@@ -1102,18 +1102,18 @@ def _tools_for(session: OrchestratorSession) -> list:
         from agentra.agents.git_ops import fetch_ref
 
         try:
-            fetch_ref(session.repo, session.env.pre_prod_branch)
+            fetch_ref(session.active_repo_path, session.env.pre_prod_branch)
         except Exception:
             pass  # best-effort -- classify_change falls back to STANDARD if the diff can't be read
         is_bug_fix = bool(session.code_complete_issue_numbers) and session.all_code_complete_are_bugfixes
         session.change_risk = change_risk.classify_change(
-            session.repo, f"origin/{session.env.pre_prod_branch}", session.feature_branch,
+            session.active_repo_path, f"origin/{session.env.pre_prod_branch}", session.feature_branch,
             is_bug_fix=is_bug_fix,
         )
         session.note(f"deploy_pre_prod: change_risk={session.change_risk}", ok=True)
 
         if session.change_risk in change_risk.SKIP_PRE_PROD:
-            deploy = await deployment.merge_to_pre_prod_only(session.repo, session.env, session.feature_branch)
+            deploy = await deployment.merge_to_pre_prod_only(session.active_repo_path, session.env, session.feature_branch)
             if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
                 return stop
             session.deploy_attempted = True
@@ -1156,7 +1156,7 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         strategy = deployment.PRE_PROD_STRATEGIES[session.env.deploy_strategy]
         deploy = await strategy(
-            session.repo, session.env, session.feature_branch, session.run_id, session.session_id
+            session.active_repo_path, session.env, session.feature_branch, session.run_id, session.session_id
         )
         if stop := _check_auth_failure(session, "deploy_pre_prod", deploy):
             return stop
@@ -1234,7 +1234,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         spec_for_verification = session.current_spec or session.cb_summary or "No spec available."
         criteria = (session.current_spec_dict or {}).get("acceptance_criteria")
         test = await testing.run_pre_prod(
-            session.repo, spec_for_verification, session.pre_prod_url, session.run_id,
+            session.active_repo_path, spec_for_verification, session.pre_prod_url, session.run_id,
             session_id=session.session_id, acceptance_criteria=criteria,
         )
         if stop := _check_auth_failure(session, "verify_pre_prod", test):
@@ -1264,7 +1264,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             _notify_shipped_pending(session, verification_result)
         if session.env.deploy_strategy == "self_hosted_vm":
             # Single-shot, ephemeral sibling -- tear it down once its report is
-            deployment.teardown_self_hosted_preprod(session.repo, session.run_id)
+            deployment.teardown_self_hosted_preprod(session.active_repo_path, session.run_id)
         return {
             "content": [{"type": "text", "text": f"Live verification {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],
             "is_error": not passed,
@@ -1279,7 +1279,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := session.check_hard_stop():
             return stop
         feature = session.current_feature or "unknown feature"
-        fb = await feedback.run(session.repo, session.objective, feature, session_id=session.session_id)
+        fb = await feedback.run(session.active_repo_path, session.objective, feature, session_id=session.session_id)
         if stop := _check_auth_failure(session, "assess_feedback", fb):
             return stop
         session.cost_usd += fb.cost_usd
@@ -1318,7 +1318,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             system_prompt=args["system_prompt"],
             allowed_tools=requested,
         )
-        result = await spawn_generic(session.repo, spec, mem=session.mem, run_id=session.run_id)
+        result = await spawn_generic(session.active_repo_path, spec, mem=session.mem, run_id=session.run_id)
         if stop := _check_auth_failure(session, "spawn_custom_agent", result):
             return stop
         session.cost_usd += result.cost_usd
