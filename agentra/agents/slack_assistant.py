@@ -14,7 +14,7 @@ from agentra.server.utils import _server_log
 
 logger = logging.getLogger(__name__)
 
-_AGENTRA_REPO_URL = "https://github.com/Srijanlab/srijanlab-agentra.git"
+_AGENTRA_APP_NAME = "agentra"
 _MAX_TURNS = 24
 
 
@@ -23,12 +23,10 @@ def _api_base() -> str:
 
 
 def _agentra_repo() -> Path | None:
-    for name, entry in registry.list_apps().items():
-        if entry.get("repo_url") == _AGENTRA_REPO_URL:
-            repo = registry.get_app_repo(name)
-            if repo is not None:
-                return repo
-    return None
+    # The app name is the durable handle -- stable whether agentra is a single
+    # repo or (post multi-repo split) a coordination repo + N code repos.
+    spec = registry.get_coordination_repo(_AGENTRA_APP_NAME)
+    return spec.path if spec else None
 
 
 def _system_prompt(slack_user_id: str | None = None) -> str:

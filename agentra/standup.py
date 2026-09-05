@@ -248,12 +248,12 @@ async def run_daily_standup(apps: dict[str, dict]) -> dict[str, str]:
     from agentra import registry
 
     reports: dict[str, str] = {}
-    for name, info in apps.items():
-        repo = Path(info["repo_path"])
-        if not repo.is_dir():
-            reports[name] = f"(skipped: repo path {repo} does not exist)"
+    for name in apps:
+        coord = registry.get_coordination_repo(name)
+        if coord is None or coord.path is None or not coord.path.is_dir():
+            reports[name] = f"(skipped: repo path for {name!r} is missing)"
             continue
-        reports[name] = await run_standup(repo, name)
+        reports[name] = await run_standup(coord.path, name)
         # record_standup() (inside run_standup) only writes to this
-        registry.persist_agentra_dir(repo, info.get("branch") or "main", f"agentra: daily standup for {name!r}")
+        registry.persist_agentra_dir(coord.path, coord.branch, f"agentra: daily standup for {name!r}")
     return reports

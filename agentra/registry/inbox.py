@@ -22,6 +22,27 @@ class DispatchSummary:
     errors: list[str]
 
 
+def _coord_repo_path(app: str, info: dict) -> Path:
+    """The coordination repo's stored path (unresolved, not cloned -- same as the
+    legacy info["repo_path"] this replaces) -- a multi-repo app entry has no
+    top-level repo_path."""
+    if "repos" not in info:
+        return Path(info["repo_path"])
+    for spec in core._repo_specs(app, info):
+        if spec.role == "coordination":
+            return spec.path
+    raise KeyError(f"app {app!r} has no coordination repo")
+
+
+def _coord_branch(app: str, info: dict) -> str:
+    if "repos" not in info:
+        return info.get("branch") or "main"
+    for spec in core._repo_specs(app, info):
+        if spec.role == "coordination":
+            return spec.branch
+    return "main"
+
+
 def submit_request(
     app: str,
     request_type: str,
@@ -109,7 +130,7 @@ def _local_dispatch_once() -> DispatchSummary:
     errors: list[str] = []
 
     for app, info in core.list_apps().items():
-        repo = Path(info["repo_path"])
+        repo = _coord_repo_path(app, info)
         resumed_total += _local_resume_stale_processing(app)
 
         pending_dir = core.INBOX_ROOT / app / "pending"
@@ -140,7 +161,7 @@ def _local_dispatch_once() -> DispatchSummary:
             applied_any = True
 
         if applied_any:
-            error = core.persist_agentra_dir(repo, info.get("branch") or "main", f"agentra: absorb inbox requests for {app!r}")
+            error = core.persist_agentra_dir(repo, _coord_branch(app, info), f"agentra: absorb inbox requests for {app!r}")
             if error:
                 errors.append(f"{app}: applied locally but failed to push .agentra/: {error}")
 
@@ -172,7 +193,7 @@ def _firestore_dispatch_once() -> DispatchSummary:
     now = time.time()
 
     for app, info in core.list_apps().items():
-        repo = Path(info["repo_path"])
+        repo = _coord_repo_path(app, info)
         requests_ref = core._db.collection("apps").document(app).collection("requests")
 
         for doc in requests_ref.where(filter=FieldFilter("status", "==", "processing")).stream():
@@ -196,7 +217,7 @@ def _firestore_dispatch_once() -> DispatchSummary:
             applied_any = True
 
         if applied_any:
-            error = core.persist_agentra_dir(repo, info.get("branch") or "main", f"agentra: absorb inbox requests for {app!r}")
+            error = core.persist_agentra_dir(repo, _coord_branch(app, info), f"agentra: absorb inbox requests for {app!r}")
             if error:
                 errors.append(f"{app}: applied locally but failed to push .agentra/: {error}")
 

@@ -17,9 +17,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class RegisterAppPayload(BaseModel):
+class RepoEntryPayload(BaseModel):
     name: str
     repo_url: str
+    branch: str = "main"
+    role: str = "code"
+    deploy_strategy: str | None = None
+
+
+class RegisterAppPayload(BaseModel):
+    name: str
+    repo_url: str | None = None
     branch: str = "main"
     objective: str | None = None
     vercel: bool | None = None
@@ -30,6 +38,7 @@ class RegisterAppPayload(BaseModel):
     schedule_hours: float | None = None
     alarm_enabled: bool | None = None
     slack_channel_id: str | None = None
+    repos: list[RepoEntryPayload] | None = None
 
 
 class UpdateAppPayload(BaseModel):
@@ -96,6 +105,18 @@ def _apply_app_config(
         return str(exc)
 
 
+def _coord_view(name: str, info: dict) -> dict:
+    """{"repo_path", "repo_url", "branch"} sourced from the coordination repo --
+    a legacy single-repo entry has these at the top level already; a multi-repo
+    entry ({"repos": [...]}) has none, so resolve its coordination repo instead."""
+    if "repos" not in info:
+        return {"repo_path": info.get("repo_path"), "repo_url": info.get("repo_url"), "branch": info.get("branch")}
+    spec = registry.get_coordination_repo(name)
+    if spec is None:
+        return {"repo_path": None, "repo_url": None, "branch": None}
+    return {"repo_path": str(spec.path) if spec.path else None, "repo_url": spec.repo_url, "branch": spec.branch}
+
+
 async def _app_digest(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
     try:
         return await _app_digest_inner(name, info, github_data)
@@ -113,11 +134,12 @@ async def _app_digest(name: str, info: dict, github_data: dict | None = None) ->
 
 
 async def _app_digest_inner(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
-    repo = Path(info["repo_path"])
-    if not repo.exists() and not info.get("repo_url"):
+    view = _coord_view(name, info)
+    repo = Path(view["repo_path"]) if view["repo_path"] else None
+    if (repo is None or not repo.exists()) and not view["repo_url"]:
         defaults = environments.EnvironmentConfig()
         return name, {
-            "repo_path": info["repo_path"],
+            "repo_path": view["repo_path"],
             "objective": None,
             "shipped_count": 0,
             "released_count": 0,
@@ -154,7 +176,7 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
         known_bugs = len(bugs)
 
     return name, {
-        "repo_path": info["repo_path"],
+        "repo_path": view["repo_path"],
         "objective": mem.get_objective(),
         "shipped_count": shipped_count,
         "released_count": released_count,
@@ -176,9 +198,9 @@ async def list_apps() -> dict:
 
     apps = registry.list_apps()
 
-    repo_url_map: dict[str, str] = {}  # name -> repo_url
+    repo_url_map: dict[str, str] = {}  # name -> coordination repo_url
     for name, info in apps.items():
-        url = info.get("repo_url")
+        url = _coord_view(name, info)["repo_url"]
         if url and owner_repo_from_url(url):
             repo_url_map[name] = url
 
@@ -204,10 +226,76 @@ async def list_apps() -> dict:
 
 
 
+async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
+    """A multi-repo app: N code repos plus exactly one coordination repo (issues,
+    .agentra/memory, objective -- no deployable code). Each code repo's own deploy
+    config (vercel/firebase/branches/ci_cd_on_push) lives in that repo's own GitHub
+    Actions Variables, read later by the cycle -- this call only sets app-level
+    config (objective, schedule) on the coordination repo."""
+    coord = next((r for r in payload.repos if r.role == "coordination"), None)
+    if coord is None:
+        raise HTTPException(status_code=400, detail="repos must include exactly one entry with role='coordination'")
+
+    coord_dest = registry.REPOS_ROOT / payload.name / coord.name
+    if registry._db is None:
+        from agentra.agents.git_ops import GitOpError, clone_repo
+
+        for r in payload.repos:
+            repo_dest = registry.REPOS_ROOT / payload.name / r.name
+            try:
+                clone_repo(r.repo_url, repo_dest, branch=r.branch)
+            except GitOpError as exc:
+                _server_log("register", f"app={payload.name!r} repo={r.name!r} clone failed: {exc}")
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    registry.register_app(payload.name, repos=[r.model_dump() for r in payload.repos])
+    if payload.slack_channel_id is not None:
+        registry.set_slack_channel(payload.name, payload.slack_channel_id)
+
+    try:
+        from agentra.connectors import github_issues
+
+        github_issues.ensure_labels(coord.repo_url)
+    except Exception as exc:
+        _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
+
+    push_warning = _apply_app_config(
+        coord_dest,
+        coord.branch,
+        objective=payload.objective,
+        vercel=None,
+        firebase=None,
+        ci_cd_on_push=None,
+        pre_prod_branch=None,
+        prod_branch=None,
+        schedule_hours=payload.schedule_hours,
+        alarm_enabled=payload.alarm_enabled,
+        detect_defaults=False,
+        commit_message="agentra: register multi-repo app (objective/schedule)",
+    )
+    if push_warning:
+        _server_log("register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {push_warning}")
+
+    _server_log(
+        "register",
+        f"app={payload.name!r} repos={[r.name for r in payload.repos]!r} coordination={coord.name!r} -- registered",
+    )
+    result = {"registered": True, "name": payload.name, "repos": [r.model_dump() for r in payload.repos]}
+    if push_warning:
+        result["warning"] = f"registered, but could not push .agentra/ to the remote: {push_warning}"
+    return result
+
+
 @router.post("/apps")
 async def register_app(payload: RegisterAppPayload) -> dict:
     if payload.name in registry.list_apps():
         raise HTTPException(status_code=409, detail=f"app {payload.name!r} already registered")
+
+    if payload.repos:
+        return await _register_multi_repo_app(payload)
+
+    if not payload.repo_url:
+        raise HTTPException(status_code=400, detail="repo_url is required (or pass repos= for a multi-repo app)")
 
     dest = registry.REPOS_ROOT / payload.name
     if registry._db is None:
@@ -256,6 +344,14 @@ async def register_app(payload: RegisterAppPayload) -> dict:
     return result
 
 
+@router.delete("/apps/{name}")
+async def delete_app(name: str) -> dict:
+    if not registry.remove_app(name):
+        raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
+    _server_log("register", f"app={name!r} -- removed")
+    return {"removed": True, "name": name}
+
+
 @router.get("/apps/{name}")
 async def get_app(name: str) -> dict:
     apps = registry.list_apps()
@@ -274,7 +370,7 @@ async def _build_app_detail(name: str, info: dict) -> dict:
 
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
-    repo_url = info.get("repo_url")
+    view = _coord_view(name, info)
 
     shipped, released, bugs, closed_bugs, queue, in_progress = await asyncio.gather(
         asyncio.to_thread(mem.shipped_features),
@@ -288,8 +384,9 @@ async def _build_app_detail(name: str, info: dict) -> dict:
     return {
         "name": name,
         "repo_path": str(repo),
-        "repo_url": repo_url,
-        "branch": info.get("branch"),
+        "repo_url": view["repo_url"],
+        "branch": view["branch"],
+        "repos": info.get("repos"),
         "objective": mem.get_objective(),
         "shipped_count": len(shipped),
         "released_count": len(released),
