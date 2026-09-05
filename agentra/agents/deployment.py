@@ -212,6 +212,21 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
     if not status.stdout.strip():
         return None
 
+    # The requested branch may not exist on the remote -- a multi-repo app's coordination
+    # repo has no pre-prod/prod split (env.pre_prod_branch defaults to "beta"), its
+    # .agentra/memory just lives on its default branch. Fall back to whatever's checked
+    # out rather than failing the whole persist on a missing ref.
+    if subprocess.run(
+        ["git", "-C", str(repo), "ls-remote", "--exit-code", "--heads", "origin", branch],
+        capture_output=True, text=True,
+    ).returncode != 0:
+        current = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if current and current != "HEAD":
+            branch = current
+
     try:
         subprocess.run(["git", "-C", str(repo), "add", ".agentra/"], check=True, capture_output=True, text=True)
         subprocess.run(
