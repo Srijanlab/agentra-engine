@@ -64,9 +64,9 @@ def _current_head_sha(repo: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-async def run_cached(repo: Path, mem: Memory) -> AgentResult:
-    """Like run(), but skips the (real, multi-turn) LLM scan whenever a cached summary already exists at all -- only runs a real scan the first time, when architecture/codebase.md doesn't exist yet."""
-    cached_text = mem.read("architecture", "codebase")
+async def run_cached(repo: Path, mem: Memory, cache_key: str = "codebase") -> AgentResult:
+    """Like run(), but skips the (real, multi-turn) LLM scan whenever a cached summary already exists at all -- only runs a real scan the first time, when architecture/<cache_key>.md doesn't exist yet. cache_key namespaces the cache for a multi-repo app's code repos (each gets its own summary in the shared coordination-repo Memory) -- the default keeps a legacy single-repo app's file name unchanged."""
+    cached_text = mem.read("architecture", cache_key)
     if cached_text:
         result = AgentResult(
             ok=True,
@@ -78,11 +78,11 @@ async def run_cached(repo: Path, mem: Memory) -> AgentResult:
     else:
         result = await run(repo)
         if result.ok:
-            mem.write("architecture", "codebase", result.text)
+            mem.write("architecture", cache_key, result.text)
             design_notes = (result.json_data or {}).get("design_notes")
             if design_notes:
                 # architecture/design.md: a live, agent-maintained snapshot of
-                mem.write("architecture", "design", design_notes)
+                mem.write("architecture", "design" if cache_key == "codebase" else f"design_{cache_key}", design_notes)
             new_head = _current_head_sha(repo)
             if new_head is not None:
                 mem.set_codebase_spec_commit(new_head)
