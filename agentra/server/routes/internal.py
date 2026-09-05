@@ -88,7 +88,7 @@ _MEMORY_METHODS = frozenset({
     "escalate_existing_issue", "issue_html_url",
     "find_unanswered_human_input_comment",
     "record_in_progress_branch", "mark_status_done", "record_commit",
-    "resume_branch_for", "resume_run_id_for", "resume_session_id_for",
+    "resume_branch_for", "resume_run_id_for", "resume_session_id_for", "shipped_commit_for",
     "run_ids_for", "record_spec", "get_spec",
 })
 
