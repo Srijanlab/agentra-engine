@@ -50,10 +50,6 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def _fake_impl_result(**overrides) -> AgentResult:
     defaults = dict(ok=True, text="done", json_data={"feature": "A feature", "status": "implemented"}, cost_usd=0.01, turns=2)
     defaults.update(overrides)
@@ -113,7 +109,6 @@ def test_endpoint_citation_in_a_criterion_survives_persistence_into_the_formatte
 
 
 def test_implement_feature_generates_and_persists_a_new_spec(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     async def fake_requirements_run(repo, objective, brief, cb_summary):
@@ -154,7 +149,6 @@ def test_implement_feature_generates_and_persists_a_new_spec(tmp_path, monkeypat
 
 
 def test_implement_feature_reuses_an_existing_spec_without_calling_requirements_agent(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     monkeypatch.setattr(
@@ -190,7 +184,6 @@ def test_implement_feature_reuses_an_existing_spec_without_calling_requirements_
 
 
 def test_implement_feature_proceeds_without_a_spec_if_requirements_agent_fails(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     async def failing_requirements_run(*a, **k):
@@ -219,7 +212,6 @@ def test_implement_feature_proceeds_without_a_spec_if_requirements_agent_fails(t
 
 
 def test_verify_pre_prod_uses_current_spec_not_codebase_summary(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, pre_prod_url="https://preview.example.com", current_spec="Spec: the finalized spec text")
 
     captured = {}
@@ -236,7 +228,6 @@ def test_verify_pre_prod_uses_current_spec_not_codebase_summary(tmp_path, monkey
 
 
 def test_verify_pre_prod_falls_back_to_codebase_summary_without_a_spec(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, pre_prod_url="https://preview.example.com")
     assert session.current_spec is None
 

@@ -31,7 +31,6 @@ _LOGIN_ERROR_TEXT = "Claude Code returned an error result: Not logged in · Plea
 
 
 def _common_monkeypatches(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [])
 

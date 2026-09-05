@@ -49,12 +49,7 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def test_self_heals_a_failing_suite_and_passes_on_the_retest(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
     test_results = [
@@ -87,7 +82,6 @@ def test_self_heals_a_failing_suite_and_passes_on_the_retest(tmp_path, monkeypat
 
 
 def test_gives_up_after_max_self_heal_attempts_if_still_failing(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
     async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
@@ -111,7 +105,6 @@ def test_gives_up_after_max_self_heal_attempts_if_still_failing(tmp_path, monkey
 
 
 def test_stops_retesting_if_the_fix_attempt_itself_fails(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
     async def fake_run_local(repo, cb_summary, mem=None, session_id=None):
@@ -139,7 +132,6 @@ def test_stops_retesting_if_the_fix_attempt_itself_fails(tmp_path, monkeypatch):
 def test_does_not_self_heal_without_a_feature_branch(tmp_path, monkeypatch):
     # No feature_branch set (e.g. run_local_tests called without a prior
     # implement_feature this run) -- nothing to check out/commit a fix onto.
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
     assert session.feature_branch is None
 
@@ -164,7 +156,6 @@ def test_agent_execution_error_retries_the_test_run_not_a_bogus_fix(tmp_path, mo
     # Agent, so run_local_tests must retry the test run itself instead of
     # dispatching a "fix these failing tests" brief containing the raw
     # exception text.
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
     agent_error_text = (
@@ -191,7 +182,6 @@ def test_agent_execution_error_retries_the_test_run_not_a_bogus_fix(tmp_path, mo
 
 
 def test_does_not_self_heal_when_the_suite_already_passes(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, feature_branch="dev/abc123-fix-thing")
 
     async def fake_run_local(repo, cb_summary, mem=None, session_id=None):

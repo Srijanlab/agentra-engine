@@ -31,7 +31,6 @@ async def _fail_if_called(*args, **kwargs):
 
 
 def test_run_autonomous_cycle_stops_immediately_on_a_blocking_bug(tmp_path, monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(brain, "query", _fail_if_called)
     monkeypatch.setattr(
@@ -58,7 +57,6 @@ def test_run_autonomous_cycle_stops_immediately_on_a_blocking_bug(tmp_path, monk
 
 
 def test_run_autonomous_cycle_does_not_short_circuit_without_a_blocking_bug(tmp_path, monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [])
     called = {"query": False}
@@ -100,7 +98,6 @@ def test_run_autonomous_cycle_attempts_anyway_with_only_an_auth_blocking_bug_ope
     an open auth-classified one must NOT hard-stop query() from ever being
     called -- it's cheap and unambiguous to just verify whether a human
     already re-authenticated since it was filed."""
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [_auth_blocking_bug()])
     monkeypatch.setattr(Memory, "clear_resolved_auth_bugs", lambda self, run_id: [])
@@ -125,7 +122,6 @@ def test_run_autonomous_cycle_self_clears_an_auth_blocking_bug_on_a_successful_a
     """The self-heal payoff: this run got a real result back with no auth
     failure of its own, so the stale auth blocking bug gets auto-cleared --
     the core fix for issue #42 "keeps resurfacing on the backlog"."""
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [_auth_blocking_bug()])
     cleared_calls = []
@@ -153,7 +149,6 @@ def test_run_autonomous_cycle_does_not_self_clear_when_the_same_auth_failure_rec
     since this run's own result proves nothing was fixed."""
     from claude_agent_sdk import ProcessError
 
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [_auth_blocking_bug()])
     monkeypatch.setattr(Memory, "record_known_bug", lambda self, *a, **k: 9)
@@ -183,7 +178,6 @@ def test_run_autonomous_cycle_still_hard_stops_when_a_non_auth_blocking_bug_is_a
     """A mix of an auth-classified bug and an ordinary (non-self-healable)
     blocking bug must still hard-stop before attempting anything -- the
     non-auth bug takes precedence, unchanged from the original behavior."""
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr("agentra.agents.brain.deployment.persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(brain, "query", _fail_if_called)
     monkeypatch.setattr(

@@ -30,7 +30,6 @@ from agentra.memory import Memory
 
 
 def test_run_autonomous_cycle_disables_every_built_in_tool_and_wires_the_safety_hook(tmp_path, monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr(brain.deployment, "persist_audit_trail", lambda *a, **k: None)
     monkeypatch.setattr(Memory, "blocking_bugs", lambda self: [])
 
