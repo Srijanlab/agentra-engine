@@ -64,6 +64,19 @@ def get_item(tbl: Any, key: dict) -> dict | None:
     return from_item(item) if item is not None else None
 
 
+def scan_all(tbl: Any) -> list[dict]:
+    """Every item in a table, paginating through LastEvaluatedKey (a Scan page
+    caps at ~1MB), each item converted back to plain Python values."""
+    items: list[dict] = []
+    kwargs: dict = {}
+    while True:
+        resp = tbl.scan(**kwargs)
+        items.extend(from_item(i) for i in resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            return items
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+
 def _update_expression(prefix: str, fields: dict) -> tuple[str, dict, dict]:
     names: dict[str, str] = {}
     values: dict[str, Any] = {}

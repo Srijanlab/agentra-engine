@@ -120,7 +120,7 @@ def test_engine_queues_on_demand_runs_instead_of_dispatching(tmp_path, monkeypat
     records a queued run and returns queued:true; the loop drains it."""
     _isolate_registry(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path)
-    monkeypatch.setattr(registry, "firestore_client", lambda: object())  # pretend we're the engine
+    monkeypatch.setattr(registry, "cloud_mode", lambda: True)  # pretend we're the engine
 
     dispatched = []
     monkeypatch.setattr(

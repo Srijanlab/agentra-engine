@@ -9,14 +9,15 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from agentra.registry import _dynamo, core
+from agentra import registry
+from agentra.registry import _cache, _dynamo, core
 
 
 @pytest.fixture
 def ddb_env(monkeypatch):
-    """A real (moto-mocked) DynamoDB with the agentra-system table created,
-    registry pointed at it, and _dynamo's table-object cache cleared so a
-    fresh table shows up per test."""
+    """A real (moto-mocked) DynamoDB with the agentra-system and agentra-apps
+    tables created, registry pointed at it, and every in-process cache
+    cleared so a fresh table shows up per test."""
     with mock_aws():
         monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "")
         monkeypatch.setenv("AGENTRA_AWS_REGION", "us-west-2")
@@ -27,11 +28,19 @@ def ddb_env(monkeypatch):
             AttributeDefinitions=[{"AttributeName": "key", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        resource.create_table(
+            TableName="apps",
+            KeySchema=[{"AttributeName": "name", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "name", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
         monkeypatch.setattr(core, "_ddb", resource)
         monkeypatch.setattr(core, "_llm_backend_cache", None)
         _dynamo._table_cache.clear()
+        _cache.clear()
         yield resource
         _dynamo._table_cache.clear()
+        _cache.clear()
 
 
 def test_pause_resume_round_trip(ddb_env):
@@ -131,3 +140,64 @@ def test_table_prefix_is_applied_and_memoized(ddb_env, monkeypatch):
 
     assert first.table_name == "prefixed-apps"
     assert first is second  # memoized
+
+
+def test_register_list_and_remove_app(ddb_env, tmp_path):
+    assert core.list_apps() == {}
+
+    repo_path = str(tmp_path / "myapp")
+    core.register_app("myapp", repo_path, repo_url="https://github.com/acme/myapp.git", branch="main")
+
+    apps = core.list_apps()
+    assert apps == {
+        "myapp": {"repo_path": repo_path, "repo_url": "https://github.com/acme/myapp.git", "branch": "main"}
+    }
+
+    assert core.remove_app("myapp") is True
+    assert core.list_apps() == {}
+    assert core.remove_app("myapp") is False  # already gone
+
+
+def test_register_app_with_multi_repo_shape_round_trips(ddb_env):
+    repos = [
+        {"name": "backlog", "repo_url": "https://github.com/acme/backlog.git", "branch": "main", "role": "coordination"},
+        {"name": "engine", "repo_url": "https://github.com/acme/engine.git", "branch": "main", "role": "code"},
+    ]
+
+    core.register_app("agentra", repos=repos)
+
+    assert core.list_apps()["agentra"]["repos"] == repos
+
+
+def test_set_slack_channel_merges_without_clobbering_other_fields(ddb_env):
+    core.register_app("myapp", "/tmp/myapp", repo_url="https://github.com/acme/myapp.git", branch="main")
+
+    core.set_slack_channel("myapp", "C0123456")
+
+    app = core.list_apps()["myapp"]
+    assert app["slack_channel_id"] == "C0123456"
+    assert app["repo_url"] == "https://github.com/acme/myapp.git"  # untouched
+
+
+def test_list_apps_is_cached_within_ttl(ddb_env):
+    core.register_app("myapp", "/tmp/myapp", repo_url="https://github.com/acme/myapp.git", branch="main")
+    core.list_apps()  # warms the cache
+
+    ddb_env.Table("apps").delete_item(Key={"name": "myapp"})  # bypasses the registry + its cache-drop
+
+    assert "myapp" in core.list_apps()  # still cached
+    _cache.drop("apps")
+    assert "myapp" not in core.list_apps()  # cache dropped, sees the real (now-empty) table
+
+
+def test_cloud_mode_true_with_either_backend_configured(monkeypatch):
+    monkeypatch.setattr(core, "_db", None)
+    monkeypatch.setattr(core, "_ddb", None)
+    assert registry.cloud_mode() is False
+
+    monkeypatch.setattr(core, "_db", object())
+    assert registry.cloud_mode() is True
+
+    monkeypatch.setattr(core, "_db", None)
+    monkeypatch.setattr(core, "_ddb", object())
+    assert registry.cloud_mode() is True
