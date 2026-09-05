@@ -58,11 +58,15 @@ def submit_request(
 
     request_id = uuid.uuid4().hex[:12]
 
-    if core._db is not None:
-        core._db.collection("apps").document(app).collection("requests").document(request_id).set(
+    if core._ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(
+            _dynamo.table("requests"),
             {
                 "id": request_id,
                 "app": app,
+                "request_id": request_id,
                 "type": request_type,
                 "title": title,
                 "description": description,
@@ -70,7 +74,7 @@ def submit_request(
                 "screenshot_url": screenshot_url,
                 "received_at": time.time(),
                 "status": "pending",
-            }
+            },
         )
         return request_id
 
@@ -168,51 +172,48 @@ def _local_dispatch_once() -> DispatchSummary:
     return DispatchSummary(resumed_stale=resumed_total, processed=processed, errors=errors)
 
 
-def _firestore_try_claim(doc_ref) -> bool:
-    from google.cloud import firestore
+def _dynamodb_dispatch_once() -> DispatchSummary:
+    from boto3.dynamodb.conditions import Key
 
-    transaction = core._db.transaction()
-
-    @firestore.transactional
-    def _claim(transaction):
-        snapshot = doc_ref.get(transaction=transaction)
-        if not snapshot.exists or snapshot.get("status") != "pending":
-            return False
-        transaction.update(doc_ref, {"status": "processing", "claimed_at": time.time()})
-        return True
-
-    return _claim(transaction)
-
-
-def _firestore_dispatch_once() -> DispatchSummary:
-    from google.cloud.firestore_v1.base_query import FieldFilter
+    from agentra.registry import _dynamo
 
     resumed_total = 0
     processed = 0
     errors: list[str] = []
     now = time.time()
+    tbl = _dynamo.table("requests")
 
     for app, info in core.list_apps().items():
         repo = _coord_repo_path(app, info)
-        requests_ref = core._db.collection("apps").document(app).collection("requests")
 
-        for doc in requests_ref.where(filter=FieldFilter("status", "==", "processing")).stream():
-            claimed_at = doc.get("claimed_at") or 0
+        processing = tbl.query(
+            IndexName="by-status", KeyConditionExpression=Key("app").eq(app) & Key("status").eq("processing")
+        ).get("Items", [])
+        for item in (_dynamo.from_item(i) for i in processing):
+            claimed_at = item.get("claimed_at") or 0
             if now - claimed_at < core.STALE_PROCESSING_SECONDS:
                 continue
-            doc.reference.update({"status": "pending"})
+            _dynamo.merge_update(tbl, {"app": app, "request_id": item["request_id"]}, {"status": "pending"})
             resumed_total += 1
 
         applied_any = False
-        for doc in requests_ref.where(filter=FieldFilter("status", "==", "pending")).stream():
-            if not _firestore_try_claim(doc.reference):
+        pending = tbl.query(
+            IndexName="by-status", KeyConditionExpression=Key("app").eq(app) & Key("status").eq("pending")
+        ).get("Items", [])
+        for item in (_dynamo.from_item(i) for i in pending):
+            request_id = item["request_id"]
+            claimed = _dynamo.try_conditional_update(
+                tbl, {"app": app, "request_id": request_id}, {"status": "processing", "claimed_at": time.time()},
+                condition_attr="status", condition_value="pending",
+            )
+            if not claimed:
                 continue
             try:
-                _apply_request(repo, doc.to_dict())
+                _apply_request(repo, item)
             except Exception as exc:
-                errors.append(f"{app}/{doc.id}: {exc}")
+                errors.append(f"{app}/{request_id}: {exc}")
                 continue
-            doc.reference.update({"status": "done"})
+            _dynamo.merge_update(tbl, {"app": app, "request_id": request_id}, {"status": "done"})
             processed += 1
             applied_any = True
 
@@ -225,6 +226,6 @@ def _firestore_dispatch_once() -> DispatchSummary:
 
 
 def dispatch_once() -> DispatchSummary:
-    if core._db is not None:
-        return _firestore_dispatch_once()
+    if core._ddb is not None:
+        return _dynamodb_dispatch_once()
     return _local_dispatch_once()
