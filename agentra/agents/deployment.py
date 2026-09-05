@@ -492,16 +492,19 @@ async def deploy_pre_prod_self_hosted(
     own_joined_preprod = bool(own_container) and _ensure_network_joined(config.preprod_network, own_container)
 
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
-    env_args = []
-    if config.firestore_project:
-        env_args = ["-e", f"AGENTRA_FIRESTORE_PROJECT={config.firestore_project}"]
-    # Without these, this dashboard has no GitHub App configured at all -- every pre-prod
-    # deploy lands on the "Connect GitHub to get started" gate with zero registered-app data
-    # to verify against, regardless of what the change under test actually touches (confirmed
-    # live: a fully successful pre-prod deploy still showed the connect screen, not real data).
-    # Read-only from this process's own live container, same trust boundary agentra's own
-    # production containers already run under -- not a new secret fetch or a wider grant.
-    env_args += _inherit_env(own_container, ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"])
+    # Without these, this dashboard has no registry/GitHub App configured at all --
+    # every pre-prod deploy lands on the "Connect GitHub to get started" gate with
+    # zero registered-app data to verify against, regardless of what the change
+    # under test actually touches (confirmed live: a fully successful pre-prod
+    # deploy still showed the connect screen, not real data). Inherited from this
+    # process's own live container -- the AWS credentials especially must never
+    # land in a committed YAML file the way a non-secret Firestore project id
+    # once could; this is the same trust boundary agentra's own production
+    # containers already run under, not a new secret fetch or a wider grant.
+    env_args = _inherit_env(own_container, [
+        "AGENTRA_DYNAMODB_TABLE_PREFIX", "AGENTRA_AWS_ACCESS_KEY_ID", "AGENTRA_AWS_SECRET_ACCESS_KEY", "AGENTRA_AWS_REGION",
+        "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY",
+    ])
     run = subprocess.run(
         [
             "docker", "run", "-d", "--name", container_name,
