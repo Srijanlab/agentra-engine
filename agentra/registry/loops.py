@@ -47,6 +47,44 @@ def bind_loop(
     return loop_id
 
 
+def bind_loop_for_run(app: str, objective: str) -> str:
+    """Create (or refresh) an objective-keyed loop entry at run-creation time,
+    before the cycle has resolved a specific issue number. Returns the loop_id so
+    the caller can link it to the run immediately via record_run.
+
+    If an active issue-keyed loop already exists for this app, that loop_id is
+    returned and no new doc is written -- ensuring one loop per issue, no duplicates.
+    When implement_feature later resolves a tracked issue it calls bind_loop
+    (issue-keyed), which creates/refreshes the more-specific doc and updates the
+    run's loop_id to that entry.
+
+    Idempotent: a second call for the same app+objective refreshes updated_at only."""
+    from agentra.registry.runs import loop_id_for  # local import to avoid circular
+
+    existing_loops = [
+        l for l in list_loops(app=app, limit=10)
+        if l.get("issue_number") and l.get("status") in ("active", "waiting_for_human")
+    ]
+    if existing_loops:
+        return existing_loops[0]["loop_id"]
+
+    loop_id = loop_id_for(objective)
+    now = time.time()
+    existing = _get_loop_doc(loop_id)
+    fields: dict[str, Any] = {
+        "loop_id": loop_id,
+        "app": app,
+        "kind": "objective",
+        "objective": objective,
+        "updated_at": now,
+        "langfuse_session_id": loop_id,
+    }
+    if existing is None:
+        fields.update(created_at=now, status="active", run_count=0, total_cost_usd=0.0)
+    _write_loop(loop_id, fields)
+    return loop_id
+
+
 def roll_up_loop(loop_id: str, run_key: str, run_status: str, cost_usd: float) -> None:
     """Fold a finished run's outcome into its loop's rolling totals."""
     doc = _get_loop_doc(loop_id)
