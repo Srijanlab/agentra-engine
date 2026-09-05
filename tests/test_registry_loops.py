@@ -94,3 +94,25 @@ def test_set_loop_status_rejects_unknown_value(tmp_path, monkeypatch):
 def test_get_loop_is_none_for_unknown_id(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     assert registry.get_loop("deadbeef00") is None
+
+
+def test_bind_loop_for_run_creates_an_objective_keyed_loop(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    loop_id = registry.bind_loop_for_run("app", "ship useful features")
+
+    loop = registry.get_loop(loop_id)
+    assert loop["kind"] == "objective"
+    assert loop["objective"] == "ship useful features"
+    assert loop["status"] == "active"
+    # Idempotent: same app+objective returns the same id, no duplicate doc.
+    assert registry.bind_loop_for_run("app", "ship useful features") == loop_id
+
+
+def test_bind_loop_for_run_reuses_an_active_issue_loop_instead_of_a_parallel_doc(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    issue_loop_id = _bind("r1", "app", 7, title="fix a bug", kind="bug")
+
+    loop_id = registry.bind_loop_for_run("app", "ship useful features")
+
+    assert loop_id == issue_loop_id  # the in-flight issue loop wins, 1:1 issue<->loop preserved

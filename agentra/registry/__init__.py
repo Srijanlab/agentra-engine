@@ -54,6 +54,7 @@ from agentra.registry.runs import (
 )
 from agentra.registry.loops import (
     bind_loop,
+    bind_loop_for_run,
     get_loop,
     list_loops,
     roll_up_loop,
@@ -118,6 +119,7 @@ __all__ = [
     "sync_oidc_token_file",
     "ensure_firestore",
     "bind_loop",
+    "bind_loop_for_run",
     "get_loop",
     "roll_up_loop",
     "set_loop_status",
