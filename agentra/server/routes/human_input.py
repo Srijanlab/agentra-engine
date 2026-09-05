@@ -58,6 +58,7 @@ async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, 
                 run_id=run_key,
                 human_answer=answer,
                 human_answer_issue=context.get("tracking_issue"),
+                app_name=app_name,
             )
             _set_run(
                 run_key,

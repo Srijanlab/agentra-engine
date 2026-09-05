@@ -138,6 +138,38 @@ def test_repo_url_for_path_matches_any_repo_in_a_multi_repo_app(tmp_path, regist
     assert registry_env.repo_url_for_path(repos["backlog"].path) == str(coord_origin)
 
 
+def test_get_code_repos_returns_the_one_legacy_repo(tmp_path, registry_env):
+    origin = _init_origin(tmp_path / "origin")
+    registry_env.register_app("myapp", str(tmp_path / "nonexistent"), repo_url=str(origin), branch="main")
+
+    repos = registry_env.get_code_repos("myapp")
+
+    assert set(repos) == {"myapp"}
+    assert repos["myapp"].path == registry_env.REPOS_ROOT / "myapp"
+
+
+def test_get_code_repos_excludes_the_coordination_repo_for_multi_repo_apps(tmp_path, registry_env):
+    coord_origin = _init_origin(tmp_path / "coord-origin")
+    engine_origin = _init_origin(tmp_path / "engine-origin")
+    ui_origin = _init_origin(tmp_path / "ui-origin")
+    registry_env.register_app(
+        "agentra",
+        repos=[
+            {"name": "backlog", "repo_url": str(coord_origin), "branch": "main", "role": "coordination"},
+            {"name": "engine", "repo_url": str(engine_origin), "branch": "main", "role": "code"},
+            {"name": "ui", "repo_url": str(ui_origin), "branch": "main", "role": "code"},
+        ],
+    )
+
+    repos = registry_env.get_code_repos("agentra")
+
+    assert set(repos) == {"engine", "ui"}
+
+
+def test_get_code_repos_unknown_app_returns_empty(registry_env):
+    assert registry_env.get_code_repos("nope") == {}
+
+
 def test_cloud_mode_returns_unresolved_paths_without_touching_disk(tmp_path, registry_env, monkeypatch):
     monkeypatch.setattr(registry, "_db", object())
     monkeypatch.setattr(registry, "list_apps", lambda: {

@@ -119,7 +119,7 @@ async def _run_autonomous_background(
         try:
             env = environments.load(repo) or environments.EnvironmentConfig()
             report = await run_autonomous_cycle(
-                repo, objective, env, feature=feature, skip_deploy=skip_deploy, run_id=run_key
+                repo, objective, env, feature=feature, skip_deploy=skip_deploy, run_id=run_key, app_name=app_name
             )
             # Human-in-the-loop escalation (GitHub issue #34): if the cycle
             _set_run(
