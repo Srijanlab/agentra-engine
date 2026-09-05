@@ -290,9 +290,6 @@ async def _run_prod_debug_cycle_body(
         if not diag.ok:
             # The agent itself failed (crashed/errored) -- distinct from
             mem.record_failure(run_id, "prod-debug", diag.text)
-        registry.record_agent_step(
-            repo.name, run_id, "prod_debug", diag.ok, diag.cost_usd, diag.turns, f"diagnosing: ok={diag.ok}"
-        )
 
         data = diag.json_data or {}
         if not diag.ok or not data.get("root_cause_found"):
@@ -311,14 +308,10 @@ async def _run_prod_debug_cycle_body(
         # One Claude session across build -> deploy -> verify -> promote for this
         session_id: str | None = None
         cb = await codebase.run_cached(repo, mem)
-        registry.record_agent_step(repo.name, run_id, "understand_codebase", cb.ok, cb.cost_usd, cb.turns, "understand_codebase: ok=%s" % cb.ok)
         feature_branch = feature_branch_name(env, run_id, f"hotfix-{severity}")
         impl = await implementation.run(repo, objective, f"Hotfix: {proposed_fix}", cb.text, env, feature_branch, session_id=session_id, mem=mem, run_id=run_id)
         session_id = impl.session_id or session_id
         mem.log(run_id, f"prod-debug: implementation ok={impl.ok}")
-        registry.record_agent_step(
-            repo.name, run_id, "implement_feature", impl.ok, impl.cost_usd, impl.turns, f"hotfix implementation: ok={impl.ok}"
-        )
         if not impl.ok:
             mem.record_failure(run_id, "hotfix-implementation", impl.text)
             return ProdDebugReport(run_id, True, severity, False, False, diag.text)
@@ -328,9 +321,6 @@ async def _run_prod_debug_cycle_body(
         deploy = await pre_prod_strategy(repo, env, feature_branch, run_id, session_id)
         session_id = deploy.session_id or session_id
         pre_prod_ok = deploy.ok and (deploy.json_data or {}).get("status") != "failed"
-        registry.record_agent_step(
-            repo.name, run_id, "deploy_pre_prod", pre_prod_ok, deploy.cost_usd, deploy.turns, f"hotfix deploy: ok={pre_prod_ok}"
-        )
         if not pre_prod_ok:
             mem.record_failure(run_id, "hotfix-pre-prod-deploy", deploy.text)
             mem.log(run_id, "prod-debug: pre-prod deploy failed; NOT promoting to prod")
@@ -347,9 +337,6 @@ async def _run_prod_debug_cycle_body(
         session_id = test.session_id or session_id
         test_passed = test.ok and (test.json_data or {}).get("status") != "fail"
         mem.log(run_id, f"prod-debug: live pre-prod verification passed={test_passed}")
-        registry.record_agent_step(
-            repo.name, run_id, "verify_pre_prod", test_passed, test.cost_usd, test.turns, f"hotfix live verification: passed={test_passed}"
-        )
         if not test_passed:
             mem.record_failure(run_id, "hotfix-testing", test.text)
             mem.log(run_id, "prod-debug: hotfix failed live pre-prod verification; NOT promoting to prod")
@@ -360,9 +347,6 @@ async def _run_prod_debug_cycle_body(
         promote = await prod_strategy(repo, env, run_id, session_id)
         promoted_ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
         mem.log(run_id, f"prod-debug: promotion ok={promoted_ok}")
-        registry.record_agent_step(
-            repo.name, run_id, "promote_prod", promoted_ok, promote.cost_usd, promote.turns, f"prod promotion: ok={promoted_ok}"
-        )
         if not promoted_ok:
             mem.record_failure(run_id, "hotfix-prod-promote", promote.text)
 

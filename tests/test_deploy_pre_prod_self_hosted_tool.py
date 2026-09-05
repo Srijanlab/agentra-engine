@@ -43,12 +43,7 @@ def _tool(session, name):
     return next(t for t in tools if t.name == name)
 
 
-def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
-
-
 def test_deploy_pre_prod_calls_the_self_hosted_path_when_env_flag_is_set(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path)
 
     generic_calls = []
@@ -71,7 +66,6 @@ def test_deploy_pre_prod_calls_the_self_hosted_path_when_env_flag_is_set(tmp_pat
 
 
 def test_deploy_pre_prod_uses_the_generic_path_when_strategy_is_vercel_firebase(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, env=EnvironmentConfig())
 
     self_hosted_calls = []
@@ -92,7 +86,6 @@ def test_deploy_pre_prod_uses_the_generic_path_when_strategy_is_vercel_firebase(
 
 
 def test_verify_pre_prod_tears_down_the_self_hosted_sibling_after_a_passing_report(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, pre_prod_url="http://agentra-preprod-testrun1:8080")
 
     async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
@@ -108,7 +101,6 @@ def test_verify_pre_prod_tears_down_the_self_hosted_sibling_after_a_passing_repo
 
 
 def test_verify_pre_prod_tears_down_the_self_hosted_sibling_even_after_a_failing_report(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(tmp_path, pre_prod_url="http://agentra-preprod-testrun1:8080")
 
     async def fake_run_pre_prod(repo, spec, preview_url, run_id, session_id=None, **_kw):
@@ -125,7 +117,6 @@ def test_verify_pre_prod_tears_down_the_self_hosted_sibling_even_after_a_failing
 
 
 def test_verify_pre_prod_does_not_teardown_when_strategy_is_vercel_firebase(tmp_path, monkeypatch):
-    _patch_registry(monkeypatch)
     session = _session(
         tmp_path, env=EnvironmentConfig(), pre_prod_url="https://preview.example.com",
     )

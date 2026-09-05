@@ -266,21 +266,6 @@ def _seed_runs() -> None:
             r["loop_id"] = registry.loop_id_for(feat)
         registry.record_run(**r)
 
-    steps = [
-        ("understand_codebase", True, 0.02, 3, "Scanned repo structure and existing patterns.", "agentra", "seed0001"),
-        ("implement_feature", True, 0.31, 9, "Added the stagnation breaker to OrchestratorSession.", "agentra", "seed0001"),
-        ("run_local_tests", True, 0.07, 4, "67/67 passing after 9 new cases.", "agentra", "seed0001"),
-        ("run_local_tests", False, 0.12, 4, "2 tests failing on approvals queue pagination.", "cap", "seed0002"),
-        ("prod_debug", True, 0.185, 5, "Diagnosed the unauthenticated alarm endpoint.", "agentra", "seed0003"),
-        ("implement_feature", True, 0.62, 14, "Built /slack/events + thread mapping.", "agentra", "seed0004"),
-        ("deploy_pre_prod", True, 0.05, 2, "Merged to beta, sibling healthy in 74s.", "agentra", "seed0004"),
-        ("verify_pre_prod", True, 0.24, 8, "All 3 acceptance criteria passed live.", "agentra", "seed0004"),
-        ("implement_feature", True, 0.28, 8, "Bulk-approve action + disabled-state handling.", "cap", "seed0005"),
-        ("implement_feature", None, 0.09, 3, "Working on Firestore retry/backoff...", "agentra", "seed0006"),
-    ]
-    for agent, ok, cost, turns, summary, app, run_id in steps:
-        registry.record_agent_step(app=app, run_id=run_id, agent=agent, ok=ok, cost_usd=cost, turns=turns, summary=summary)
-
 
 def _seed_signals(dev_repos_root: Path) -> None:
     signals_path = registry.AGENTRA_HOME / "server.log"

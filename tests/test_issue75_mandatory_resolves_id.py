@@ -47,7 +47,6 @@ def _tool(session, name):
 
 
 def _patch_registry(monkeypatch):
-    monkeypatch.setattr(registry, "record_agent_step", lambda *a, **k: None)
     monkeypatch.setattr(registry, "record_run", lambda *a, **k: None)
 
 

@@ -93,7 +93,13 @@ def merge_update(tbl: Any, key: dict, fields: dict) -> None:
     """Firestore's `.set(fields, merge=True)` analog: partially updates only the
     given fields on the item at `key` (creating it if absent). Every attribute
     name is aliased unconditionally -- DynamoDB reserves many common words
-    (`status` among them), so this isn't optional for arbitrary field dicts."""
+    (`status` among them), so this isn't optional for arbitrary field dicts.
+    Silently drops any field that's also a key attribute -- DynamoDB rejects
+    updating those via UpdateExpression outright, and a caller's fields dict
+    redundantly restating the key (e.g. a Firestore-era `{"loop_id": loop_id,
+    ...}` built for a `.set(merge=True)` call, where that was harmless) is an
+    easy, otherwise-silent mistake to carry over."""
+    fields = {k: v for k, v in fields.items() if k not in key}
     if not fields:
         return
     expr, names, values = _update_expression("f", fields)
