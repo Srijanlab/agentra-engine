@@ -85,7 +85,7 @@ def _bug_capture(monkeypatch, session):
 
 def test_understand_codebase_escalates_on_auth_failure(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
-    session = _session(tmp_path)
+    session = _session(tmp_path, cb_summary=None)  # force the scan path, not the loaded-summary no-op
     bug_calls = _bug_capture(monkeypatch, session)
     async def fake_run_cached(*a, **k):
         return _auth_failure_result()
@@ -321,7 +321,7 @@ def test_auth_failure_hard_stop_blocks_every_subsequent_tool_call_this_cycle(tmp
     every other tool call this same cycle must refuse immediately via
     check_hard_stop, never spending another agent turn."""
     _patch_registry(monkeypatch)
-    session = _session(tmp_path)
+    session = _session(tmp_path, cb_summary=None)  # force the scan path
     _bug_capture(monkeypatch, session)
     async def fake_run_cached(*a, **k):
         return _auth_failure_result()

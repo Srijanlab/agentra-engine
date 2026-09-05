@@ -187,6 +187,42 @@ class MemoryIssueLifecycleMixin:
         except Exception:
             return None
 
+    def issue_status(self, external_id: str) -> str | None:
+        """The pipeline stage of a tracked issue, from its status: label -- one of
+        queue / in-progress / code_complete / shipped / tested / done. 'queue' means
+        an open agentra issue with no status label; 'done' also covers a closed issue.
+        None if the id is non-numeric or the issue can't be read."""
+        if not str(external_id).isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+            from agentra.memory.core import (
+                _STATUS_CODE_COMPLETE_LABEL, _STATUS_DONE_LABEL, _STATUS_IN_PROGRESS_LABEL,
+                _STATUS_SHIPPED_LABEL, _STATUS_TESTED_LABEL, _label_names,
+            )
+
+            issue = github_issues.get_issue(repo_url, int(external_id))
+            if issue is None:
+                return None
+            if issue.get("state") == "closed":
+                return "done"
+            names = _label_names(issue)
+            for label, stage in (
+                (_STATUS_DONE_LABEL, "done"),
+                (_STATUS_TESTED_LABEL, "tested"),
+                (_STATUS_SHIPPED_LABEL, "shipped"),
+                (_STATUS_CODE_COMPLETE_LABEL, "code_complete"),
+                (_STATUS_IN_PROGRESS_LABEL, "in-progress"),
+            ):
+                if label in names:
+                    return stage
+            return "queue"
+        except Exception:
+            return None
+
     def shipped_commit_for(self, external_id: str) -> str | None:
         """The most recent Shipped-Commit recorded on an issue body, if any."""
         if not str(external_id).isdigit():

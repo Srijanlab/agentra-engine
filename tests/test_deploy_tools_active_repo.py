@@ -113,7 +113,7 @@ def test_deploy_pre_prod_external_strategy_skips_verify_pre_prod_entirely(tmp_pa
     deploy_result = asyncio.run(_tool(session, "deploy_pre_prod").handler({}))
 
     assert deploy_result.get("is_error") is not True
-    assert "No verify_pre_prod call needed" in deploy_result["content"][0]["text"]
+    assert "Next: end the run" in deploy_result["content"][0]["text"]
     assert session.pre_prod_verified is True
     assert session.pre_prod_url is None
 

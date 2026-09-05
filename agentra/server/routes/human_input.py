@@ -124,7 +124,7 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
     objective = mem.get_objective() or ""
     tracking_issue = context.get("tracking_issue")
     loop_id = (
-        registry.loop_id_for_issue(repo.name, tracking_issue)
+        registry.loop_id_for_issue(app_name, tracking_issue)
         if tracking_issue is not None
         else registry.loop_id_for(objective)
     )

@@ -105,6 +105,8 @@ def roll_up_loop(loop_id: str, run_key: str, run_status: str, cost_usd: float) -
     if doc is None:
         return
     loop_status = "waiting_for_human" if run_status in ("waiting_for_human", "escalated") else doc.get("status", "active")
+    if loop_status == "active" and (doc.get("pipeline") or {}).get("terminal"):
+        loop_status = "shipped"  # delivered through pre-prod, awaiting a human Promote
     _write_loop(loop_id, {
         "run_count": int(doc.get("run_count", 0)) + 1,
         "total_cost_usd": float(doc.get("total_cost_usd", 0.0)) + (cost_usd or 0.0),
@@ -121,6 +123,33 @@ def set_loop_status(loop_id: str, status: str) -> None:
     if _get_loop_doc(loop_id) is None:
         return
     _write_loop(loop_id, {"status": status, "updated_at": time.time()})
+
+
+_PIPELINE_FIELDS = frozenset({
+    "last_node", "next_node", "status", "terminal", "active_repo", "feature_branch",
+    "change_risk", "preview_url", "tests_passed", "deployed", "verified", "run_id",
+})
+
+
+def set_loop_pipeline(loop_id: str, **fields: Any) -> dict | None:
+    """Merge `fields` into the loop doc's `pipeline` sub-map (which node last ran,
+    which node the next run must call, and enough context to resume there). The
+    backing stores shallow-merge, so this reads the doc and writes the whole map
+    back. Returns the merged pipeline, or None if the loop doc doesn't exist."""
+    doc = _get_loop_doc(loop_id)
+    if doc is None:
+        return None
+    pipeline = dict(doc.get("pipeline") or {})
+    pipeline.update({k: v for k, v in fields.items() if k in _PIPELINE_FIELDS})
+    pipeline["updated_at"] = time.time()
+    _write_loop(loop_id, {"pipeline": pipeline, "updated_at": pipeline["updated_at"]})
+    return pipeline
+
+
+def get_loop_pipeline(loop_id: str) -> dict | None:
+    """The loop doc's `pipeline` sub-map, or None. Lighter than get_loop (no run
+    join) -- check_backlog calls this per candidate item."""
+    return (_get_loop_doc(loop_id) or {}).get("pipeline") or None
 
 
 def get_loop(loop_id: str) -> dict | None:

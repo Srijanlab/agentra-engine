@@ -56,8 +56,10 @@ from agentra.registry.loops import (
     bind_loop,
     bind_loop_for_run,
     get_loop,
+    get_loop_pipeline,
     list_loops,
     roll_up_loop,
+    set_loop_pipeline,
     set_loop_status,
 )
 
@@ -121,7 +123,9 @@ __all__ = [
     "bind_loop",
     "bind_loop_for_run",
     "get_loop",
+    "get_loop_pipeline",
     "roll_up_loop",
+    "set_loop_pipeline",
     "set_loop_status",
     "list_loops",
     "list_runs",
