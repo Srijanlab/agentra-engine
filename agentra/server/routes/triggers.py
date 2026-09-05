@@ -107,8 +107,10 @@ def _record_production_release(repo: Path, run_id: str, code_repo: Path | None =
 
 def _new_run_key(app_name: str, source: str, objective: str, feature: str | None = None) -> str:
     run_key = uuid.uuid4().hex[:8]
-    # loop_id is left unset here -- the cycle binds it (registry.bind_loop) once it
-    # commits to a tracked GitHub issue. Runs that never bind stay unlinked.
+    # Every run gets a loop entry from the very start (objective-keyed). implement_feature
+    # later calls bind_loop (issue-keyed) and repoints the run once it commits to an issue;
+    # runs that never do keep this objective-level anchor. Mirrors agentra-loop's _new_run_key.
+    loop_id = registry.bind_loop_for_run(app_name, objective)
     _active_runs[run_key] = {
         "app": app_name,
         "source": source,
@@ -116,6 +118,7 @@ def _new_run_key(app_name: str, source: str, objective: str, feature: str | None
         "started_at": time.time(),
         "objective": objective,
         "feature": feature,
+        "loop_id": loop_id,
     }
     registry.record_run(run_key, **_active_runs[run_key])
     return run_key
