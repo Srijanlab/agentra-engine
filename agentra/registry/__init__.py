@@ -10,6 +10,7 @@ from agentra.registry import core
 from agentra.registry.core import (
     VALID_LLM_BACKENDS,
     RepoSpec,
+    cloud_mode,
     dynamodb_resource,
     firestore_client,
     get_app_repo,
@@ -99,6 +100,7 @@ __all__ = [
     "DispatchSummary",
     "VALID_LLM_BACKENDS",
     "RepoSpec",
+    "cloud_mode",
     "dynamodb_resource",
     "firestore_client",
     "get_app_repo",

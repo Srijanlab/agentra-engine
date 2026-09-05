@@ -93,7 +93,7 @@ def _apply_app_config(
             setattr(env_config, field, value)
     environments.save(dest, env_config)
 
-    if registry._db is not None:
+    if registry.cloud_mode():
         return None  # cloud: no local checkout to commit .agentra/ from
 
     from agentra.agents.git_ops import GitOpError, commit_and_push
@@ -237,7 +237,7 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
         raise HTTPException(status_code=400, detail="repos must include exactly one entry with role='coordination'")
 
     coord_dest = registry.REPOS_ROOT / payload.name / coord.name
-    if registry._db is None:
+    if not registry.cloud_mode():
         from agentra.agents.git_ops import GitOpError, clone_repo
 
         for r in payload.repos:
@@ -298,7 +298,7 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         raise HTTPException(status_code=400, detail="repo_url is required (or pass repos= for a multi-repo app)")
 
     dest = registry.REPOS_ROOT / payload.name
-    if registry._db is None:
+    if not registry.cloud_mode():
         # Local/CLI: clone up front. Cloud mode has no git -- the repo_url +
         # ensure_labels() below is the validation, and the loop clones on demand.
         try:

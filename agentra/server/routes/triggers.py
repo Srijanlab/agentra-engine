@@ -243,9 +243,9 @@ async def _dispatch_cycle(
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
 
     run_key = _new_run_key(app_name, source, objective, feature=feature)
-    # The engine (Firestore-backed, read-only fs, 30s functions) records the run
-    # but can't execute a cycle -- the loop drains queued runs on its tick.
-    if registry.firestore_client() is not None:
+    # The engine (cloud mode, read-only fs, 30s functions) records the run but
+    # can't execute a cycle -- the loop drains queued runs on its tick.
+    if registry.cloud_mode():
         registry.record_run(run_key, skip_deploy=skip_deploy)
         _server_log(source, f"app={app_name!r} run_key={run_key} -- queued for the loop")
         return {"triggered": True, "run_key": run_key, "queued": True}
@@ -257,7 +257,7 @@ async def _dispatch_cycle(
 async def _drain_queued_runs() -> None:
     """On-demand runs the engine queued (it can't run cycles itself). The loop
     claims and executes them on its scheduled tick."""
-    if registry.firestore_client() is not None:
+    if registry.cloud_mode():
         return  # only the loop drains
     for run in registry.list_runs(limit=40):
         run_key = run.get("run_key")
