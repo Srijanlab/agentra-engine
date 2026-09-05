@@ -10,6 +10,7 @@ from agentra.registry import core
 from agentra.registry.core import (
     VALID_LLM_BACKENDS,
     RepoSpec,
+    dynamodb_resource,
     firestore_client,
     get_app_repo,
     get_app_repos,
@@ -71,6 +72,7 @@ _DELEGATED_NAMES = {
     "STALE_RUN_SECONDS",
     "HUMAN_INPUT_MAX_WAIT_SECONDS",
     "_db",
+    "_ddb",
     "_RUNS_PATH",
     "_LOOPS_PATH",
     "_AGENT_STEPS_PATH",
@@ -97,6 +99,7 @@ __all__ = [
     "DispatchSummary",
     "VALID_LLM_BACKENDS",
     "RepoSpec",
+    "dynamodb_resource",
     "firestore_client",
     "get_app_repo",
     "get_app_repos",

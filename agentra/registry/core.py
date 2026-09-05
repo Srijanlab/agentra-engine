@@ -113,6 +113,46 @@ def firestore_client():
     return _db
 
 
+def _init_dynamodb():
+    """Static IAM keys, not OIDC federation -- this AWS account has a diagnosed
+    prior failure of AssumeRoleWithWebIdentity (see deploy/aws's CiUser comment
+    in the loop repo), so no per-request token refresh is needed here at all,
+    unlike Firestore's WIF dance above. AGENTRA_AWS_* is prefixed rather than
+    bare AWS_* because Vercel's own Lambda-based runtime reserves those bare
+    names for its own unrelated execution-role credentials."""
+    prefix = os.environ.get("AGENTRA_DYNAMODB_TABLE_PREFIX")
+    if not prefix:
+        return None
+    try:
+        import boto3
+
+        session = boto3.Session(
+            aws_access_key_id=os.environ.get("AGENTRA_AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("AGENTRA_AWS_SECRET_ACCESS_KEY"),
+            region_name=os.environ.get("AGENTRA_AWS_REGION"),
+        )
+        return session.resource("dynamodb")
+    except Exception:
+        # Never crash the whole app on a credential/import problem -- endpoints
+        # that need DynamoDB will 503, the rest (and /health) still work.
+        logger.error("DynamoDB init failed -- running without it", exc_info=True)
+        return None
+
+
+# Migration in progress: apps/runs/loops/requests still read/write Firestore
+# via `_db` above until their own PRs land; collections already ported (see
+# is_paused/pause/resume/get_llm_backend/set_llm_backend below) use `_ddb`
+# instead. Once every collection is ported and Firestore is decommissioned,
+# `_ddb` absorbs `_db`'s name -- kept distinct for now so a not-yet-ported
+# collection can't be handed a DynamoDB resource and call Firestore-shaped
+# methods on it.
+_ddb = _init_dynamodb()
+
+
+def dynamodb_resource():
+    return _ddb
+
+
 def _local_apps() -> dict[str, dict]:
     if not APPS_PATH.exists():
         return {}
@@ -388,14 +428,16 @@ def repo_url_for_path(repo: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _read_pause_doc() -> dict | None:
-    doc = _db.collection("system").document("pause").get()
-    return doc.to_dict() if doc.exists else None
+def _read_pause_item() -> dict | None:
+    from agentra.registry import _dynamo
+
+    item = _dynamo.get_item(_dynamo.table("system"), {"key": "pause"})
+    return {"paused_at": item["paused_at"], "reason": item.get("reason")} if item else None
 
 
 def is_paused() -> dict | None:
-    if _db is not None:
-        return _cache.get_or_set("pause", _read_pause_doc, ttl=10)
+    if _ddb is not None:
+        return _cache.get_or_set("pause", _read_pause_item, ttl=10)
     if not PAUSE_PATH.exists():
         return None
     return json.loads(PAUSE_PATH.read_text())
@@ -404,8 +446,10 @@ def is_paused() -> dict | None:
 def pause(reason: str | None = None) -> None:
     record = {"paused_at": time.time(), "reason": reason}
     _cache.drop("pause")
-    if _db is not None:
-        _db.collection("system").document("pause").set(record)
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(_dynamo.table("system"), {"key": "pause", **record})
         return
     PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
     PAUSE_PATH.write_text(json.dumps(record, indent=2))
@@ -413,8 +457,10 @@ def pause(reason: str | None = None) -> None:
 
 def resume() -> None:
     _cache.drop("pause")
-    if _db is not None:
-        _db.collection("system").document("pause").delete()
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.table("system").delete_item(Key={"key": "pause"})
         return
     PAUSE_PATH.unlink(missing_ok=True)
 
@@ -470,15 +516,17 @@ _llm_backend_cache: tuple[float, str] | None = None
 def get_llm_backend() -> str:
     """Which LLM the agent SDK talks to: "claude" (api.anthropic.com, default) or "nim"
     (the self-hosted NVIDIA NIM proxy). Global toggle, set from the dashboard, read on
-    every agent turn -- cached briefly to spare Firestore."""
+    every agent turn -- cached briefly to spare the backing store."""
     global _llm_backend_cache
     now = time.monotonic()
     if _llm_backend_cache is not None and (now - _llm_backend_cache[0]) < _LLM_BACKEND_CACHE_TTL_SECONDS:
         return _llm_backend_cache[1]
 
-    if _db is not None:
-        doc = _db.collection("system").document("llm_backend").get()
-        backend = (doc.to_dict() or {}).get("backend") if doc.exists else None
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        item = _dynamo.get_item(_dynamo.table("system"), {"key": "llm_backend"})
+        backend = item.get("backend") if item else None
     elif _LLM_BACKEND_PATH.exists():
         backend = json.loads(_LLM_BACKEND_PATH.read_text()).get("backend")
     else:
@@ -494,8 +542,10 @@ def set_llm_backend(backend: str) -> None:
         raise ValueError(f"unknown llm backend {backend!r} -- expected one of {VALID_LLM_BACKENDS}")
     global _llm_backend_cache
     _llm_backend_cache = None
-    if _db is not None:
-        _db.collection("system").document("llm_backend").set({"backend": backend})
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(_dynamo.table("system"), {"key": "llm_backend", "backend": backend})
         return
     _LLM_BACKEND_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LLM_BACKEND_PATH.write_text(json.dumps({"backend": backend}, indent=2))

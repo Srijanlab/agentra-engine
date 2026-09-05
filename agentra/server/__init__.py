@@ -167,6 +167,30 @@ async def debug_firestore(request: Request) -> dict:
     return out
 
 
+@app.get("/debug/dynamodb")
+async def debug_dynamodb() -> dict:
+    """Diagnose the DynamoDB path (static IAM keys, not OIDC). No secrets returned."""
+    from agentra import registry
+
+    out = {
+        "table_prefix": os.environ.get("AGENTRA_DYNAMODB_TABLE_PREFIX"),
+        "region": os.environ.get("AGENTRA_AWS_REGION"),
+        "access_key_id_set": bool(os.environ.get("AGENTRA_AWS_ACCESS_KEY_ID")),
+        "secret_access_key_set": bool(os.environ.get("AGENTRA_AWS_SECRET_ACCESS_KEY")),
+        "db_connected": registry.dynamodb_resource() is not None,
+    }
+    ddb = registry.dynamodb_resource()
+    if ddb is not None:
+        try:
+            from agentra.registry import _dynamo
+
+            item = _dynamo.get_item(_dynamo.table("system"), {"key": "pause"})
+            out["system_pause_item_present"] = item is not None
+        except Exception as exc:
+            out["read_error"] = f"{type(exc).__name__}: {exc}"[:400]
+    return out
+
+
 @app.get("/runs/{run_key}/logs")
 async def stream_run_logs(run_key: str) -> StreamingResponse:
     run = _active_runs.get(run_key) or registry.get_run(run_key)
