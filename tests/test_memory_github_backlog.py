@@ -63,6 +63,7 @@ def test_known_bugs_reads_from_github(tmp_path, monkeypatch):
             "html_url": "https://github.com/acme/app/issues/7",
             "needs_human": False,
             "blocking_agentra": False,
+            "target_repo": None,
         }
     ]
 
@@ -366,7 +367,7 @@ def test_feature_queue_reads_from_github(tmp_path, monkeypatch):
     queue = mem.feature_queue()
 
     assert captured["labels"] == ["feature", "agentra"]
-    assert queue == [{"description": "Add dark mode", "detail": "Add dark mode", "source": "github", "external_id": "5", "html_url": None}]
+    assert queue == [{"description": "Add dark mode", "detail": "Add dark mode", "source": "github", "external_id": "5", "html_url": None, "target_repo": None}]
 
 
 def test_feature_queue_returns_empty_without_a_github_remote(tmp_path):

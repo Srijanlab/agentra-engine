@@ -143,6 +143,20 @@ def _infer_resolves_from_brief(mem, feature_brief: str) -> tuple[str, str] | Non
     return None
 
 
+def _infer_target_repo_from_backlog(mem, resolves_id: str) -> str | None:
+    """A multi-repo app's known_bugs()/feature_queue() items carry a target_repo field
+    (from a repo:<name> label -- see memory/core.py's _target_repo_label) when one was
+    filed by discover_opportunities or a human who knew which repo it belonged to.
+    implement_feature falls back to this when the caller didn't pass target_repo
+    explicitly and the app has more than one code repo."""
+    if not resolves_id:
+        return None
+    for item in (*mem.known_bugs(), *mem.feature_queue()):
+        if str(item.get("external_id")) == resolves_id:
+            return item.get("target_repo")
+    return None
+
+
 def _check_auth_failure(session: OrchestratorSession, tool_name: str, result: AgentResult) -> dict | None:
     """GitHub issue #42: a Claude Code CLI auth/login failure (result.auth_failure, set distinctly by agents/base.py's run_agent) is an infra-level problem -- no retry, no different tool call, no different brief will fix it, only a human running `claude /login`."""
     if not result.auth_failure:
@@ -261,7 +275,7 @@ async def _judge_human_answer(
     tool-result dict the caller should return immediately on a Claude Code auth failure;
     decision/reason default to a fail-safe "still_needs_escalation" if the judge call itself
     didn't succeed or didn't return a parseable decision."""
-    result = await human_answer_judge.run(session.repo, review, human_answer, feature_brief)
+    result = await human_answer_judge.run(session.active_repo_path, review, human_answer, feature_brief)
     if stop := _check_auth_failure(session, "implement_feature", result):
         return stop, "still_needs_escalation", "judge call hit an auth failure"
     session.cost_usd += result.cost_usd
@@ -588,7 +602,10 @@ def _tools_for(session: OrchestratorSession) -> list:
         "resolves, or set resolves_origin='new' to declare this brief is deliberately not one of "
         "them. For multi-part features, set more_parts_expected=true on all calls except the "
         "last, and pass sub_feature_of on subsequent parts. Set resume_branch if resuming work "
-        "from check_backlog.",
+        "from check_backlog. For a multi-repo app, set target_repo to the code repo this "
+        "feature belongs to (only required when the app has more than one -- see the code "
+        "repos listed below); it defaults to a resolves_id item's repo:<name> label when one "
+        "is set.",
         {
             "feature_brief": str,
             "resolves_origin": str,
@@ -596,6 +613,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             "sub_feature_of": str,
             "more_parts_expected": bool | str,
             "resume_branch": str,
+            "target_repo": str,
         },
     )
     async def implement_feature(args):
@@ -606,6 +624,28 @@ def _tools_for(session: OrchestratorSession) -> list:
         brief = args["feature_brief"]
         session.current_feature = brief
         registry.record_run(session.run_id, feature=brief, result={"feature": brief})
+        if session.code_repos:
+            target_repo = _optional_str(args.get("target_repo"))
+            if not target_repo and len(session.code_repos) == 1:
+                target_repo = next(iter(session.code_repos))
+            if not target_repo:
+                target_repo = _infer_target_repo_from_backlog(session.mem, _optional_str(args.get("resolves_id")))
+            if not target_repo:
+                return {"content": [{"type": "text", "text": (
+                    f"This app has multiple code repos ({', '.join(session.code_repos)}) -- set "
+                    "target_repo to say which one this feature belongs to."
+                )}], "is_error": True}
+            if target_repo not in session.code_repos:
+                return {"content": [{"type": "text", "text": (
+                    f"target_repo={target_repo!r} is not one of this app's code repos: "
+                    f"{', '.join(session.code_repos)}."
+                )}], "is_error": True}
+            if session.active_repo is not None and session.active_repo != target_repo:
+                return {"content": [{"type": "text", "text": (
+                    f"This run already committed to code repo {session.active_repo!r} -- one "
+                    f"target repo per run. Do not switch to {target_repo!r} here."
+                )}], "is_error": True}
+            session.set_active_repo(target_repo)
         resume_branch = _optional_str(args.get("resume_branch"))
         resuming = bool(resume_branch) and session.feature_branch is None
         if session.feature_branch is None:
@@ -738,7 +778,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         if spec_dict is not None:
             session.note(f"requirements: reusing existing spec for issue #{tracking_issue}", ok=True)
         else:
-            req = await requirements.run(session.repo, session.objective, brief, session.cb_summary)
+            req = await requirements.run(session.active_repo_path, session.objective, brief, session.cb_summary)
             if stop := _check_auth_failure(session, "implement_feature", req):
                 return stop
             session.cost_usd += req.cost_usd
@@ -767,7 +807,7 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         try:
             impl = await implementation.run(
-                session.repo, session.objective, brief, session.cb_summary, session.env, session.feature_branch,
+                session.active_repo_path, session.objective, brief, session.cb_summary, session.env, session.feature_branch,
                 resume=resuming, spec=spec_text, session_id=session.session_id,
                 mem=session.mem, run_id=session.run_id,
             )
@@ -807,7 +847,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         commit_sha = None
         try:
             head = subprocess.run(
-                ["git", "-C", str(session.repo), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
+                ["git", "-C", str(session.active_repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
             )
             if head.returncode == 0:
                 commit_sha = head.stdout.strip()
