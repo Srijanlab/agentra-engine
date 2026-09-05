@@ -432,6 +432,14 @@ def _tools_for(session: OrchestratorSession) -> list:
             for item in (*pending_test, *pending_merge, *in_progress, *flagged_in_progress, *bugs, *queue)
             if item.get("external_id")
         )
+        # Bind an objective-keyed loop the moment there is actually work to do -- not at
+        # run creation. A run that finds an empty backlog and exits leaves no loop entry.
+        # implement_feature later repoints this to an issue-keyed loop (bind_loop) once it
+        # commits to a specific issue. bind_loop_for_run is idempotent, so calling it on
+        # every check_backlog is fine.
+        if any((pending_test, pending_merge, in_progress, flagged_in_progress, bugs, queue)):
+            _loop_id = registry.bind_loop_for_run(session.app_name, session.objective)
+            registry.record_run(session.run_id, loop_id=_loop_id)
         remaining_after_one = (
             len(pending_test) + len(pending_merge) + len(in_progress) + len(flagged_in_progress)
             + len(bugs) + len(queue) - 1
