@@ -489,9 +489,9 @@ _SLACK_THREAD_CAP = 300
 
 
 def _slack_threads() -> dict:
-    if _db is not None:
-        doc = _db.collection("system").document("slack_threads").get()
-        return doc.to_dict() or {} if doc.exists else {}
+    """Local/CLI fallback only -- the cloud path (agentra-slack-threads, a real
+    table+GSI, see below) never reads this; a legacy Firestore system/slack_threads
+    doc, if one still exists, is simply orphaned once this ships."""
     if not _SLACK_THREADS_PATH.exists():
         return {}
     return json.loads(_SLACK_THREADS_PATH.read_text())
@@ -501,12 +501,15 @@ def record_slack_thread(thread_ts: str, *, app: str, issue_number: int) -> None:
     """Remembers which needs_human issue a Slack HUMAN_INPUT_REQUIRED thread anchors, so a
     human's reply in that thread routes back to the right run and every follow-up question
     stays in the same thread (GitHub issue #68's two-way loop)."""
-    entry = {"app": app, "issue_number": issue_number}
-    if _db is not None:
-        _db.collection("system").document("slack_threads").set({thread_ts: entry}, merge=True)
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(
+            _dynamo.table("slack-threads"), {"thread_ts": thread_ts, "app": app, "issue_number": issue_number}
+        )
         return
     threads = _slack_threads()
-    threads[thread_ts] = entry
+    threads[thread_ts] = {"app": app, "issue_number": issue_number}
     for stale in list(threads)[:-_SLACK_THREAD_CAP]:
         del threads[stale]
     _SLACK_THREADS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -515,12 +518,29 @@ def record_slack_thread(thread_ts: str, *, app: str, issue_number: int) -> None:
 
 def resolve_slack_thread(thread_ts: str) -> dict | None:
     """{"app", "issue_number"} for a Slack thread recorded by record_slack_thread, or None."""
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        item = _dynamo.get_item(_dynamo.table("slack-threads"), {"thread_ts": thread_ts})
+        return {"app": item["app"], "issue_number": item["issue_number"]} if item else None
     return _slack_threads().get(thread_ts)
 
 
 def slack_thread_for(app: str, issue_number: int) -> str | None:
     """The thread_ts already anchoring this issue's conversation, or None -- so a follow-up
     question replies into the existing thread instead of starting a fresh top-level message."""
+    if _ddb is not None:
+        from boto3.dynamodb.conditions import Key
+
+        from agentra.registry import _dynamo
+
+        resp = _dynamo.table("slack-threads").query(
+            IndexName="by-app-issue",
+            KeyConditionExpression=Key("app").eq(app) & Key("issue_number").eq(issue_number),
+            Limit=1,
+        )
+        items = resp.get("Items", [])
+        return items[0]["thread_ts"] if items else None
     for ts, entry in _slack_threads().items():
         if entry.get("app") == app and entry.get("issue_number") == issue_number:
             return ts
