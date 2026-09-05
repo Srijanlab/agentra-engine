@@ -255,7 +255,8 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
     try:
         from agentra.connectors import github_issues
 
-        github_issues.ensure_labels(coord.repo_url)
+        code_repo_names = [r.name for r in payload.repos if r.role == "code"]
+        github_issues.ensure_labels(coord.repo_url, extra=[f"repo:{name}" for name in code_repo_names])
     except Exception as exc:
         _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
 

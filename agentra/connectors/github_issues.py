@@ -337,14 +337,21 @@ _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
 }
 
 
-def ensure_labels(repo_url: str) -> None:
-    """Creates whichever of _LABEL_DEFINITIONS don't already exist on the target repo."""
+def ensure_labels(repo_url: str, extra: list[str] | None = None) -> None:
+    """Creates whichever of _LABEL_DEFINITIONS don't already exist on the target repo.
+    `extra` is for ad-hoc label names with no fixed color/description of their own --
+    a multi-repo app's per-code-repo repo:<name> labels (registered so
+    discover_opportunities' auto-filing and a human filing an issue can both tag which
+    code repo an item targets)."""
     owner_repo = _owner_repo_or_raise(repo_url)
     headers = _headers(repo_url)
     resp = httpx.get(f"{GITHUB_API}/repos/{owner_repo}/labels", headers=headers, params={"per_page": 100}, timeout=15)
     resp.raise_for_status()
     existing = {lbl["name"] for lbl in resp.json()}
-    for name, (color, description) in _LABEL_DEFINITIONS.items():
+    definitions = dict(_LABEL_DEFINITIONS)
+    for name in extra or []:
+        definitions.setdefault(name, ("ededed", f"Targets this app's {name.split(':', 1)[-1]!r} code repo"))
+    for name, (color, description) in definitions.items():
         if name in existing:
             continue
         create_resp = httpx.post(
