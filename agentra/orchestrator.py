@@ -212,20 +212,21 @@ async def _run_cycle_body(
         )
 
 
-async def run_promote(repo: Path, run_id: str | None = None) -> dict:
-    """Human-triggered prod promotion: `agentra promote`, or the dashboard's Promote button (server.py's /apps/{name}/promote)."""
+async def run_promote(repo: Path, run_id: str | None = None, code_repo: Path | None = None) -> dict:
+    """Human-triggered prod promotion: `agentra promote`, or the dashboard's Promote button (server.py's /apps/{name}/promote). `repo` is always the coordination repo -- Memory (pending_promotion_features, issue bookkeeping) always operates there. `code_repo` is which code repo to actually promote (deploy strategy dispatch + its own env config) -- defaults to `repo` for a legacy single-repo app, where they're the same repo anyway."""
     repo = repo.resolve()
+    code_repo = (code_repo or repo).resolve()
     mem = Memory(repo)
     run_id = run_id or uuid.uuid4().hex[:8]
     try:
-        return await _run_promote_body(repo, mem, run_id)
+        return await _run_promote_body(repo, code_repo, mem, run_id)
     finally:
         mem.finalize_run_log(run_id)
 
 
-async def _run_promote_body(repo: Path, mem: Memory, run_id: str) -> dict:
+async def _run_promote_body(repo: Path, code_repo: Path, mem: Memory, run_id: str) -> dict:
     with run_log_scope(lambda line: mem.log(run_id, line)):
-        env = _load_env(repo, mem, run_id)
+        env = _load_env(code_repo, mem, run_id)
         pending = mem.pending_promotion_features()
         session_id = None
         if pending:
@@ -249,7 +250,7 @@ async def _run_promote_body(repo: Path, mem: Memory, run_id: str) -> dict:
                     )
         mem.log(run_id, "promote: human-approved promotion to production starting")
         strategy = deployment.PROD_STRATEGIES[env.deploy_strategy]
-        promote = await strategy(repo, env, run_id, session_id)
+        promote = await strategy(code_repo, env, run_id, session_id)
         ok = promote.ok and (promote.json_data or {}).get("status") != "failed"
         mem.log(run_id, f"promote: ok={ok}")
         if not ok:

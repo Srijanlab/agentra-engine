@@ -1203,13 +1203,33 @@ def _tools_for(session: OrchestratorSession) -> list:
         if not ok:
             session.mem.record_failure(session.run_id, "deployment", deploy.text)
             session.record_failure("deploy_pre_prod")
-        else:
-            session.record_success("deploy_pre_prod")
+            return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": True}
+        session.record_success("deploy_pre_prod")
+        if session.env.deploy_strategy == "external":
+            # No preview_url ever exists for this strategy -- the repo's own external
+            # CI/CD deploys asynchronously, on infra agentra has no live URL to check.
+            # The merge succeeding IS the terminal pre-prod confirmation, same reasoning
+            # as the change-risk skip path above: verify_pre_prod would otherwise refuse
+            # forever ("no live URL to verify yet"), stranding every issue at status:shipped.
+            session.pre_prod_verified = True
             if session.code_complete_issue_numbers:
                 moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
                 session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
-                session.shipped_this_cycle_issue_numbers.extend(moved)
-        return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": not ok}
+                if moved:
+                    session.mem.record_tested(moved, session.run_id)
+            _notify_shipped_pending(
+                session,
+                f"Merged to {session.env.pre_prod_branch!r} ({deploy.text[:500]}) -- this repo's own "
+                "CI/CD handles the deploy; no live pre-prod URL for agentra to verify.",
+            )
+            return {
+                "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this strategy."}],
+            }
+        if session.code_complete_issue_numbers:
+            moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
+            session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
+            session.shipped_this_cycle_issue_numbers.extend(moved)
+        return {"content": [{"type": "text", "text": deploy.text[:2000]}]}
 
     @tool(
         "verify_pre_prod",
@@ -1225,6 +1245,11 @@ def _tools_for(session: OrchestratorSession) -> list:
             )
             return {
                 "content": [{"type": "text", "text": f"Nothing to verify -- deploy_pre_prod classified this as a {session.change_risk} change and already merged it without a live deploy."}],
+            }
+        if session.env.deploy_strategy == "external" and session.pre_prod_verified:
+            session.note("verify_pre_prod: skipped, external strategy has no live URL to verify", ok=True)
+            return {
+                "content": [{"type": "text", "text": "Nothing to verify -- this repo's own CI/CD handles the deploy; deploy_pre_prod already confirmed the merge."}],
             }
         if not session.pre_prod_url:
             return {
