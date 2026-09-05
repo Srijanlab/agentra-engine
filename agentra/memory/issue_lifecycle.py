@@ -187,6 +187,23 @@ class MemoryIssueLifecycleMixin:
         except Exception:
             return None
 
+    def shipped_commit_for(self, external_id: str) -> str | None:
+        """The most recent Shipped-Commit recorded on an issue body, if any."""
+        if not str(external_id).isdigit():
+            return None
+        repo_url = self._repo_url()
+        if not repo_url:
+            return None
+        try:
+            from agentra.connectors import github_issues
+            from agentra.memory.core import _SHIPPED_COMMIT_RE
+
+            issue = github_issues.get_issue(repo_url, int(external_id)) or {}
+            shas = _SHIPPED_COMMIT_RE.findall(issue.get("body") or "")
+            return shas[-1].strip() if shas else None
+        except Exception:
+            return None
+
     def resume_run_id_for(self, external_id: str) -> str | None:
         """The run_id that pushed resume_branch_for's branch. Informational
         (look up that run's log for context on what was already tried)."""

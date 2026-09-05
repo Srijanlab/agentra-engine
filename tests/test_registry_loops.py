@@ -116,3 +116,26 @@ def test_bind_loop_for_run_reuses_an_active_issue_loop_instead_of_a_parallel_doc
     loop_id = registry.bind_loop_for_run("app", "ship useful features")
 
     assert loop_id == issue_loop_id  # the in-flight issue loop wins, 1:1 issue<->loop preserved
+
+
+def test_bind_loop_retires_the_objective_placeholder_from_this_run(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    registry.record_run("r1", app="app", status="running", started_at=time.time())
+    placeholder = registry.bind_loop_for_run("app", "ship useful features")
+
+    issue_loop = _bind("r1", "app", 7, title="add widget", kind="feature")
+
+    assert registry.get_loop(placeholder) is None
+    assert registry.get_loop(issue_loop) is not None
+    assert [l["loop_id"] for l in registry.list_loops(app="app")] == [issue_loop]
+
+
+def test_bind_loop_keeps_objective_loops_that_have_real_runs(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    registry.record_run("r1", app="app", status="running", started_at=time.time())
+    triage_loop = registry.bind_loop_for_run("app", "ship useful features")
+    registry.roll_up_loop(triage_loop, "r0", "completed", 0.5)  # a prior triage-only run
+
+    _bind("r1", "app", 7, title="add widget", kind="feature")
+
+    assert registry.get_loop(triage_loop) is not None

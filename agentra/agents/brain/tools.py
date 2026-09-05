@@ -452,10 +452,13 @@ def _tools_for(session: OrchestratorSession) -> list:
         )
         text = (
             "Work through what's already in flight before starting anything new -- in this order:\n"
-            f"1. Shipped, pending live testing (call implement_feature with resolves_id/resume_branch set, "
-            f"then run_local_tests -> deploy_pre_prod -> verify_pre_prod): "
+            f"1. Shipped, pending live testing (the code is already written -- call resume_delivery "
+            f"with resolves_id set, NOT implement_feature; then run_local_tests -> deploy_pre_prod -> "
+            f"verify_pre_prod): "
             f"{json.dumps(pending_test, indent=2) if pending_test else '(none)'}\n\n"
-            f"2. Code complete, pending merge to pre-prod (same resume flow, through deploy_pre_prod): "
+            f"2. Code complete, pending merge to pre-prod (same: resume_delivery with resolves_id, "
+            f"NOT implement_feature -- it will either mark an already-shipped item done or check out "
+            f"its branch for run_local_tests -> deploy_pre_prod -> verify_pre_prod): "
             f"{json.dumps(pending_merge, indent=2) if pending_merge else '(none)'}\n\n"
             f"3. In-progress multi-part features (resume and finish coding): "
             f"{json.dumps(in_progress, indent=2) if in_progress else '(none)'}\n\n"
@@ -671,6 +674,21 @@ def _tools_for(session: OrchestratorSession) -> list:
             tracking_issue = int(sub_feature_of)
 
         if tracking_issue is not None:
+            # An item that's already status:code_complete / status:shipped has its code
+            # written -- re-running implementation just churns (confirmed live: issue #3
+            # cycled 6 runs). Send it through resume_delivery instead.
+            _already_coded = {
+                str(it.get("external_id"))
+                for it in (*session.mem.code_complete_items(), *session.mem.shipped_pending_test_items())
+                if it.get("external_id")
+            }
+            if str(tracking_issue) in _already_coded:
+                return {"content": [{"type": "text", "text": (
+                    f"Issue #{tracking_issue} is already code-complete -- its implementation is done. "
+                    "Do not call implement_feature for it. Call resume_delivery with "
+                    f"resolves_id={tracking_issue!r} instead."
+                )}], "is_error": True}
+
             _loop_id = registry.bind_loop(
                 session.app_name, tracking_issue,
                 title=brief, kind="bug" if resolves_origin == "known_bug" else "feature",
@@ -980,6 +998,134 @@ def _tools_for(session: OrchestratorSession) -> list:
                 }
             ]
         }
+
+    @tool(
+        "resume_delivery",
+        "Resume a backlog item whose code is already written and committed "
+        "(status:code_complete or status:shipped -- check_backlog lists these under "
+        "\"pending live testing\" and \"pending merge to pre-prod\"). Do NOT call "
+        "implement_feature for these: the implementation is done. This tool works out "
+        "where delivery actually stands -- already in production (marks it done, ends "
+        "the run), or sitting on a pushed branch (checks it out; then call "
+        "run_local_tests -> deploy_pre_prod -> verify_pre_prod). Pass resolves_id (the "
+        "tracking issue number); for a multi-repo app also pass target_repo.",
+        {"resolves_id": str, "target_repo": str},
+    )
+    async def resume_delivery(args):
+        if stop := session.check_hard_stop():
+            return stop
+        resolves_id = _optional_str(args.get("resolves_id"))
+        if not resolves_id.isdigit():
+            return {"content": [{"type": "text", "text": (
+                "resume_delivery needs resolves_id set to the tracking issue number."
+            )}], "is_error": True}
+        issue = int(resolves_id)
+
+        if session.code_repos:
+            target_repo = (
+                _optional_str(args.get("target_repo"))
+                or (next(iter(session.code_repos)) if len(session.code_repos) == 1 else "")
+                or (_infer_target_repo_from_backlog(session.mem, resolves_id) or "")
+            )
+            if not target_repo:
+                return {"content": [{"type": "text", "text": (
+                    f"This app has multiple code repos ({', '.join(session.code_repos)}) -- "
+                    "set target_repo to the one this item belongs to."
+                )}], "is_error": True}
+            if target_repo not in session.code_repos:
+                return {"content": [{"type": "text", "text": (
+                    f"target_repo={target_repo!r} is not one of this app's code repos: "
+                    f"{', '.join(session.code_repos)}."
+                )}], "is_error": True}
+            session.set_active_repo(target_repo)
+
+        if session.committed_issue is not None and session.committed_issue != str(issue):
+            return {"content": [{"type": "text", "text": (
+                f"This run already committed to issue #{session.committed_issue} -- one item per run."
+            )}], "is_error": True}
+        session.committed_issue = str(issue)
+        _loop_id = registry.bind_loop(session.app_name, issue, objective=session.objective)
+        registry.record_run(session.run_id, loop_id=_loop_id, issue_number=str(issue))
+
+        repo_path = session.active_repo_path
+        prod_branch = session.env.prod_branch
+        pre_prod_branch = session.env.pre_prod_branch
+        commit = session.mem.shipped_commit_for(resolves_id)
+        branch = session.mem.resume_branch_for(resolves_id)
+
+        from agentra.agents.git_ops import fetch_ref
+
+        def _commit_in(ref: str) -> bool:
+            if not commit:
+                return False
+            try:
+                fetch_ref(repo_path, ref)
+            except Exception:
+                pass
+            return subprocess.run(
+                ["git", "-C", str(repo_path), "merge-base", "--is-ancestor", commit, f"origin/{ref}"],
+                capture_output=True,
+            ).returncode == 0
+
+        if _commit_in(prod_branch):
+            session.mem.mark_status_done(issue)
+            session.note(
+                f"resume_delivery: #{issue} commit {commit[:8]} already on {prod_branch} -- marked done", ok=True
+            )
+            return {"content": [{"type": "text", "text": (
+                f"Issue #{issue} is already in production (commit {commit[:8]} is on {prod_branch}). "
+                "Marked status:done and closed it. Nothing to build or deploy -- end this run."
+            )}]}
+
+        branch_on_remote = bool(branch) and subprocess.run(
+            ["git", "-C", str(repo_path), "ls-remote", "--exit-code", "--heads", "origin", branch],
+            capture_output=True,
+        ).returncode == 0
+
+        if not branch_on_remote:
+            _escalate_to_human(
+                session,
+                category="stale_code_complete",
+                diagnosis=(
+                    f"Issue #{issue} is stamped code-complete but its work can't be located: resume "
+                    f"branch {branch!r} is not on the remote, and the recorded commit {commit!r} is not "
+                    f"on {prod_branch}"
+                    + (f" (it is on {pre_prod_branch} -- may only need promotion)" if _commit_in(pre_prod_branch)
+                       else f" or {pre_prod_branch}")
+                    + ". The code-complete marker looks stale."
+                ),
+                question=(
+                    f"Issue #{issue} is marked code-complete but the branch is gone. Was it already "
+                    "shipped (close it), does it just need promotion to prod, or should it be rebuilt?"
+                ),
+                source="resume-delivery",
+                title=f"Stale code-complete: issue #{issue} work not found",
+                tracking_issue=issue,
+            )
+            session.note(f"resume_delivery: #{issue} code-complete marker is stale -- escalated", ok=None)
+            return {"content": [{"type": "text", "text": (
+                f"Issue #{issue}'s code-complete marker is stale (resume branch missing). "
+                "Escalated to a human; this run is now waiting_for_human. Stop here."
+            )}], "is_error": True}
+
+        from agentra.agents.implementation import _checkout_feature_branch
+
+        if not _checkout_feature_branch(repo_path, branch, pre_prod_branch, resume=True):
+            return {"content": [{"type": "text", "text": (
+                f"Could not check out branch {branch!r} for issue #{issue} -- stop here."
+            )}], "is_error": True}
+        session.feature_branch = branch
+        session.tests_passed = False
+        session.pre_prod_verified = False
+        session.change_risk = None
+        session.code_complete_issue_numbers = [str(issue)]
+        session.session_id = session.session_id or session.mem.resume_session_id_for(resolves_id)
+        session.note(f"resume_delivery: checked out {branch!r} for issue #{issue}", ok=True)
+        return {"content": [{"type": "text", "text": (
+            f"Issue #{issue} is code-complete on branch {branch!r}, now checked out. The code is "
+            "already written -- do NOT call implement_feature. Call run_local_tests, then "
+            "deploy_pre_prod, then verify_pre_prod, then end this run."
+        )}]}
 
     @tool(
         "run_local_tests",
@@ -1373,6 +1519,7 @@ def _tools_for(session: OrchestratorSession) -> list:
         discover_opportunities,
         assess_design_impact,
         implement_feature,
+        resume_delivery,
         run_local_tests,
         deploy_pre_prod,
         verify_pre_prod,
