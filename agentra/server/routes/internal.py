@@ -64,7 +64,7 @@ _REGISTRY_METHODS = frozenset({
     "get_llm_backend", "set_llm_backend",
     "record_slack_thread", "resolve_slack_thread", "slack_thread_for",
     "get_run", "list_runs", "record_run", "last_run_at",
-    "list_loops", "get_loop", "bind_loop", "roll_up_loop", "set_loop_status",
+    "list_loops", "get_loop", "bind_loop", "bind_loop_for_run", "roll_up_loop", "set_loop_status",
     "loop_id_for", "loop_id_for_issue",
     "list_agent_steps",
     "list_waiting_for_human", "reconcile_stale_runs", "reconcile_waiting_for_human",
