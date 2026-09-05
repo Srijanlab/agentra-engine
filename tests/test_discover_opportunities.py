@@ -15,6 +15,7 @@ from agentra.agents import brain
 from agentra.agents.base import AgentResult
 from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
+from agentra.registry.core import RepoSpec
 
 
 def _session(tmp_path: Path, **overrides) -> brain.OrchestratorSession:
@@ -272,6 +273,82 @@ def test_discover_opportunities_filing_failure_does_not_fail_the_tool_call(tmp_p
     result = asyncio.run(_tool(session, "discover_opportunities").handler({}))
 
     assert result.get("is_error") is not True
+
+
+# -- multi-repo: scan every code repo, tag opportunities with their source repo -------
+
+
+def _multi_repo_session(tmp_path: Path, **overrides) -> brain.OrchestratorSession:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    engine_repo = tmp_path / "engine"
+    ui_repo = tmp_path / "ui"
+    engine_repo.mkdir()
+    ui_repo.mkdir()
+    defaults = dict(
+        repo=repo,
+        objective="test objective",
+        env=EnvironmentConfig(),
+        mem=Memory(repo),
+        run_id="testrun1",
+        code_repos={
+            "engine": RepoSpec(name="engine", path=engine_repo, repo_url=None, branch="main", role="code"),
+            "ui": RepoSpec(name="ui", path=ui_repo, repo_url=None, branch="main", role="code"),
+        },
+        cb_summaries={"engine": "engine's codebase summary", "ui": "ui's codebase summary"},
+    )
+    defaults.update(overrides)
+    return brain.OrchestratorSession(**defaults)
+
+
+def test_discover_opportunities_scans_every_code_repo_and_tags_the_source_repo(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _multi_repo_session(tmp_path)
+    _stub_backlog(session, monkeypatch)
+    calls = []
+
+    async def fake_discovery_run(repo, objective, cb_summary, *rest):
+        calls.append(repo)
+        feature = "engine_feature" if "engine" in str(repo) else "ui_feature"
+        return AgentResult(
+            ok=True, text="ok",
+            json_data={"opportunities": [{"feature": feature, "description": "...", "impact": "low", "effort": "low", "reason": "..."}]},
+            cost_usd=0.01, turns=1,
+        )
+
+    monkeypatch.setattr(brain.discovery, "run", fake_discovery_run)
+
+    result = asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+    assert result.get("is_error") is not True
+    assert len(calls) == 2  # one Discovery Agent call per code repo
+    assert "engine_feature" in result["content"][0]["text"]
+    assert "ui_feature" in result["content"][0]["text"]
+    assert '"repo": "engine"' in result["content"][0]["text"]
+    assert '"repo": "ui"' in result["content"][0]["text"]
+
+
+def test_discover_opportunities_multi_repo_auto_files_with_a_repo_label(tmp_path, monkeypatch):
+    _patch_registry(monkeypatch)
+    session = _multi_repo_session(tmp_path)
+    _stub_backlog(session, monkeypatch)
+
+    async def fake_discovery_run(repo, *rest):
+        if "engine" in str(repo):
+            return AgentResult(ok=True, text="ok", json_data={"opportunities": [_TOP_OPPORTUNITY]}, cost_usd=0.0, turns=1)
+        return AgentResult(ok=True, text="ok", json_data={"opportunities": []}, cost_usd=0.0, turns=1)
+
+    monkeypatch.setattr(brain.discovery, "run", fake_discovery_run)
+    calls = []
+    monkeypatch.setattr(
+        session.mem, "record_feature_request",
+        lambda description, **k: calls.append(k) or {"number": 42, "html_url": "https://x/42"},
+    )
+
+    asyncio.run(_tool(session, "discover_opportunities").handler({}))
+
+    assert len(calls) == 1
+    assert calls[0]["extra_labels"] == ["discovery", "repo:engine"]
 
 
 def test_discover_opportunities_does_not_file_when_active_feature_branches_exist(tmp_path, monkeypatch):
