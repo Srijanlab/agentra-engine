@@ -264,12 +264,13 @@ def test_check_backlog_directive_says_end_run_for_tested_item(tmp_path, monkeypa
 # --- mirror-invariant drift guard (engine: RPC allowlist; loop: proxy set) --
 
 def test_new_registry_and_memory_methods_cross_the_loop_engine_boundary():
+    names = {"set_loop_pipeline", "get_loop_pipeline", "set_loop_human_input"}
     try:
         from agentra.server.routes.internal import _MEMORY_METHODS, _REGISTRY_METHODS
-        assert {"set_loop_pipeline", "get_loop_pipeline"} <= _REGISTRY_METHODS
+        assert names <= _REGISTRY_METHODS
         assert "issue_status" in _MEMORY_METHODS
     except ImportError:  # agentra-loop has no server/routes/internal.py
         from agentra.memory import _ENGINE_PROXIED_METHODS
         from agentra.registry import _ENGINE_PROXIED
-        assert {"set_loop_pipeline", "get_loop_pipeline"} <= _ENGINE_PROXIED
+        assert names <= _ENGINE_PROXIED
         assert "issue_status" in _ENGINE_PROXIED_METHODS

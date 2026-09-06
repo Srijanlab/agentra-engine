@@ -122,28 +122,6 @@ def reconcile_stale_runs() -> list[str]:
     return marked
 
 
-def list_waiting_for_human(limit: int = 200) -> list[dict]:
-    """Runs currently parked in the 'waiting_for_human' state -- backs the dashboard's 'Needs your input' panel."""
-    return [r for r in list_runs(limit=limit) if r.get("status") in ("waiting_for_human", "escalated")]
-
-
-def reconcile_waiting_for_human() -> list[dict]:
-    """Human-in-the-loop escalation (GitHub issue #34): a run sitting in 'waiting_for_human' must never silently stay there forever with no further signal -- past core.HUMAN_INPUT_MAX_WAIT_SECONDS since it started waiting, flip it to the distinguishable 'escalated' state so a human looking at the dashboard (or a re-sent Slack message, dispatched by the caller using the human_input context this returns) can tell "still within normal wait" from "this has been sitting here too long."  Pure state transition only, no outbound calls (GitHub/Slack) -- keeps registry/ dependency-free of connectors/, same layering as the rest of this module."""
-    now = time.time()
-    escalated: list[dict] = []
-    for run in list_runs(limit=500):
-        if run.get("status") != "waiting_for_human":
-            continue
-        human_input = run.get("human_input") or {}
-        waiting_since = human_input.get("waiting_since")
-        if waiting_since is None or now - waiting_since <= core.HUMAN_INPUT_MAX_WAIT_SECONDS:
-            continue
-        record_run(run["run_key"], status="escalated")
-        run["status"] = "escalated"
-        escalated.append(run)
-    return escalated
-
-
 def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:
     """Agent-turn history for the dashboard's AgentsPanel -- reads Langfuse's own
     observations (see agentra.langfuse_api.list_recent_generations), not a
