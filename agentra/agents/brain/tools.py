@@ -127,6 +127,103 @@ def _optional_str(value: object) -> str:
     return text
 
 
+# An issue past code-complete: its code is written, tested, and merged to pre-prod.
+_TERMINAL_STATUSES = {"shipped", "tested", "done"}
+
+
+def _loop_id_for_committed(session) -> str | None:
+    """The issue-keyed loop id for whatever issue this run committed to, or None."""
+    if not session.committed_issue:
+        return None
+    return registry.loop_id_for_issue(session.app_name, session.committed_issue)
+
+
+def _stamp_pipeline(session, **fields) -> None:
+    """Best-effort: record which pipeline node just ran and which one the next run
+    must call, on the committed issue's loop doc. Never raises -- a lost stamp just
+    means the next run falls back to deriving the stage from the issue's status label."""
+    loop_id = _loop_id_for_committed(session)
+    if not loop_id:
+        return
+    try:
+        registry.set_loop_pipeline(
+            loop_id,
+            run_id=session.run_id,
+            active_repo=session.active_repo,
+            feature_branch=session.feature_branch,
+            change_risk=session.change_risk,
+            preview_url=session.pre_prod_url,
+            tests_passed=session.tests_passed,
+            deployed=session.deployed_to_pre_prod,
+            verified=session.pre_prod_verified,
+            **fields,
+        )
+    except Exception:
+        logger.warning("_stamp_pipeline: set_loop_pipeline failed for loop %s", loop_id, exc_info=True)
+
+
+# issue status -> the one tool the orchestrator must call next for that issue.
+_STATUS_NEXT_NODE = {
+    "queue": "implement_feature",
+    "in-progress": "implement_feature",
+    "code_complete": "resume_delivery",
+    "shipped": "resume_delivery",
+    "tested": None,
+    "done": None,
+}
+
+
+def _backlog_directive(session, buckets) -> str:
+    """Compute the single deterministic next action for this run: the top-priority
+    backlog item and the one tool to call for it, resolved from the item's loop
+    pipeline state (authoritative) or its status label (fallback)."""
+    origin, item = next(((o, lst[0]) for o, lst in buckets if lst), (None, None))
+    if item is None:
+        return (
+            "=== DIRECTIVE (follow exactly) ===\n"
+            "The backlog is empty -- nothing is in flight. Call discover_opportunities "
+            "to ideate one new feature, then implement_feature on it, or end the run."
+        )
+    ext = str(item.get("external_id") or "")
+    next_node = None
+    if ext.isdigit():
+        loop_id = registry.loop_id_for_issue(session.app_name, ext)
+        pipe = registry.get_loop_pipeline(loop_id) or {}
+        if pipe.get("terminal"):
+            next_node = None
+        elif pipe.get("next_node"):
+            next_node = pipe["next_node"]
+        else:
+            next_node = _STATUS_NEXT_NODE.get(session.mem.issue_status(ext) or "queue", "implement_feature")
+    else:
+        next_node = "implement_feature"
+    resume_branch = item.get("resume_branch") or "(none)"
+    target_repo = item.get("target_repo") or "(none -- single-repo app)"
+    origin_line = (
+        f"  resolves_origin: {origin}\n" if origin in ("known_bug", "feature_queue")
+        else "  resolves_origin: new   (only if this is genuinely not a tracked item)\n"
+        if next_node == "implement_feature" else ""
+    )
+    if next_node is None:
+        return (
+            "=== DIRECTIVE (follow exactly) ===\n"
+            f"Issue #{ext} is already delivered (tested / done). There is nothing to do for it. "
+            "End the run -- check_backlog surfaces the next item next run."
+        )
+    return (
+        "=== DIRECTIVE (follow exactly) ===\n"
+        f"Work issue #{ext} only this run -- nothing else is in scope.\n"
+        f"  next tool:    {next_node}\n"
+        f"  resolves_id:  {ext}\n"
+        + origin_line +
+        f"  resume_branch: {resume_branch}\n"
+        f"  target_repo:  {target_repo}\n"
+        f"Call {next_node} now with those arguments. Do NOT call understand_codebase "
+        "(already loaded) or any other pipeline tool first. When it returns, follow its "
+        '"Next:" line exactly; stop when it says to end the run.'
+    )
+
+
 def _infer_resolves_from_brief(mem, feature_brief: str) -> tuple[str, str] | None:
     """Best-effort fallback for when the caller didn't pass resolves_id/resolves_origin
     explicitly: scans feature_brief for a #<number> reference and, if it matches an open known
@@ -352,6 +449,20 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def understand_codebase(_args):
         if stop := session.check_hard_stop():
             return stop
+        _have = session.cb_summary is not None or (
+            bool(session.code_repos) and all(name in session.cb_summaries for name in session.code_repos)
+        )
+        if _have:
+            session.note("understand_codebase: skipped, a summary is already loaded", ok=True)
+            repos = list(session.code_repos) or [session.repo.name]
+            loaded = session.cb_summary or "\n\n".join(
+                f"[{name}]\n{text}" for name, text in session.cb_summaries.items()
+            )
+            return {"content": [{"type": "text", "text": (
+                f"understand_codebase: SKIPPED -- a codebase summary is already loaded for this "
+                f"run (repos: {repos}). Do not call understand_codebase again. Next: call check_backlog.\n\n"
+                + loaded[:8000]
+            )}]}
         if not session.code_repos:
             # Unregistered app (CLI/tests calling run_autonomous_cycle directly against
             # a bare repo path) -- exactly today's pre-Phase-2 behavior, one scan.
@@ -450,8 +561,15 @@ def _tools_for(session: OrchestratorSession) -> list:
             "verify_pre_prod it, then stop; the rest are picked up next run."
             if remaining_after_one > 0 else ""
         )
+        directive = _backlog_directive(session, [
+            ("shipped", pending_test), ("code_complete", pending_merge),
+            ("in_progress", in_progress), ("in_progress", flagged_in_progress),
+            ("known_bug", bugs), ("feature_queue", queue),
+        ])
         text = (
-            "Work through what's already in flight before starting anything new -- in this order:\n"
+            directive + "\n\n"
+            "Full backlog, for context only -- do NOT start anything below that isn't the "
+            "issue named in the DIRECTIVE:\n"
             f"1. Shipped, pending live testing (the code is already written -- call resume_delivery "
             f"with resolves_id set, NOT implement_feature; then run_local_tests -> deploy_pre_prod -> "
             f"verify_pre_prod): "
@@ -684,9 +802,14 @@ def _tools_for(session: OrchestratorSession) -> list:
             }
             if str(tracking_issue) in _already_coded:
                 return {"content": [{"type": "text", "text": (
-                    f"Issue #{tracking_issue} is already code-complete -- its implementation is done. "
-                    "Do not call implement_feature for it. Call resume_delivery with "
+                    f"implement_feature: OUT OF CONTRACT -- issue #{tracking_issue} is already "
+                    "code-complete; its implementation is done. Call resume_delivery with "
                     f"resolves_id={tracking_issue!r} instead."
+                )}], "is_error": True}
+            if session.mem.issue_status(tracking_issue) in ("tested", "done"):
+                return {"content": [{"type": "text", "text": (
+                    f"implement_feature: OUT OF CONTRACT -- issue #{tracking_issue} is already delivered. "
+                    "Nothing to build. Next: end the run."
                 )}], "is_error": True}
 
             _loop_id = registry.bind_loop(
@@ -980,24 +1103,20 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "title": feature_name,
             })
         issue_note = f" (issue #{issue_number})" if issue_number else ""
-        next_part_hint = (
-            f" More parts expected -- call implement_feature again for the next part with "
-            f"sub_feature_of={str(parent_issue_number)!r} (and more_parts_expected=true "
-            f"unless that call is the last part)."
-            if more_parts_expected and parent_issue_number
-            else ""
-        )
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        f"Code complete: implemented, committed, and pushed {feature_name!r}{issue_note}. "
-                        f"Call run_local_tests before deploy_pre_prod.{next_part_hint}"
-                    ),
-                }
-            ]
-        }
+        if more_parts_expected and parent_issue_number:
+            _stamp_pipeline(session, last_node="implement_feature", next_node="implement_feature",
+                            status="in-progress", terminal=False)
+            return {"content": [{"type": "text", "text": (
+                f"implement_feature: PART DONE -- {feature_name!r}{issue_note}, branch {session.feature_branch}. "
+                f"Next: call implement_feature for the next part with sub_feature_of={str(parent_issue_number)!r} "
+                "(more_parts_expected=true unless that call is the last part)."
+            )}]}
+        _stamp_pipeline(session, last_node="implement_feature", next_node="run_local_tests",
+                        status="code_complete", terminal=False)
+        return {"content": [{"type": "text", "text": (
+            f"implement_feature: CODE COMPLETE -- {feature_name!r}{issue_note}, committed and pushed to "
+            f"branch {session.feature_branch}. Next: call run_local_tests."
+        )}]}
 
     @tool(
         "resume_delivery",
@@ -1047,6 +1166,43 @@ def _tools_for(session: OrchestratorSession) -> list:
         _loop_id = registry.bind_loop(session.app_name, issue, objective=session.objective)
         registry.record_run(session.run_id, loop_id=_loop_id, issue_number=str(issue))
 
+        status = session.mem.issue_status(issue)
+
+        if status in ("tested", "done"):
+            session.mem.mark_status_done(issue)  # idempotent; closes if still open
+            _stamp_pipeline(session, last_node="resume_delivery", next_node=None,
+                            status=status, terminal=True)
+            return {"content": [{"type": "text", "text": (
+                f"resume_delivery: issue #{issue} is already delivered (status:{status}). "
+                "Nothing to do. Next: end the run."
+            )}]}
+
+        if status == "shipped":
+            session.feature_branch = session.mem.resume_branch_for(resolves_id) or session.feature_branch
+            session.deployed_to_pre_prod = True
+            session.deploy_attempted = True
+            pipe = registry.get_loop_pipeline(_loop_id) or {}
+            session.change_risk = pipe.get("change_risk")
+            if session.env.deploy_strategy == "external" or session.env.ci_cd_on_push or not pipe.get("preview_url"):
+                moved = session.mem.record_tested([str(issue)], session.run_id)
+                session.pre_prod_verified = True
+                _stamp_pipeline(session, last_node="resume_delivery", next_node=None,
+                                status="tested" if moved else "shipped", terminal=bool(moved))
+                return {"content": [{"type": "text", "text": (
+                    f"resume_delivery: issue #{issue} already merged to pre-prod -- the repo's CI/CD "
+                    "deploys on push, no live URL to verify. Marked tested. Next: end the run."
+                )}]}
+            session.shipped_this_cycle_issue_numbers = [str(issue)]
+            session.current_spec_dict = session.mem.get_spec(issue)
+            session.current_spec = _format_spec(session.current_spec_dict) if session.current_spec_dict else None
+            session.pre_prod_url = pipe.get("preview_url")
+            _stamp_pipeline(session, last_node="resume_delivery", next_node="verify_pre_prod",
+                            status="shipped", terminal=False)
+            return {"content": [{"type": "text", "text": (
+                f"resume_delivery: issue #{issue} already merged to pre-prod (change_risk={session.change_risk}). "
+                "Do NOT re-test or re-deploy. Next: call verify_pre_prod."
+            )}]}
+
         repo_path = session.active_repo_path
         prod_branch = session.env.prod_branch
         pre_prod_branch = session.env.pre_prod_branch
@@ -1069,12 +1225,14 @@ def _tools_for(session: OrchestratorSession) -> list:
 
         if _commit_in(prod_branch):
             session.mem.mark_status_done(issue)
+            _stamp_pipeline(session, last_node="resume_delivery", next_node=None,
+                            status="done", terminal=True)
             session.note(
                 f"resume_delivery: #{issue} commit {commit[:8]} already on {prod_branch} -- marked done", ok=True
             )
             return {"content": [{"type": "text", "text": (
-                f"Issue #{issue} is already in production (commit {commit[:8]} is on {prod_branch}). "
-                "Marked status:done and closed it. Nothing to build or deploy -- end this run."
+                f"resume_delivery: issue #{issue} is already in production (commit {commit[:8]} is on "
+                f"{prod_branch}). Marked status:done and closed it. Next: end the run."
             )}]}
 
         branch_on_remote = bool(branch) and subprocess.run(
@@ -1120,11 +1278,12 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.change_risk = None
         session.code_complete_issue_numbers = [str(issue)]
         session.session_id = session.session_id or session.mem.resume_session_id_for(resolves_id)
+        _stamp_pipeline(session, last_node="resume_delivery", next_node="run_local_tests",
+                        status="code_complete", terminal=False)
         session.note(f"resume_delivery: checked out {branch!r} for issue #{issue}", ok=True)
         return {"content": [{"type": "text", "text": (
-            f"Issue #{issue} is code-complete on branch {branch!r}, now checked out. The code is "
-            "already written -- do NOT call implement_feature. Call run_local_tests, then "
-            "deploy_pre_prod, then verify_pre_prod, then end this run."
+            f"resume_delivery: branch {branch!r} checked out for issue #{issue} -- the code is already "
+            "written, do NOT call implement_feature. Next: call run_local_tests."
         )}]}
 
     @tool(
@@ -1138,6 +1297,18 @@ def _tools_for(session: OrchestratorSession) -> list:
             return stop
         if session.cb_summary is None and not session.cb_summaries:
             return {"content": [{"type": "text", "text": "Call understand_codebase first."}], "is_error": True}
+        if session.deployed_to_pre_prod:
+            return {"content": [{"type": "text", "text": (
+                "run_local_tests: OUT OF CONTRACT -- this run already deployed to pre-prod. "
+                "Do not re-test. Next: call verify_pre_prod, or end the run if it's already verified."
+            )}], "is_error": True}
+        if session.committed_issue and session.mem.issue_status(session.committed_issue) in _TERMINAL_STATUSES:
+            st = session.mem.issue_status(session.committed_issue)
+            nxt = "call verify_pre_prod" if st == "shipped" else "end the run"
+            return {"content": [{"type": "text", "text": (
+                f"run_local_tests: OUT OF CONTRACT -- issue #{session.committed_issue} is already "
+                f"status:{st}; its code was tested and merged on a prior run. Next: {nxt}."
+            )}], "is_error": True}
         test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
         if stop := _check_auth_failure(session, "run_local_tests", test):
             return stop
@@ -1212,12 +1383,16 @@ def _tools_for(session: OrchestratorSession) -> list:
         session.note(f"run_local_tests: passed={passed} | {detail}", ok=passed, cost_usd=test.cost_usd, turns=test.turns)
         if not passed:
             session.record_failure("run_local_tests")
-        else:
-            session.record_success("run_local_tests")
-        return {
-            "content": [{"type": "text", "text": f"Local tests {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],
-            "is_error": not passed,
-        }
+            return {"content": [{"type": "text", "text": (
+                f"run_local_tests: FAILED. {detail}. {test.text[:1500]}\n"
+                "Fix the code and re-run run_local_tests, or end the run."
+            )}], "is_error": True}
+        session.record_success("run_local_tests")
+        _stamp_pipeline(session, last_node="run_local_tests", next_node="deploy_pre_prod",
+                        status="code_complete", terminal=False)
+        return {"content": [{"type": "text", "text": (
+            f"run_local_tests: PASSED. {detail}. Next: call deploy_pre_prod."
+        )}]}
 
     @tool(
         "deploy_pre_prod",
@@ -1252,6 +1427,18 @@ def _tools_for(session: OrchestratorSession) -> list:
         if stop := session.check_push_failure(session.feature_branch):
             session.note("deploy_pre_prod: refused, feature branch failed to push to GitHub", ok=False)
             return stop
+        if session.deployed_to_pre_prod:
+            return {"content": [{"type": "text", "text": (
+                "deploy_pre_prod: OUT OF CONTRACT -- already deployed to pre-prod this run. "
+                "Next: call verify_pre_prod, or end the run."
+            )}], "is_error": True}
+        if session.committed_issue and session.mem.issue_status(session.committed_issue) in _TERMINAL_STATUSES:
+            st = session.mem.issue_status(session.committed_issue)
+            nxt = "call verify_pre_prod" if st == "shipped" else "end the run"
+            return {"content": [{"type": "text", "text": (
+                f"deploy_pre_prod: OUT OF CONTRACT -- issue #{session.committed_issue} is already "
+                f"status:{st}; it was merged to pre-prod on a prior run. Next: {nxt}."
+            )}], "is_error": True}
 
         from agentra.agents.git_ops import fetch_ref
 
@@ -1303,10 +1490,18 @@ def _tools_for(session: OrchestratorSession) -> list:
                     f"Merged to pre-prod without a live deploy ({session.change_risk} change, local "
                     "tests are sufficient proof).",
                 )
-            return {
-                "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this change."}],
-                "is_error": not ok,
-            }
+                _stamp_pipeline(session, last_node="deploy_pre_prod", next_node=None,
+                                status="tested", terminal=True)
+            if not ok:
+                return {"content": [{"type": "text", "text": (
+                    f"deploy_pre_prod: FAILED. {deploy.text[:1500]}\n"
+                    "Fix and re-run run_local_tests + deploy_pre_prod, or end the run."
+                )}], "is_error": True}
+            return {"content": [{"type": "text", "text": (
+                f"deploy_pre_prod: MERGED to pre-prod (change_risk={session.change_risk}, no live "
+                "deploy -- local tests are sufficient proof at this size). Issue marked tested. "
+                "Next: end the run."
+            )}]}
 
         strategy = deployment.PRE_PROD_STRATEGIES[session.env.deploy_strategy]
         deploy = await strategy(
@@ -1357,14 +1552,25 @@ def _tools_for(session: OrchestratorSession) -> list:
         if not ok:
             session.mem.record_failure(session.run_id, "deployment", deploy.text)
             session.record_failure("deploy_pre_prod")
-            return {"content": [{"type": "text", "text": deploy.text[:2000]}], "is_error": True}
+            return {"content": [{"type": "text", "text": (
+                f"deploy_pre_prod: FAILED. {deploy.text[:1500]}\n"
+                "Fix and re-run run_local_tests + deploy_pre_prod, or end the run."
+            )}], "is_error": True}
         session.record_success("deploy_pre_prod")
+        # No live preview URL to verify: `external` (repo's own CI/CD), `ci_cd_on_push`
+        # (Vercel/Firebase git integration deploys async), or a deploy that just didn't
+        # return one. The merge IS the terminal pre-prod confirmation -- verify_pre_prod
+        # would otherwise refuse forever ("no live URL"), stranding the issue at
+        # status:shipped and check_backlog re-picking it every run (confirmed live: #3).
         if session.env.deploy_strategy == "external":
-            # No preview_url ever exists for this strategy -- the repo's own external
-            # CI/CD deploys asynchronously, on infra agentra has no live URL to check.
-            # The merge succeeding IS the terminal pre-prod confirmation, same reasoning
-            # as the change-risk skip path above: verify_pre_prod would otherwise refuse
-            # forever ("no live URL to verify yet"), stranding every issue at status:shipped.
+            merge_reason = "the repo's own CI/CD deploys on push"
+        elif session.env.ci_cd_on_push:
+            merge_reason = "ci_cd_on_push -- the repo's Vercel/Firebase git integration deploys on push"
+        elif not session.pre_prod_url:
+            merge_reason = "the deploy returned no live preview URL"
+        else:
+            merge_reason = None
+        if merge_reason is not None:
             session.pre_prod_verified = True
             if session.code_complete_issue_numbers:
                 moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
@@ -1373,17 +1579,31 @@ def _tools_for(session: OrchestratorSession) -> list:
                     session.mem.record_tested(moved, session.run_id)
             _notify_shipped_pending(
                 session,
-                f"Merged to {session.env.pre_prod_branch!r} ({deploy.text[:500]}) -- this repo's own "
-                "CI/CD handles the deploy; no live pre-prod URL for agentra to verify.",
+                f"Merged to {session.env.pre_prod_branch!r} ({deploy.text[:500]}) -- {merge_reason}; "
+                "no live pre-prod URL for agentra to verify.",
             )
-            return {
-                "content": [{"type": "text", "text": f"{deploy.text[:2000]} No verify_pre_prod call needed for this strategy."}],
-            }
+            _stamp_pipeline(session, last_node="deploy_pre_prod", next_node=None,
+                            status="tested", terminal=True)
+            _loop_id = _loop_id_for_committed(session)
+            if _loop_id:
+                try:
+                    registry.set_loop_status(_loop_id, "shipped")
+                except Exception:
+                    pass
+            return {"content": [{"type": "text", "text": (
+                f"deploy_pre_prod: MERGED to {session.env.pre_prod_branch} ({merge_reason} -- no live "
+                "URL to verify). Issue marked tested. Next: end the run."
+            )}]}
         if session.code_complete_issue_numbers:
             moved = session.mem.record_shipped_to_preprod(session.code_complete_issue_numbers, session.run_id)
             session.code_complete_issue_numbers = [i for i in session.code_complete_issue_numbers if i not in moved]
             session.shipped_this_cycle_issue_numbers.extend(moved)
-        return {"content": [{"type": "text", "text": deploy.text[:2000]}]}
+        _stamp_pipeline(session, last_node="deploy_pre_prod", next_node="verify_pre_prod",
+                        status="shipped", terminal=False)
+        return {"content": [{"type": "text", "text": (
+            f"deploy_pre_prod: DEPLOYED (change_risk={session.change_risk}) -> {session.pre_prod_url}. "
+            "Next: call verify_pre_prod."
+        )}]}
 
     @tool(
         "verify_pre_prod",
@@ -1393,23 +1613,30 @@ def _tools_for(session: OrchestratorSession) -> list:
     async def verify_pre_prod(_args):
         if stop := session.check_hard_stop():
             return stop
+        if session.pre_prod_verified:
+            return {"content": [{"type": "text", "text": (
+                "verify_pre_prod: NOTHING TO VERIFY -- pre-prod is already verified this run. "
+                "Next: end the run."
+            )}]}
         if session.change_risk in change_risk.SKIP_PRE_PROD:
             session.note(
                 f"verify_pre_prod: skipped, deploy_pre_prod classified this change as {session.change_risk}", ok=True
             )
-            return {
-                "content": [{"type": "text", "text": f"Nothing to verify -- deploy_pre_prod classified this as a {session.change_risk} change and already merged it without a live deploy."}],
-            }
-        if session.env.deploy_strategy == "external" and session.pre_prod_verified:
-            session.note("verify_pre_prod: skipped, external strategy has no live URL to verify", ok=True)
-            return {
-                "content": [{"type": "text", "text": "Nothing to verify -- this repo's own CI/CD handles the deploy; deploy_pre_prod already confirmed the merge."}],
-            }
+            return {"content": [{"type": "text", "text": (
+                f"verify_pre_prod: NOTHING TO VERIFY -- deploy_pre_prod classified this as a "
+                f"{session.change_risk} change and merged it without a live deploy. Next: end the run."
+            )}]}
+        if (session.env.deploy_strategy == "external" or session.env.ci_cd_on_push) and session.pre_prod_verified:
+            session.note("verify_pre_prod: skipped, no live URL for this deploy strategy", ok=True)
+            return {"content": [{"type": "text", "text": (
+                "verify_pre_prod: NOTHING TO VERIFY -- the repo's own CI/CD handles the deploy; "
+                "deploy_pre_prod already confirmed the merge. Next: end the run."
+            )}]}
         if not session.pre_prod_url:
-            return {
-                "content": [{"type": "text", "text": "Call deploy_pre_prod first — no live URL to verify yet."}],
-                "is_error": True,
-            }
+            return {"content": [{"type": "text", "text": (
+                "verify_pre_prod: no live URL to verify. If deploy_pre_prod already ran this run, "
+                "the merge was the terminal proof -- end the run. Otherwise call deploy_pre_prod first."
+            )}], "is_error": True}
         spec_for_verification = session.current_spec or session.cb_summary or "No spec available."
         criteria = (session.current_spec_dict or {}).get("acceptance_criteria")
         test = await testing.run_pre_prod(
@@ -1441,13 +1668,26 @@ def _tools_for(session: OrchestratorSession) -> list:
             if session.pre_prod_url:
                 verification_result += f" Preview: {session.pre_prod_url}"
             _notify_shipped_pending(session, verification_result)
+            _stamp_pipeline(session, last_node="verify_pre_prod", next_node=None,
+                            status="tested", terminal=True)
+            _loop_id = _loop_id_for_committed(session)
+            if _loop_id:
+                try:
+                    registry.set_loop_status(_loop_id, "shipped")
+                except Exception:
+                    pass
         if session.env.deploy_strategy == "self_hosted_vm":
             # Single-shot, ephemeral sibling -- tear it down once its report is
             deployment.teardown_self_hosted_preprod(session.active_repo_path, session.run_id)
-        return {
-            "content": [{"type": "text", "text": f"Live verification {'PASSED' if passed else 'FAILED'}. {test.text[:2000]}"}],
-            "is_error": not passed,
-        }
+        if not passed:
+            return {"content": [{"type": "text", "text": (
+                f"verify_pre_prod: FAILED. {detail}. {test.text[:1500]}\n"
+                "Fix and re-run, or end the run."
+            )}], "is_error": True}
+        return {"content": [{"type": "text", "text": (
+            f"verify_pre_prod: PASSED. {detail}. Issue marked tested. Next: end the run -- "
+            "check_backlog picks up the next item next run."
+        )}]}
 
     @tool(
         "assess_feedback",
