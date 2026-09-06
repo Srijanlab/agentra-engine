@@ -135,7 +135,7 @@ async def _run_autonomous_background(
             # Human-in-the-loop escalation (GitHub issue #34): if the cycle
             _set_run(
                 run_key,
-                status="waiting_for_human" if report.waiting_for_human else "completed",
+                status="blocked" if report.waiting_for_human else "completed",
                 ended_at=time.time(),
                 cost_usd=report.cost_usd,
                 summary=report.final_message,
@@ -298,12 +298,13 @@ def _reconcile_human_input_for_app(app_name: str) -> None:
     if repo is None:
         return
     mem = Memory(repo)
-    for run in registry.list_waiting_for_human():
-        if run.get("app") != app_name or run.get("status") not in ("waiting_for_human", "escalated"):
+    for loop in registry.list_waiting_for_human():
+        if loop.get("app") != app_name:
             continue
-        issue_number = (run.get("human_input") or {}).get("issue_number")
+        issue_number = loop.get("issue_number") or (loop.get("human_input") or {}).get("issue_number")
         if issue_number is None:
             continue
+        issue_number = int(issue_number)
         try:
             answer = mem.find_unanswered_human_input_comment(issue_number)
             if not answer:
@@ -329,19 +330,20 @@ def _reconcile_human_input_timeouts() -> None:
     from agentra import urls
     from agentra.connectors import slack
 
-    for run in escalated:
-        human_input = run.get("human_input") or {}
+    for loop in escalated:
+        human_input = loop.get("human_input") or {}
+        ref = loop.get("last_run_key") or loop.get("loop_id") or ""
         slack.notify_human_input_required(
-            app=run.get("app") or "",
-            run_id=run.get("run_key") or "",
+            app=loop.get("app") or "",
+            run_id=ref,
             question=human_input.get("question") or "(question unavailable)",
             issue_url=human_input.get("issue_url"),
-            dashboard_url=urls.dashboard_run_url(run.get("run_key") or "", run.get("app") or ""),
+            dashboard_url=urls.dashboard_run_url(ref, loop.get("app") or ""),
             branch=human_input.get("branch"),
             session_id=human_input.get("session_id"),
             escalated=True,
         )
-        _server_log("scheduled", f"app={run.get('app')!r} run_key={run.get('run_key')} -- waiting_for_human past max-wait, escalated")
+        _server_log("scheduled", f"app={loop.get('app')!r} loop={loop.get('loop_id')} -- waiting_for_human past max-wait, escalated")
 
 
 @router.post("/trigger/scheduled")

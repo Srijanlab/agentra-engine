@@ -444,30 +444,31 @@ def test_reconcile_stale_runs_marks_orphaned_runs_failed(ddb_env):
 
 
 def test_list_waiting_for_human(ddb_env):
-    from agentra.registry import runs
+    from agentra.registry import loops
 
-    runs.record_run("run1", app="myapp", source="scheduled", status="waiting_for_human", started_at=100.0)
-    runs.record_run("run2", app="myapp", source="scheduled", status="escalated", started_at=200.0)
-    runs.record_run("run3", app="myapp", source="scheduled", status="completed", started_at=300.0)
+    l1 = loops.bind_loop("myapp", 1, title="#1")
+    loops.set_loop_human_input(l1, {"waiting_since": 100.0, "question": "q"})
+    l2 = loops.bind_loop("myapp", 2, title="#2")
+    loops.set_loop_human_input(l2, {"waiting_since": 200.0, "question": "q"})
+    loops.set_loop_status(l2, "escalated")
+    loops.bind_loop("myapp", 3, title="#3")  # active
 
-    waiting = {r["run_key"] for r in runs.list_waiting_for_human()}
+    waiting = {l["loop_id"] for l in loops.list_waiting_for_human()}
 
-    assert waiting == {"run1", "run2"}
+    assert waiting == {l1, l2}
 
 
 def test_reconcile_waiting_for_human_escalates_past_the_deadline(ddb_env):
-    from agentra.registry import runs
+    from agentra.registry import loops
 
     now = time.time()
-    runs.record_run(
-        "run1", app="myapp", source="scheduled", status="waiting_for_human", started_at=now - 100000,
-        human_input={"waiting_since": now - 100000},
-    )
+    lid = loops.bind_loop("myapp", 1, title="#1")
+    loops.set_loop_human_input(lid, {"waiting_since": now - 100000, "question": "q"})
 
-    escalated = runs.reconcile_waiting_for_human()
+    escalated = loops.reconcile_waiting_for_human()
 
-    assert [r["run_key"] for r in escalated] == ["run1"]
-    assert runs.get_run("run1")["status"] == "escalated"
+    assert [l["loop_id"] for l in escalated] == [lid]
+    assert loops.get_loop(lid)["status"] == "escalated"
 
 
 def test_bind_loop_roll_up_and_status(ddb_env):

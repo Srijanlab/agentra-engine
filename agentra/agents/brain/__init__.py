@@ -80,7 +80,10 @@ def _finish_loop_rollup(run_id: str, report: "AutonomousCycleReport") -> None:
         loop_id = run.get("loop_id")
         if not loop_id:
             return
-        status = "waiting_for_human" if report.waiting_for_human else (run.get("status") or "completed")
+        # A blocked run still terminates; the *loop* carries waiting_for_human
+        # (mark_waiting_for_human -> set_loop_human_input, and roll_up_loop keeps it
+        # for a "blocked" run status too).
+        status = "blocked" if report.waiting_for_human else (run.get("status") or "completed")
         registry.roll_up_loop(loop_id, run_id, status, report.cost_usd)
     except Exception:
         logger.warning("loop roll-up failed for run %s", run_id, exc_info=True)
@@ -258,7 +261,15 @@ class OrchestratorSession:
         )
         from agentra import registry
 
-        registry.record_run(self.run_id, status="waiting_for_human", human_input=self.human_input)
+        # The loop is what's waiting_for_human, not the run -- the run terminates
+        # normally and a human's answer dispatches a fresh run against the loop.
+        registry.record_run(self.run_id, human_input=self.human_input)
+        loop_id = (
+            registry.loop_id_for_issue(self.app_name, issue_number)
+            if issue_number is not None else None
+        )
+        if loop_id is not None:
+            registry.set_loop_human_input(loop_id, self.human_input)
 
     def note(
         self, action: str, *, agent: str | None = None, ok: bool | None = None, cost_usd: float = 0.0, turns: int | None = None,

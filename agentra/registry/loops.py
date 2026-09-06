@@ -11,7 +11,7 @@ from agentra.registry.runs import list_runs, loop_id_for_issue
 
 _LOOPS_LIST_LIMIT = 100
 _VALID_KINDS = ("feature", "bug", "objective")
-_VALID_STATUSES = ("active", "waiting_for_human", "shipped", "released", "abandoned")
+_VALID_STATUSES = ("active", "waiting_for_human", "escalated", "shipped", "released", "abandoned")
 
 
 def bind_loop(
@@ -77,7 +77,7 @@ def bind_loop_for_run(app: str, objective: str) -> str:
 
     existing_loops = [
         l for l in list_loops(app=app, limit=10)
-        if l.get("issue_number") and l.get("status") in ("active", "waiting_for_human")
+        if l.get("issue_number") and l.get("status") in ("active", "waiting_for_human", "escalated")
     ]
     if existing_loops:
         return existing_loops[0]["loop_id"]
@@ -104,7 +104,7 @@ def roll_up_loop(loop_id: str, run_key: str, run_status: str, cost_usd: float) -
     doc = _get_loop_doc(loop_id)
     if doc is None:
         return
-    loop_status = "waiting_for_human" if run_status in ("waiting_for_human", "escalated") else doc.get("status", "active")
+    loop_status = "waiting_for_human" if run_status in ("waiting_for_human", "escalated", "blocked") else doc.get("status", "active")
     if loop_status == "active" and (doc.get("pipeline") or {}).get("terminal"):
         loop_status = "shipped"  # delivered through pre-prod, awaiting a human Promote
     _write_loop(loop_id, {
@@ -150,6 +150,46 @@ def get_loop_pipeline(loop_id: str) -> dict | None:
     """The loop doc's `pipeline` sub-map, or None. Lighter than get_loop (no run
     join) -- check_backlog calls this per candidate item."""
     return (_get_loop_doc(loop_id) or {}).get("pipeline") or None
+
+
+def set_loop_human_input(loop_id: str, human_input: dict) -> None:
+    """Park the loop on a blocking human question. The *run* that hit the block
+    still terminates normally -- the loop is what's 'waiting_for_human', and a
+    human's answer dispatches a fresh run against it."""
+    if _get_loop_doc(loop_id) is None:
+        return
+    _write_loop(loop_id, {
+        "status": "waiting_for_human",
+        "human_input": human_input,
+        "updated_at": time.time(),
+    })
+
+
+def list_waiting_for_human(limit: int = _LOOPS_LIST_LIMIT) -> list[dict]:
+    """Loops parked on a blocking human question -- backs the dashboard's 'Needs
+    your input' panel and the GitHub-comment answer reconciler."""
+    return [l for l in list_loops(limit=limit) if l.get("status") in ("waiting_for_human", "escalated")]
+
+
+def reconcile_waiting_for_human() -> list[dict]:
+    """A loop parked on a human question must never sit there forever with no
+    further signal -- past core.HUMAN_INPUT_MAX_WAIT_SECONDS since it started
+    waiting, flip 'waiting_for_human' -> 'escalated' so the dashboard (and a
+    re-sent Slack message, dispatched by the caller) can tell 'still within
+    normal wait' from 'this has been sitting too long'. Pure state transition,
+    no outbound calls -- keeps registry/ dependency-free of connectors/."""
+    now = time.time()
+    escalated: list[dict] = []
+    for loop in list_loops():
+        if loop.get("status") != "waiting_for_human":
+            continue
+        waiting_since = (loop.get("human_input") or {}).get("waiting_since")
+        if waiting_since is None or now - waiting_since <= core.HUMAN_INPUT_MAX_WAIT_SECONDS:
+            continue
+        set_loop_status(loop["loop_id"], "escalated")
+        loop["status"] = "escalated"
+        escalated.append(loop)
+    return escalated
 
 
 def get_loop(loop_id: str) -> dict | None:
