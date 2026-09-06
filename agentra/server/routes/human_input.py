@@ -62,7 +62,7 @@ async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, 
             )
             _set_run(
                 run_key,
-                status="waiting_for_human" if report.waiting_for_human else "completed",
+                status="blocked" if report.waiting_for_human else "completed",
                 ended_at=time.time(),
                 cost_usd=report.cost_usd,
                 summary=report.final_message,
@@ -116,11 +116,6 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         _server_log(source, f"app={app_name!r} issue=#{issue_number} -- answer ignored, already resolved")
         return {"run_key": None, "already_answered": True}
 
-    for run in registry.list_waiting_for_human():
-        human_input = run.get("human_input") or {}
-        if run.get("app") == app_name and human_input.get("issue_number") == issue_number:
-            registry.record_run(run["run_key"], status="answered")
-
     objective = mem.get_objective() or ""
     tracking_issue = context.get("tracking_issue")
     loop_id = (
@@ -138,6 +133,13 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         objective=objective,
         loop_id=loop_id,
     )
+    # The loop is being actively worked again -- drop it out of the "needs input"
+    # listing now; the resume run's own roll-up sets the next loop status.
+    try:
+        if tracking_issue is not None:
+            registry.set_loop_status(loop_id, "active")
+    except Exception:
+        logger.warning("dispatch_human_answer: could not set loop %s active", loop_id, exc_info=True)
     mem.record_human_answer(issue_number, answer, resumed_run_key=run_key)
     _ack_slack_thread(app_name, issue_number, answer, source)
     _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} -- human answer accepted, resuming")
@@ -159,7 +161,20 @@ async def submit_human_input(app_name: str, payload: HumanInputAnswerPayload) ->
     return {"accepted": True, **dispatched}
 
 
+def _needs_human_shape(loop: dict) -> dict:
+    """A waiting loop, shaped like the dashboard's NeedsHumanRun (run_key + app +
+    status + human_input) -- the panel is issue-oriented, so run_key is just a
+    display/React key and maps to the loop's most recent run."""
+    return {
+        "run_key": loop.get("last_run_key") or loop.get("loop_id") or "",
+        "app": loop.get("app") or "",
+        "status": loop.get("status"),
+        "human_input": loop.get("human_input") or {},
+    }
+
+
 @router.get("/needs-human")
 async def list_needs_human() -> dict:
-    """Backs the dashboard's 'Needs your input' panel -- every run..."""
-    return {"runs": registry.list_waiting_for_human()}
+    """Backs the dashboard's 'Needs your input' panel -- one entry per loop parked
+    on a blocking human question (the run that hit the block has already terminated)."""
+    return {"runs": [_needs_human_shape(l) for l in registry.list_waiting_for_human()]}

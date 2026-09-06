@@ -45,12 +45,10 @@ from agentra.registry.runs import (
     last_run_at,
     list_agent_steps,
     list_runs,
-    list_waiting_for_human,
     loop_id_for,
     loop_id_for_issue,
     record_run,
     reconcile_stale_runs,
-    reconcile_waiting_for_human,
 )
 from agentra.registry.loops import (
     bind_loop,
@@ -58,7 +56,10 @@ from agentra.registry.loops import (
     get_loop,
     get_loop_pipeline,
     list_loops,
+    list_waiting_for_human,
+    reconcile_waiting_for_human,
     roll_up_loop,
+    set_loop_human_input,
     set_loop_pipeline,
     set_loop_status,
 )
@@ -125,6 +126,7 @@ __all__ = [
     "get_loop",
     "get_loop_pipeline",
     "roll_up_loop",
+    "set_loop_human_input",
     "set_loop_pipeline",
     "set_loop_status",
     "list_loops",

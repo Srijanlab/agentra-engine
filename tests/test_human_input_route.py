@@ -53,6 +53,7 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
     monkeypatch.setattr(registry, "PAUSE_PATH", home / "paused.json")
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
+    monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")
     monkeypatch.setattr(registry, "_AGENT_STEPS_PATH", home / "agent_steps.jsonl")
     server._active_runs.clear()
     server._app_locks.clear()
@@ -60,7 +61,7 @@ def _isolate_registry(tmp_path, monkeypatch):
     github_fake.install(monkeypatch=monkeypatch)
 
 
-def _escalate(repo: Path, *, tracking_issue: int = 17, branch: str = "dev/abc-add-login", session_id: str = "sess-abc123") -> int:
+def _escalate(repo: Path, *, tracking_issue: int | None = None, branch: str = "dev/abc-add-login", session_id: str = "sess-abc123") -> int:
     """Files a needs_human issue with resume-correlation context stamped on
     it -- the state _escalate_to_human (agents/brain/tools.py) leaves
     behind, reproduced directly here so these tests don't need a full
@@ -73,7 +74,8 @@ def _escalate(repo: Path, *, tracking_issue: int = 17, branch: str = "dev/abc-ad
     )
     mem.record_human_input_context(
         issue_number, app=repo.name, run_id="run1", question="Should we use OAuth or magic links?",
-        branch=branch, session_id=session_id, tracking_issue=tracking_issue,
+        branch=branch, session_id=session_id,
+        tracking_issue=tracking_issue if tracking_issue is not None else issue_number,
     )
     return issue_number
 
@@ -108,20 +110,18 @@ def test_dispatch_human_answer_records_the_answer_and_removes_needs_human_label(
     assert any("Answered: Use OAuth." in c for c in issue.get("comments", []))
 
 
-def test_dispatch_human_answer_flips_the_waiting_run_to_answered(tmp_path, monkeypatch):
+def test_dispatch_human_answer_reactivates_the_loop_and_queues_a_fresh_run(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path)
     issue_number = _escalate(repo)
-    registry.record_run(
-        "orig-run", app="myapp", status="waiting_for_human", started_at=time.time(),
-        human_input={"issue_number": issue_number, "question": "q", "waiting_since": time.time()},
-    )
+    loop_id = registry.bind_loop("myapp", issue_number, title=f"#{issue_number}")
+    registry.set_loop_human_input(loop_id, {"issue_number": issue_number, "question": "q", "waiting_since": time.time()})
 
-    human_input.dispatch_human_answer("myapp", repo, issue_number, "Use OAuth.", source="human-input")
+    out = human_input.dispatch_human_answer("myapp", repo, issue_number, "Use OAuth.", source="human-input")
 
-    assert registry.get_run("orig-run")["status"] == "answered"
-    waiting_now = [r["run_key"] for r in registry.list_waiting_for_human()]
-    assert "orig-run" not in waiting_now
+    assert out["run_key"]  # a fresh run was queued
+    assert registry.get_loop(loop_id)["status"] == "active"
+    assert loop_id not in {l["loop_id"] for l in registry.list_waiting_for_human()}
 
 
 # -- POST /apps/{app}/human-input --------------------------------------------
@@ -179,16 +179,19 @@ def test_submit_human_input_respects_system_pause(tmp_path, monkeypatch):
 # -- GET /needs-human ---------------------------------------------------------
 
 
-def test_list_needs_human_returns_waiting_and_escalated_runs(tmp_path, monkeypatch):
+def test_list_needs_human_returns_waiting_and_escalated_loops(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
-    registry.record_run("r1", app="myapp", status="waiting_for_human", started_at=time.time(), human_input={"question": "q"})
-    registry.record_run("r2", app="myapp", status="completed", started_at=time.time())
+    l1 = registry.bind_loop("myapp", 1, title="#1")
+    registry.set_loop_human_input(l1, {"issue_number": 1, "question": "q", "waiting_since": time.time()})
+    registry.bind_loop("myapp", 2, title="#2")  # active, not waiting
 
     response = TestClient(server.app).get("/needs-human")
 
     assert response.status_code == 200
-    keys = {r["run_key"] for r in response.json()["runs"]}
-    assert keys == {"r1"}
+    body = response.json()["runs"]
+    assert len(body) == 1
+    assert body[0]["status"] == "waiting_for_human"
+    assert body[0]["human_input"]["issue_number"] == 1
 
 
 # -- end-to-end: the resumed cycle reuses the original branch/session -------
