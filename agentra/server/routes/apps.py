@@ -135,7 +135,16 @@ async def _app_digest(name: str, info: dict, github_data: dict | None = None) ->
 
 async def _app_digest_inner(name: str, info: dict, github_data: dict | None = None) -> tuple[str, dict]:
     view = _coord_view(name, info)
-    repo = Path(view["repo_path"]) if view["repo_path"] else None
+    # Resolve the repo exactly as GET /apps/{name} (_build_app_detail) does -- via
+    # the REPOS_ROOT-based checkout, resyncing/cloning as needed -- so both endpoints
+    # load the same environment config instead of this digest falling back to the
+    # stale registration-time path and then to EnvironmentConfig() defaults (issue #6).
+    try:
+        repo = registry.get_app_repo(name)
+    except Exception:
+        repo = None
+    if repo is None and view["repo_path"]:
+        repo = Path(view["repo_path"])
     if (repo is None or not repo.exists()) and not view["repo_url"]:
         defaults = environments.EnvironmentConfig()
         return name, {
@@ -176,7 +185,7 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
         known_bugs = len(bugs)
 
     return name, {
-        "repo_path": view["repo_path"],
+        "repo_path": str(repo) if repo else view["repo_path"],
         "objective": mem.get_objective(),
         "shipped_count": shipped_count,
         "released_count": released_count,
