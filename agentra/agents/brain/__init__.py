@@ -15,7 +15,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, create_sdk_mcp_server, query
 
-from agentra.agents import architecture_review, codebase, codegraph, deployment, discovery, feedback, human_answer_judge, implementation, requirements, testing
+from agentra.agents import architecture_review, codebase, deployment, discovery, feedback, human_answer_judge, implementation, requirements, testing
 from agentra.agents.base import _agent_model, _sdk_env, _sum_model_usage, log_claude_message, run_log_scope, single_prompt_stream
 from agentra.agents.brain.tools import _file_incidental_findings, _format_spec, _tools_for, MAX_SELF_HEAL_ATTEMPTS
 from agentra.agents.brain.prompts import SYSTEM_PROMPT
@@ -196,6 +196,12 @@ class OrchestratorSession:
     # entry app this dict has exactly one item and cb_summary is pre-seeded from it.
     cb_summaries: dict[str, str] = field(default_factory=dict)
     _env_cache: dict[str, EnvironmentConfig] = field(default_factory=dict, repr=False)
+    # Per-code-repo local-file Memory for .agentra/ spec files (architecture/design/
+    # testing/state) -- NOT session.mem (the coordination Memory). Lazily built.
+    _repo_mem_cache: dict[str, Memory] = field(default_factory=dict, repr=False)
+    # Code repos whose .agentra/ specs sync_spec regenerated this cycle -- persist_repo_specs
+    # pushes each to its pre-prod branch (eager, before implement_feature forks a branch).
+    stale_spec_repos: set[str] = field(default_factory=set)
 
     @property
     def app_name(self) -> str:
@@ -209,6 +215,22 @@ class OrchestratorSession:
         if self.active_repo is not None:
             return self.code_repos[self.active_repo].path
         return self.repo
+
+    def repo_memory(self, name: str) -> Memory:
+        """Local-file Memory rooted at code repo `name`'s checkout, for `.agentra/`
+        spec files (architecture/design/testing/state.json) -- these are per-repo and
+        never proxied to the engine. Falls back to session.mem when code_repos is
+        empty (CLI / unregistered app / tests) so nothing there changes."""
+        if not self.code_repos or name not in self.code_repos or self.code_repos[name].path is None:
+            return self.mem
+        if name not in self._repo_mem_cache:
+            self._repo_mem_cache[name] = Memory(self.code_repos[name].path)
+        return self._repo_mem_cache[name]
+
+    @property
+    def active_repo_memory(self) -> Memory:
+        """repo_memory for the active code repo, or session.mem before one is picked."""
+        return self.repo_memory(self.active_repo) if self.active_repo else self.mem
 
     def env_for(self, name: str) -> EnvironmentConfig:
         """The real per-repo deploy config for one code_repos entry, lazily loaded from
@@ -464,28 +486,44 @@ async def _run_autonomous_cycle_body(
         code_repos=code_repos,
         _app_name=app_name,
     )
-    # Pre-seed from any existing cached scan so the model doesn't have to spend
-    # a real LLM turn re-discovering what's already known -- per code repo when
-    # this is a multi-repo app (code_repos has >1 entry), a single legacy slot
-    # otherwise (cache_key defaults to "codebase", byte-identical to before).
-    # code_repos is empty when this app isn't registered at all (CLI/tests calling
-    # run_autonomous_cycle directly against a bare repo path) -- exactly today's
-    # pre-Phase-2 behavior, a single direct read against whatever `repo` was passed.
+    # Load each code repo's own .agentra/architecture.md spec. sync_spec only
+    # spends an LLM turn when that repo's HEAD moved since state.json.indexed_sha
+    # (then a bounded delta update) -- a steady-state cycle pays zero. code_repos
+    # is empty for an unregistered app (CLI/tests) -> one direct read of session.mem.
     if not code_repos:
-        session.cb_summary = mem.read("architecture", "codebase") or None
+        session.cb_summary = mem.read_spec("architecture") or mem.read("architecture", "codebase") or None
     else:
-        for _name in code_repos:
-            _key = "codebase" if len(code_repos) == 1 else f"codebase_{_name}"
-            _cached = mem.read("architecture", _key)
-            if _cached:
-                session.cb_summaries[_name] = _cached
+        for _name, _spec in code_repos.items():
+            if _spec.path is None:
+                continue
+            _rmem = session.repo_memory(_name)
+            _head = codebase._current_head_sha(_spec.path)
+            if _rmem.read_spec("architecture") and _rmem.indexed_sha() == _head:
+                session.cb_summaries[_name] = codebase._joined(
+                    _rmem.read_spec("architecture"), _rmem.read_spec("design")
+                )
+                session.note(f"spec [{_name}]: current @ {(_head or '?')[:8]} (no scan)", agent="cycle", ok=True)
+                continue
+            _cb = await codebase.sync_spec(_spec.path, _rmem, owner_repo_name=_name)
+            session.cost_usd += _cb.cost_usd
+            session.cb_summaries[_name] = codebase._joined(
+                _rmem.read_spec("architecture"), _rmem.read_spec("design")
+            ) or _cb.text
+            if _cb.ok:
+                session.stale_spec_repos.add(_name)
+            session.note(
+                f"spec sync [{_name}]: ok={_cb.ok} cost=${_cb.cost_usd:.4f}", agent="cycle", ok=_cb.ok,
+                cost_usd=_cb.cost_usd, turns=_cb.turns,
+            )
         if len(code_repos) == 1:
             session.cb_summary = next(iter(session.cb_summaries.values()), None)
-    # Same reasoning applies to the code graph: codebase.run_cached is the only
-    if session.cb_summary:
-        graph_summary = codegraph.load_or_build(repo)
-        if graph_summary:
-            session.cb_summary += graph_summary
+    # Eager persist: land freshly-synced specs on each repo's pre-prod branch NOW,
+    # before implement_feature forks a feature branch from it -- so the feature PR
+    # diff never contains .agentra/ spec files (persist_repo_specs R1).
+    for _name in sorted(session.stale_spec_repos):
+        _err = deployment.persist_repo_specs(code_repos[_name].path, session.env_for(_name).pre_prod_branch)
+        if _err:
+            session.note(f"persist_repo_specs [{_name}] (eager): {_err}", agent="cycle", ok=False)
     session.note(
         f"autonomous cycle start | objective={objective!r} feature_hint={feature!r} skip_deploy={skip_deploy}",
         agent="cycle",
@@ -534,12 +572,18 @@ async def _run_autonomous_cycle_body(
         prompt += f"A feature has been suggested to prioritize: {feature}\n"
     if skip_deploy:
         prompt += "Deployment is disabled for this run — do not call deploy_pre_prod or verify_pre_prod.\n"
-    if session.cb_summary:
+    if session.cb_summaries:
         prompt += (
-            "\nA codebase understanding summary from a prior cycle is already loaded "
-            "(see understand_codebase's tool description) — you do not need to call "
-            "understand_codebase again unless you have a specific reason to think it's "
-            "stale:\n" + session.cb_summary[:4000] + "\n"
+            "\nEach code repo's architecture spec (`.agentra/architecture.md`) is loaded "
+            "and current as of this cycle's start — do NOT call understand_codebase "
+            "unless you have a specific reason to believe one is wrong:\n"
+            + "\n\n".join(f"=== {n} ===\n{t[:3000]}" for n, t in session.cb_summaries.items())
+            + "\n"
+        )
+    elif session.cb_summary:
+        prompt += (
+            "\nThe codebase architecture spec is loaded and current — do NOT call "
+            "understand_codebase unless you believe it's wrong:\n" + session.cb_summary[:4000] + "\n"
         )
     prompt += "Decide what to do and carry it out."
 
@@ -621,6 +665,15 @@ async def _run_autonomous_cycle_body(
     persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
     if persist_error:
         session.note(f"persist_audit_trail: failed: {persist_error}")
+    # Code-repo .agentra/ specs (e.g. testing.md '## Last run' written on the
+    # feature branch this cycle) -> each repo's own pre-prod branch, never the
+    # feature branch. Eager preseed persist already handled architecture/design.
+    for _name, _spec in session.code_repos.items():
+        if _spec.path is None or _spec.path == repo:
+            continue
+        _err = deployment.persist_repo_specs(_spec.path, session.env_for(_name).pre_prod_branch)
+        if _err:
+            session.note(f"persist_repo_specs [{_name}]: failed: {_err}")
 
     session.note("autonomous cycle complete", agent="cycle", ok=True)
     print(f"[agentra] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)

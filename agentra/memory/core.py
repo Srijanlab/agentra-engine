@@ -12,6 +12,27 @@ logger = logging.getLogger(__name__)
 
 CATEGORIES = ("architecture",)
 
+# The per-repo spec files (docs/agentra-spec.md). Live at .agentra/<name>.md --
+# NOT under .agentra/memory/ -- and are agent-maintained, one set per code repo.
+SPEC_FILES = ("architecture", "design", "testing")
+
+_SPEC_HEADER_RE = re.compile(
+    r"\A<!-- owner: [^>\n]+ -->\n<!-- source-sha: [0-9a-f]* -->\n", re.MULTILINE
+)
+
+
+def spec_header(owner: str, sha: str | None) -> str:
+    """The two-line provenance header every non-JSON spec file carries: who owns
+    it (`human`, `agent:codebase`, `agent:testing`, `generated`) and the commit
+    the content was last built from."""
+    return f"<!-- owner: {owner} -->\n<!-- source-sha: {sha or ''} -->\n"
+
+
+def strip_spec_header(text: str) -> str:
+    """The spec body with its provenance header removed -- fed to the Codebase
+    Agent for a delta update so it edits prose, not the header."""
+    return _SPEC_HEADER_RE.sub("", text, count=1)
+
 _SAFETY_DETAIL_LIMIT = 200
 
 _AGENTRA_LABEL = "agentra"

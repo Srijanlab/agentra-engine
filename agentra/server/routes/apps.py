@@ -405,9 +405,9 @@ async def _build_app_detail(name: str, info: dict) -> dict:
         "prod_branch": env_config.prod_branch,
         "schedule_hours": env_config.schedule_hours,
         "alarm_enabled": env_config.alarm_enabled,
-        # GitHub issue #84: the Testing Agent's auto-generated local-test summary,
-        # read-only here, agent-written only (same as codebase/design steering entries).
-        "local_test_summary": mem.read("architecture", "local-test-summary"),
+        # The Testing Agent's per-run summary moved to each code repo's own
+        # .agentra/testing.md '## Last run' (docs/agentra-spec.md); the engine has no
+        # code-repo checkout to read it from. Re-surfacing it here is a follow-up.
         "slack_channel_id": info.get("slack_channel_id"),
     }
 
