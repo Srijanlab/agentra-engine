@@ -133,9 +133,15 @@ async def _run_autonomous_background(
                 repo, objective, env, feature=feature, skip_deploy=skip_deploy, run_id=run_key, app_name=app_name
             )
             # Human-in-the-loop escalation (GitHub issue #34): if the cycle
+            if report.waiting_for_human:
+                _run_status = "blocked"
+            elif report.crashed:
+                _run_status = "failed"
+            else:
+                _run_status = "completed"
             _set_run(
                 run_key,
-                status="blocked" if report.waiting_for_human else "completed",
+                status=_run_status,
                 ended_at=time.time(),
                 cost_usd=report.cost_usd,
                 summary=report.final_message,
@@ -349,6 +355,10 @@ def _reconcile_human_input_timeouts() -> None:
 @router.post("/trigger/scheduled")
 async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
     if payload.app is None:
+        try:
+            registry.reconcile_stale_runs()  # also un-sticks loops stranded at last_run_status="running"
+        except Exception:
+            logger.warning("trigger_scheduled: reconcile_stale_runs failed", exc_info=True)
         await _drain_queued_runs()
         results = {}
         for app_name in registry.list_apps():

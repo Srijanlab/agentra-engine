@@ -45,6 +45,7 @@ from agentra.registry.runs import (
     loop_id_for,
     loop_id_for_issue,
     record_run,
+    reconcile_stale_loops,
     reconcile_stale_runs,
 )
 from agentra.registry.loops import (
@@ -134,6 +135,7 @@ __all__ = [
     "slack_thread_for",
     "record_run",
     "reconcile_stale_runs",
+    "reconcile_stale_loops",
     "reconcile_waiting_for_human",
     "register_app",
     "remove_app",

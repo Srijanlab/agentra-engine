@@ -59,13 +59,29 @@ def test_roll_up_accumulates_cost_and_run_count(tmp_path, monkeypatch):
     loop_id = _bind("r1", "app", 7)
 
     registry.roll_up_loop(loop_id, "r1", "completed", 0.25)
-    registry.roll_up_loop(loop_id, "r1", "waiting_for_human", 0.10)
+    registry.roll_up_loop(loop_id, "r2", "waiting_for_human", 0.10)
 
     loop = registry.get_loop(loop_id)
     assert loop["run_count"] == 2
     assert abs(loop["total_cost_usd"] - 0.35) < 1e-9
     assert loop["last_run_status"] == "waiting_for_human"
     assert loop["status"] == "waiting_for_human"
+
+
+def test_roll_up_is_idempotent_per_run_key(tmp_path, monkeypatch):
+    """A reconcile pass re-folding a run whose original roll-up was lost must not
+    inflate run_count / total_cost_usd."""
+    _isolate(tmp_path, monkeypatch)
+    registry.record_run("r1", app="app", status="running", started_at=time.time())
+    loop_id = _bind("r1", "app", 7)
+
+    registry.roll_up_loop(loop_id, "r1", "running", 0.25)
+    registry.roll_up_loop(loop_id, "r1", "completed", 0.25)
+
+    loop = registry.get_loop(loop_id)
+    assert loop["run_count"] == 1
+    assert abs(loop["total_cost_usd"] - 0.25) < 1e-9
+    assert loop["last_run_status"] == "completed"
 
 
 def test_list_loops_orders_by_updated_at_and_filters_by_app(tmp_path, monkeypatch):

@@ -70,9 +70,11 @@ def _emit_orchestrator_generation(message: ResultMessage, turn_cost: float) -> N
         pass
 
 
-def _finish_loop_rollup(run_id: str, report: "AutonomousCycleReport") -> None:
+def _finish_loop_rollup(run_id: str, report: "AutonomousCycleReport | None") -> None:
     """Fold the finished cycle into its loop's rolling totals (no-op if the cycle
-    never bound a tracked issue)."""
+    never bound a tracked issue). Runs from a `finally`, so `report` is None when
+    the cycle raised before returning -- the loop must still leave the "running"
+    state or every later cycle treats it as in flight."""
     try:
         from agentra import registry
 
@@ -80,11 +82,19 @@ def _finish_loop_rollup(run_id: str, report: "AutonomousCycleReport") -> None:
         loop_id = run.get("loop_id")
         if not loop_id:
             return
-        # A blocked run still terminates; the *loop* carries waiting_for_human
-        # (mark_waiting_for_human -> set_loop_human_input, and roll_up_loop keeps it
-        # for a "blocked" run status too).
-        status = "blocked" if report.waiting_for_human else (run.get("status") or "completed")
-        registry.roll_up_loop(loop_id, run_id, status, report.cost_usd)
+        # Derive the terminal status from the report, NOT the run record: the
+        # background wrapper only writes the run's terminal status *after*
+        # run_autonomous_cycle returns, so run["status"] is still "running" here.
+        if report is None:
+            # Cycle raised before returning (or the process was killed mid-cycle).
+            status, cost = "failed", float(run.get("cost_usd") or 0.0)
+        elif report.waiting_for_human:
+            status, cost = "blocked", report.cost_usd
+        elif report.crashed:
+            status, cost = "failed", report.cost_usd
+        else:
+            status, cost = "completed", report.cost_usd
+        registry.roll_up_loop(loop_id, run_id, status, cost)
     except Exception:
         logger.warning("loop roll-up failed for run %s", run_id, exc_info=True)
 
@@ -125,6 +135,10 @@ class OrchestratorSession:
     actions: list[str] = field(default_factory=list)
     tool_failure_counts: dict[str, int] = field(default_factory=dict)
     hard_stop_reason: str | None = None
+    # The cycle terminated on an unexpected error (orchestrator query() raised, or
+    # a post-cycle persist step failed), not a clean completion or a
+    # waiting_for_human pause. The run is recorded as failed, not completed.
+    crashed: bool = False
     recent_tool_calls: list[tuple[str, bool]] = field(default_factory=list)
     stagnation_detected: bool = False
     # Human-in-the-loop escalation (GitHub issue #34). Set by implement_feature
@@ -397,6 +411,9 @@ class AutonomousCycleReport:
     # Human-in-the-loop escalation (GitHub issue #34): set when this cycle
     waiting_for_human: bool = False
     human_input: dict | None = None
+    # The cycle ended on an unexpected error (see OrchestratorSession.crashed) --
+    # _run_autonomous_background records the run as failed, not completed.
+    crashed: bool = False
 
 
 @observe(name="autonomous-cycle")
@@ -432,6 +449,7 @@ async def run_autonomous_cycle(
             registry.record_run(run_id, langfuse_trace_id=_trace_id)
         except Exception:
             pass
+    _report: AutonomousCycleReport | None = None
     try:
         with propagate_attributes(
             session_id=_loop_id, user_id=_app, tags=[_app, "autonomous-cycle"],
@@ -447,9 +465,12 @@ async def run_autonomous_cycle(
                 "outcome": getattr(_report, "summary", None) or getattr(_report, "outcome", None),
                 "cost_usd": getattr(_report, "total_cost_usd", None),
             })
-            _finish_loop_rollup(run_id, _report)
             return _report
     finally:
+        # Both must run on every exit path -- including an exception in the cycle
+        # body or a CancelledError from a container replacement. Skipping the
+        # roll-up strands the loop at last_run_status="running" forever.
+        _finish_loop_rollup(run_id, _report)
         # Bug #77: single full-document registry flush once this run reaches a
         # terminal state (completed/failed/waiting_for_human) rather than a
         # per-log-line read+write.
@@ -638,6 +659,7 @@ async def _run_autonomous_cycle_body(
                 session.note(f"autonomous cycle blocked: Claude Code authentication failure: {exc}", agent="cycle", ok=False)
             else:
                 final_text = f"autonomous cycle raised: {exc}"
+                session.crashed = True
                 session.note(f"autonomous cycle crashed: {exc}", agent="cycle", ok=False)
             mem.record_failure(run_id, "autonomous-cycle", final_text)
 
@@ -662,20 +684,28 @@ async def _run_autonomous_cycle_body(
         final_text = f"{final_text}\n\n{pause_note}" if final_text else pause_note
         session.note("human-in-the-loop: cycle paused, waiting_for_human", agent="cycle", ok=None)
 
-    persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
-    if persist_error:
-        session.note(f"persist_audit_trail: failed: {persist_error}")
-    # Code-repo .agentra/ specs (e.g. testing.md '## Last run' written on the
-    # feature branch this cycle) -> each repo's own pre-prod branch, never the
-    # feature branch. Eager preseed persist already handled architecture/design.
-    for _name, _spec in session.code_repos.items():
-        if _spec.path is None or _spec.path == repo:
-            continue
-        _err = deployment.persist_repo_specs(_spec.path, session.env_for(_name).pre_prod_branch)
-        if _err:
-            session.note(f"persist_repo_specs [{_name}]: failed: {_err}")
+    # The audit-trail / spec persistence below is best-effort cleanup -- an
+    # exception here must never strand the run (it would skip the report and,
+    # with it, the loop roll-up). Errors are noted and downgrade the run to
+    # crashed, not raised.
+    try:
+        persist_error = deployment.persist_audit_trail(repo, env.pre_prod_branch)
+        if persist_error:
+            session.note(f"persist_audit_trail: failed: {persist_error}")
+        # Code-repo .agentra/ specs (e.g. testing.md '## Last run' written on the
+        # feature branch this cycle) -> each repo's own pre-prod branch, never the
+        # feature branch. Eager preseed persist already handled architecture/design.
+        for _name, _spec in session.code_repos.items():
+            if _spec.path is None or _spec.path == repo:
+                continue
+            _err = deployment.persist_repo_specs(_spec.path, session.env_for(_name).pre_prod_branch)
+            if _err:
+                session.note(f"persist_repo_specs [{_name}]: failed: {_err}")
+    except Exception as exc:
+        session.crashed = True
+        session.note(f"post-cycle spec persistence raised: {exc}", agent="cycle", ok=False)
 
-    session.note("autonomous cycle complete", agent="cycle", ok=True)
+    session.note("autonomous cycle complete", agent="cycle", ok=not session.crashed)
     print(f"[agentra] run {run_id} finished | total cost: ${session.cost_usd:.4f}", flush=True)
 
     return AutonomousCycleReport(
@@ -686,4 +716,5 @@ async def _run_autonomous_cycle_body(
         feature=session.current_feature,
         waiting_for_human=session.waiting_for_human,
         human_input=session.human_input,
+        crashed=session.crashed,
     )
