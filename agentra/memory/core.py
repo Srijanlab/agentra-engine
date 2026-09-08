@@ -77,6 +77,15 @@ _TRANSIENT_FAILURE_PATTERNS = [
     re.compile(r"hit your .{0,30}limit", re.IGNORECASE),
     re.compile(r"overloaded", re.IGNORECASE),
     re.compile(r"returned an error result: success"),
+    # GitHub issue #18: a transient 5xx from the Claude Code / inference
+    # gateway ("API Error: 500 Internal Server Error", Bad Gateway, etc.)
+    # is server-side and should be retried, never filed as a code defect.
+    re.compile(r"API Error:\s*5\d\d", re.IGNORECASE),
+    re.compile(r"\b5\d\d\s+Internal Server Error", re.IGNORECASE),
+    re.compile(r"server-side issue.{0,20}temporary", re.IGNORECASE),
+    re.compile(r"Bad Gateway", re.IGNORECASE),
+    re.compile(r"Service Unavailable", re.IGNORECASE),
+    re.compile(r"Gateway Timeout", re.IGNORECASE),
 ]
 
 # Auth/permission failures: no amount of different code fixes these — the fix
