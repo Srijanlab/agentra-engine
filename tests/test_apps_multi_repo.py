@@ -151,29 +151,3 @@ def test_dispatch_once_does_not_crash_for_a_multi_repo_app(tmp_path, monkeypatch
     summary = registry.dispatch_once()
 
     assert summary.errors == []
-
-
-def test_daily_standup_does_not_crash_for_a_multi_repo_app(tmp_path, monkeypatch):
-    import asyncio
-
-    from agentra import standup
-
-    _isolate_registry(tmp_path, monkeypatch)
-    client = TestClient(server.app)
-    _register_multi_repo(client, tmp_path)
-
-    reports = asyncio.run(standup.run_daily_standup(registry.list_apps()))
-
-    assert "agentra" in reports
-
-
-def test_slack_assistant_finds_agentra_by_app_name(tmp_path, monkeypatch):
-    _isolate_registry(tmp_path, monkeypatch)
-    client = TestClient(server.app)
-    _register_multi_repo(client, tmp_path)
-
-    from agentra.agents import slack_assistant
-
-    repo = slack_assistant._agentra_repo()
-
-    assert repo == registry.get_coordination_repo("agentra").path

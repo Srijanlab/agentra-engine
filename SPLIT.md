@@ -16,10 +16,11 @@ step of the three-service split:
   API), `registry/` + `memory/` (DynamoDB, local-JSON fallback), `connectors/`,
   `proxy/`, the `/internal/*` RPC handlers, and the `a2a/` metadata endpoints.
   It runs **no cycle / promote / prod-debug** -- a trigger records a run and
-  `registry.enqueue_job(...)`; the loop claims it. `agents/` here holds only the
-  bits the dashboard's chat / standup / Slack assistant still call (`base.py`,
-  `catalog.py`, `safety.py`, `slack_assistant.py` -- moving to the loop next).
-  A Vercel Cron hits `GET /trigger/cron` every 15 min to enqueue due cycles.
+  `registry.enqueue_job(...)`; the loop claims it. The engine runs **no Claude**
+  (no `claude-agent-sdk`); `agents/` here is just `catalog.py` (static metadata).
+  Chat + standup *generation* are held (503) pending a loop endpoint; Slack runs
+  on the loop via Socket Mode. The loop's job-drain loop calls `GET /trigger/cron`
+  every ~5 min to enqueue due cycles + reconcile.
 - **agentra-loop** = execution. The whole `agents/` pipeline + `agents/brain/`,
   `orchestrator.py`, `docker`/`git`. It reaches engine state over RPC
   (`AGENTRA_ENGINE_URL` -> `POST /internal/rpc`) and drains the job queue

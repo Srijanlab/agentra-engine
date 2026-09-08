@@ -1,7 +1,5 @@
-# Vercel installs from here (see vercel.json installCommand, which also prunes
-# claude-agent-sdk's 199 MB bundled CLI — the engine never runs it). No uvicorn
-# (Vercel provides the ASGI server), no playwright/graphifyy/texttospeech.
-claude-agent-sdk>=0.2.110
+# Vercel installs from here. The engine is API + state only -- no cycle agents,
+# no Claude Agent SDK, no uvicorn (Vercel provides the ASGI server).
 pyyaml>=6.0
 fastapi>=0.115
 pyjwt[crypto]>=2.9
