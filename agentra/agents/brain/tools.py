@@ -465,8 +465,10 @@ def _tools_for(session: OrchestratorSession) -> list:
             )}]}
         if not session.code_repos:
             # Unregistered app (CLI/tests calling run_autonomous_cycle directly against
-            # a bare repo path) -- exactly today's pre-Phase-2 behavior, one scan.
-            cb = await codebase.run_cached(session.repo, session.mem)
+            # a bare repo path) -- one full scan against session.repo.
+            cb = await codebase.sync_spec(
+                session.repo, session.mem, owner_repo_name=session.repo.name, force_full=True
+            )
             if stop := _check_auth_failure(session, "understand_codebase", cb):
                 return stop
             session.cost_usd += cb.cost_usd
@@ -480,22 +482,25 @@ def _tools_for(session: OrchestratorSession) -> list:
                 "content": [{"type": "text", "text": f"[{'ok' if cb.ok else 'failed'}] {cb.text[:4000]}"}],
                 "is_error": not cb.ok,
             }
-        # Multi-repo (or a real registered single-repo app, which has exactly one
-        # code_repos entry): scan every code repo -- each is a distinct codebase.
-        multi = len(session.code_repos) > 1
+        # Registered app: force a fresh spec sync for every code repo (the brain
+        # explicitly asked, so bypass the SHA gate).
         any_ok = False
         parts = []
         for name, spec in session.code_repos.items():
-            cache_key = f"codebase_{name}" if multi else "codebase"
-            cb = await codebase.run_cached(spec.path, session.mem, cache_key=cache_key)
+            if spec.path is None:
+                continue
+            cb = await codebase.sync_spec(
+                spec.path, session.repo_memory(name), owner_repo_name=name, force_full=True
+            )
             if stop := _check_auth_failure(session, "understand_codebase", cb):
                 return stop
             session.cost_usd += cb.cost_usd
             if cb.ok:
                 session.cb_summaries[name] = cb.text
+                session.stale_spec_repos.add(name)
                 any_ok = True
             parts.append(f"[{name}: {'ok' if cb.ok else 'failed'}] {cb.text[:4000]}")
-        if not multi:
+        if len(session.code_repos) == 1:
             session.cb_summary = next(iter(session.cb_summaries.values()), None)
         if any_ok:
             session.record_success("understand_codebase")
@@ -1309,7 +1314,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                 f"run_local_tests: OUT OF CONTRACT -- issue #{session.committed_issue} is already "
                 f"status:{st}; its code was tested and merged on a prior run. Next: {nxt}."
             )}], "is_error": True}
-        test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
+        test = await testing.run_local(session.active_repo_path, session.cb_summary, session.active_repo_memory, session_id=session.session_id)
         if stop := _check_auth_failure(session, "run_local_tests", test):
             return stop
         session.cost_usd += test.cost_usd
@@ -1333,7 +1338,7 @@ def _tools_for(session: OrchestratorSession) -> list:
                     "retrying the test run instead of dispatching a bogus fix",
                     ok=False, cost_usd=test.cost_usd, turns=test.turns,
                 )
-                test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
+                test = await testing.run_local(session.active_repo_path, session.cb_summary, session.active_repo_memory, session_id=session.session_id)
                 if stop := _check_auth_failure(session, "run_local_tests", test):
                     return stop
                 session.cost_usd += test.cost_usd
@@ -1367,7 +1372,7 @@ def _tools_for(session: OrchestratorSession) -> list:
             )
             if not fix.ok:
                 break
-            test = await testing.run_local(session.active_repo_path, session.cb_summary, session.mem, session_id=session.session_id)
+            test = await testing.run_local(session.active_repo_path, session.cb_summary, session.active_repo_memory, session_id=session.session_id)
             if stop := _check_auth_failure(session, "run_local_tests", test):
                 return stop
             session.cost_usd += test.cost_usd

@@ -35,3 +35,6 @@ so `agentra-ui` / `agentra-engine` / `agentra-loop` each have to be added to it
 YAML in these repos is human-maintained.
 
 The full plan: "Three Repos, One Engine".
+
+
+The `.agentra/` spec standard (what each repo stores, who owns it, when it changes): [docs/agentra-spec.md](docs/agentra-spec.md).

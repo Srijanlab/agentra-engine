@@ -11,7 +11,7 @@ from agentra.memory.core import _OBJECTIVE_VARIABLE
 
 
 class MemorySettingsMixin:
-    """Mixin for Memory: objective, feedback sync state, codebase spec commit, recent log lines, and documentation changelog."""
+    """Mixin for Memory: objective, feedback sync state, recent log lines, and documentation changelog."""
 
     def get_objective(self) -> str | None:
         repo_url = self._repo_url()
@@ -49,19 +49,6 @@ class MemorySettingsMixin:
         import json
 
         self.feedback_sync_state_path.write_text(json.dumps({"last_synced_at": last_synced_at}, indent=2))
-
-    def codebase_spec_commit(self) -> str | None:
-        """The commit SHA the last architecture/codebase.md scan was generated at."""
-        if not self.codebase_spec_commit_path.exists():
-            return None
-        import json
-
-        return json.loads(self.codebase_spec_commit_path.read_text()).get("commit_sha")
-
-    def set_codebase_spec_commit(self, commit_sha: str) -> None:
-        import json
-
-        self.codebase_spec_commit_path.write_text(json.dumps({"commit_sha": commit_sha}, indent=2))
 
     def recent_log_lines(self, since: dt.datetime) -> list[str]:
         """Every timestamped line across all run logs at or after `since`, oldest first."""

@@ -83,7 +83,6 @@ _MEMORY_METHODS = frozenset({
     "released_features", "pending_promotion_features", "record_released",
     "record_feature_request", "clear_feature_request",
     "get_objective", "set_objective", "append_documentation",
-    "set_codebase_spec_commit", "codebase_spec_commit",
     "record_human_input_context", "get_human_input_context",
     "record_human_answer", "human_input_pending",
     "escalate_existing_issue", "issue_html_url",
