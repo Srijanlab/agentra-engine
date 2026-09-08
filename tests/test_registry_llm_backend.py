@@ -10,7 +10,7 @@ from agentra.registry import core
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
     home.mkdir()
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "_LLM_BACKEND_PATH", home / "llm_backend.json")
     monkeypatch.setattr(core, "_llm_backend_cache", None)

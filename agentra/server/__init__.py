@@ -33,18 +33,6 @@ observability.init_observability()
 app = FastAPI(title="agentra orchestrator")
 
 
-@app.middleware("http")
-async def _refresh_oidc_token(request, call_next):
-    # Fluid Compute delivers the OIDC JWT as a per-request header; sync it to the
-    # file identity_pool reads, then lazily build the Firestore client (it can't
-    # exist at import -- no token yet).
-    from agentra import registry
-
-    registry.sync_oidc_token_file(request.headers.get("x-vercel-oidc-token"))
-    registry.ensure_firestore()
-    return await call_next(request)
-
-
 # Order matters: CORS added last == outermost, so it answers preflight and
 # attaches headers even to the auth gate's 401/403.
 app.middleware("http")(auth_middleware)
@@ -136,40 +124,13 @@ async def health() -> dict:
     """GitHub #113: /healthz is a pure alias so probes using either convention succeed."""
     try:
         return {"status": "ok", "apps_registered": len(registry.list_apps())}
-    except Exception as exc:  # never let a Firestore blip fail the liveness probe
+    except Exception as exc:  # never let a backend blip fail the liveness probe
         return {"status": "degraded", "error": f"{type(exc).__name__}"}
-
-
-@app.get("/debug/firestore")
-async def debug_firestore(request: Request) -> dict:
-    """Diagnose the keyless Firestore path (Vercel OIDC -> WIF). No secrets returned."""
-    from agentra import registry
-
-    out = {
-        "vercel_oidc_token_present": bool(os.environ.get("VERCEL_OIDC_TOKEN")),
-        "wif_config_present": bool(os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")),
-        "firestore_project": os.environ.get("AGENTRA_FIRESTORE_PROJECT"),
-        "firebase_project": os.environ.get("FIREBASE_PROJECT_ID"),
-        "allowed_emails_set": bool(os.environ.get("AGENTRA_ALLOWED_EMAILS")),
-        "internal_token_set": bool(os.environ.get("AGENTRA_INTERNAL_TOKEN")),
-        "db_connected": registry.firestore_client() is not None,
-        "github_token_loaded": bool(os.environ.get("GITHUB_TOKEN")),
-        "github_app_loaded": bool(os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")),
-        "vercel_env_keys": sorted(k for k in os.environ if k.startswith(("VERCEL", "AWS", "GOOGLE", "GCP"))),
-        "vercel_headers": sorted(h for h in request.headers if h.lower().startswith(("x-vercel", "x-oidc"))),
-    }
-    db = registry.firestore_client()
-    if db is not None:
-        try:
-            out["apps_doc_count"] = sum(1 for _ in db.collection("apps").limit(20).stream())
-        except Exception as exc:
-            out["read_error"] = f"{type(exc).__name__}: {exc}"[:400]
-    return out
 
 
 @app.get("/debug/dynamodb")
 async def debug_dynamodb() -> dict:
-    """Diagnose the DynamoDB path (static IAM keys, not OIDC). No secrets returned."""
+    """Diagnose the DynamoDB path (static IAM keys). No secrets returned."""
     from agentra import registry
 
     out = {

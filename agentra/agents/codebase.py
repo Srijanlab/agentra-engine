@@ -36,7 +36,7 @@ run mutating commands.
 ## Stack        -- languages, frameworks, build/test tooling actually configured
 ## Module map   -- the top-level packages/dirs and what each is responsible for
 ## Invariants   -- rules the code depends on staying true (e.g. "loop reaches all \
-state via /internal RPC, never touches Firestore directly")
+state via /internal RPC, never touches the datastore directly")
 ## Conventions  -- patterns a new change is expected to follow
 ## Gotchas      -- real footguns visible in the code, NOT generic best-practice advice
 

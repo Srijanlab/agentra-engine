@@ -1,6 +1,6 @@
 """server/gh_cache.py -- zero test coverage before this file (local/CLI mode
-just calls the producer directly, so nothing exercised the cloud path under
-Firestore either). Moto-backed since the whole point is real TTL/expiry and
+just calls the producer directly, so nothing exercised the cloud path).
+Moto-backed since the whole point is real TTL/expiry and
 native-DynamoDB-TTL-attribute behavior, not a hand-shaped fake.
 """
 

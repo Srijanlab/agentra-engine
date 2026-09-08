@@ -37,8 +37,8 @@ def list_recent_generations(app: str | None = None, limit: int = 100) -> list[di
     emits one `generation` observation via agents/base.py's
     _emit_agent_observability (model, tokens, cost, turns, ok, summary) as a
     side effect of run_agent(), so this is a different read of data Langfuse
-    already has, not a separate write path (which the old agent_steps
-    Firestore/DynamoDB table was -- pure duplicate bookkeeping, now removed).
+    already has, not a separate write path (which the old agent_steps registry
+    table was -- pure duplicate bookkeeping, now removed).
     `run_id` has no Langfuse equivalent (that's agentra's own id, stored on the
     *run* record, not the observation) -- filled with the observation's
     traceId as a best-effort stand-in; AgentsPanel.tsx, the only consumer,

@@ -83,7 +83,7 @@ def test_bot_message_and_unknown_thread_are_ignored(monkeypatch):
 def test_record_and_resolve_slack_thread_roundtrip(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
     home.mkdir()
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "_SLACK_THREADS_PATH", home / "slack_threads.json")
 

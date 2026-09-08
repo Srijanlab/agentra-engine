@@ -152,7 +152,7 @@ def test_run_pre_prod_writes_no_report_when_agent_returns_no_json(tmp_path, monk
 
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")

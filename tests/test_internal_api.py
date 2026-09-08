@@ -16,7 +16,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("FIREBASE_PROJECT_ID", raising=False)
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(core, "_llm_backend_cache", None)
@@ -67,7 +67,7 @@ def test_registry_roundtrip(client):
 
 
 def test_unexposed_method_403(client):
-    assert _rpc(client, {"target": "registry", "method": "firestore_client"}).status_code == 403
+    assert _rpc(client, {"target": "registry", "method": "dynamodb_resource"}).status_code == 403
     assert _rpc(client, {"target": "memory", "method": "write", "repo_url": "https://github.com/x/y"}).status_code == 403
 
 

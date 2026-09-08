@@ -40,7 +40,7 @@ def _register_tmp_app(tmp_path: Path, name: str = "myapp") -> Path:
 
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
@@ -116,7 +116,7 @@ def test_on_demand_run_bypasses_schedule_gate(tmp_path, monkeypatch):
 
 
 def test_engine_queues_on_demand_runs_instead_of_dispatching(tmp_path, monkeypatch):
-    """In Firestore/cloud mode the engine can't run cycles -- /apps/{name}/run
+    """In cloud mode the engine can't run cycles -- /apps/{name}/run
     records a queued run and returns queued:true; the loop drains it."""
     _isolate_registry(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path)

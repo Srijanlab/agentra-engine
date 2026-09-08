@@ -5,8 +5,7 @@ Keyed items live in the agentra-gh-cache table: {value, ts, expires_at}. On a
 serverless host each request may be a cold instance, so an in-process cache
 barely helps -- DynamoDB is the shared layer. One read replaces N GitHub
 calls on a hit. expires_at is DynamoDB's native item-TTL attribute (enabled
-on the table via CDK) -- expired entries are reclaimed automatically, unlike
-under Firestore where nothing ever garbage-collected an old entry.
+on the table via CDK) -- expired entries are reclaimed automatically.
 """
 
 from __future__ import annotations

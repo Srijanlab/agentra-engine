@@ -27,7 +27,7 @@ def _signed(body: dict) -> tuple[str, dict]:
 
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("SLACK_SIGNING_SECRET", _SECRET)
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", tmp_path / "home")
     monkeypatch.setattr(slack_assistant, "_agentra_repo", lambda: tmp_path)
     slack_route._seen_event_ids.clear()

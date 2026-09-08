@@ -1,6 +1,6 @@
 """registry/_dynamo.py — a small, dependency-free DynamoDB helper: table access,
 float<->Decimal conversion (boto3's DynamoDB resource has no native float
-support), Firestore's merge=True analog, and the compare-and-swap primitive
+support), a partial-update ("merge") helper, and the compare-and-swap primitive
 inbox.py's claim logic needs. Parallel in role to _cache.py -- not a wrapper
 around every operation, just the patterns duplicated across runs.py/loops.py/
 core.py/inbox.py."""
@@ -44,8 +44,7 @@ def to_item(value: Any) -> Any:
 
 def from_item(value: Any) -> Any:
     """The inverse of to_item -- Decimal back to float (or int, if it's a
-    whole number) so callers get plain JSON-serializable Python values back,
-    matching what Firestore's client already handed back natively."""
+    whole number) so callers get plain JSON-serializable Python values back."""
     if isinstance(value, Decimal):
         return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, dict):
@@ -90,15 +89,14 @@ def _update_expression(prefix: str, fields: dict) -> tuple[str, dict, dict]:
 
 
 def merge_update(tbl: Any, key: dict, fields: dict) -> None:
-    """Firestore's `.set(fields, merge=True)` analog: partially updates only the
-    given fields on the item at `key` (creating it if absent). Every attribute
-    name is aliased unconditionally -- DynamoDB reserves many common words
-    (`status` among them), so this isn't optional for arbitrary field dicts.
-    Silently drops any field that's also a key attribute -- DynamoDB rejects
-    updating those via UpdateExpression outright, and a caller's fields dict
-    redundantly restating the key (e.g. a Firestore-era `{"loop_id": loop_id,
-    ...}` built for a `.set(merge=True)` call, where that was harmless) is an
-    easy, otherwise-silent mistake to carry over."""
+    """Partial update: writes only the given fields on the item at `key`
+    (creating it if absent), leaving the rest untouched. Every attribute name is
+    aliased unconditionally -- DynamoDB reserves many common words (`status`
+    among them), so this isn't optional for arbitrary field dicts. Silently
+    drops any field that's also a key attribute -- DynamoDB rejects updating
+    those via UpdateExpression outright, and a caller's fields dict redundantly
+    restating the key (e.g. `{"loop_id": loop_id, ...}`) is an easy,
+    otherwise-silent mistake."""
     fields = {k: v for k, v in fields.items() if k not in key}
     if not fields:
         return

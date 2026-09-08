@@ -5,51 +5,36 @@ Connect `Srijanlab/agentra-engine` in the Vercel dashboard:
 - `main`  -> Production
 - `beta`  -> a Preview deployment (alias it to a stable URL for the Testing Agent)
 
-## Firestore auth — keyless (Vercel OIDC -> GCP Workload Identity Federation)
+## State: DynamoDB
 
-`iam.disableServiceAccountKeyCreation` is enforced on `agentra-prod`, so there's
-no SA key. Instead Vercel's per-invocation OIDC token is federated to the
-`agentra-engine-run` service account.
+Every registry collection (apps, runs, loops, requests, gh-cache, slack-threads,
+memory, `system`) lives in DynamoDB, one table per collection, name-prefixed by
+`AGENTRA_DYNAMODB_TABLE_PREFIX`. The tables are provisioned by the loop's CDK
+(`deploy/aws` in `agentra-loop`, the `AgentraData` stack). Auth is a static IAM
+user's keys -- `AGENTRA_AWS_*`, prefixed because Vercel's runtime reserves the
+bare `AWS_*` names for its own execution role. With `AGENTRA_DYNAMODB_TABLE_PREFIX`
+unset (local dev, CI) the registry falls back to JSON files under `~/.agentra`.
 
-### 1. Vercel side (you)
+## Sign-in gate
 
-Project Settings -> Security -> **Secure Backend Access / OIDC Federation** -> enable.
-Issuer mode: **Team**. Note your **team slug** and the **project name**.
+`FIREBASE_PROJECT_ID` turns on the Google-identity check in `server/auth.py`
+(`id_token.verify_firebase_token`, from `google-auth`). Unset -> the API stays
+open (local dev). `AGENTRA_ALLOWED_EMAILS` is the allowlist.
 
-### 2. GCP side (run once, after you have the team slug)
+## Vercel env vars
 
-```bash
-PROJECT_NUM=801839294441
-POOL=github            # the existing pool
-TEAM=<your-vercel-team-slug>
-RUN_SA=agentra-engine-run@agentra-prod.iam.gserviceaccount.com
-
-gcloud iam workload-identity-pools providers create-oidc vercel \
-  --project agentra-prod --location global --workload-identity-pool $POOL \
-  --display-name Vercel \
-  --issuer-uri "https://oidc.vercel.com/$TEAM" \
-  --allowed-audiences "https://vercel.com/$TEAM" \
-  --attribute-mapping "google.subject=assertion.sub,attribute.project=assertion.project,attribute.environment=assertion.environment"
-
-# only agentra-engine's Vercel project may impersonate the runtime SA
-gcloud iam service-accounts add-iam-policy-binding $RUN_SA --project agentra-prod \
-  --role roles/iam.workloadIdentityUser \
-  --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUM/locations/global/workloadIdentityPools/$POOL/attribute.project/agentra-engine"
-```
-
-### 3. Vercel env vars
-
-GCP Secret Manager is billing-gated, so **all** values live in Vercel. Set every
-var in **both** environments -- Production (`main` -> prod) and Preview (`beta` ->
-pre-prod) -- with `bash deploy/vercel/set-env.sh` or the dashboard. Full list with
-placeholders: [`.env.example`](.env.example).
+Set every var in **both** environments -- Production (`main` -> prod) and Preview
+(`beta` -> pre-prod) -- with `bash deploy/vercel/set-env.sh` or the dashboard.
+Full list with placeholders: [`.env.example`](.env.example).
 
 | var | value |
 |---|---|
-| `AGENTRA_FIRESTORE_PROJECT` | `agentra-prod` |
-| `GCP_WORKLOAD_IDENTITY_CONFIG` | the JSON below (not secret) |
-| `FIREBASE_PROJECT_ID` | `agentra-prod` (for the Google-OAuth check) |
+| `AGENTRA_DYNAMODB_TABLE_PREFIX` | the `AgentraData` stack's table prefix (e.g. `agentra-`) |
+| `AGENTRA_AWS_REGION` | `us-west-2` |
+| `AGENTRA_AWS_ACCESS_KEY_ID` / `AGENTRA_AWS_SECRET_ACCESS_KEY` | the DynamoDB IAM user's keys |
+| `FIREBASE_PROJECT_ID` | Firebase project id (for the Google sign-in check) |
 | `AGENTRA_ALLOWED_EMAILS` | your email(s), comma-separated |
+| `AGENTRA_INTERNAL_TOKEN` | shared bearer for `/internal/*` (same value in the loop's secret) |
 | `GITHUB_APP_ID` | `agentra-orchestrator` App ID (`4545406`) |
 | `GITHUB_APP_PRIVATE_KEY` | the App's `.pem` contents (multi-line) |
 | `GITHUB_TOKEN` | optional PAT fallback (repo scope) |
@@ -59,17 +44,4 @@ placeholders: [`.env.example`](.env.example).
 GitHub access is the `agentra-orchestrator` GitHub App (per-repo installation
 tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback.
 
-`GCP_WORKLOAD_IDENTITY_CONFIG`:
-```json
-{
-  "type": "external_account",
-  "audience": "//iam.googleapis.com/projects/801839294441/locations/global/workloadIdentityPools/github/providers/vercel",
-  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-  "token_url": "https://sts.googleapis.com/v1/token",
-  "credential_source": { "file": "/tmp/agentra_vercel_oidc_token" },
-  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/agentra-engine-run@agentra-prod.iam.gserviceaccount.com:generateAccessToken"
-}
-```
-
-The engine writes `$VERCEL_OIDC_TOKEN` to that file per request (server middleware)
-and `identity_pool.Credentials` exchanges it for a GCP token. No key anywhere.
+`/debug/dynamodb` reports which of these resolved (no secret values).

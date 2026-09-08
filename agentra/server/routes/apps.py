@@ -213,7 +213,7 @@ async def list_apps() -> dict:
         if url and owner_repo_from_url(url):
             repo_url_map[name] = url
 
-    # One GraphQL call for all apps, cached in Firestore -- the dashboard polls
+    # One GraphQL call for all apps, cached in DynamoDB -- the dashboard polls
     # this often and the backlog counts don't change second-to-second.
     batch: dict[str, dict] = {}
     if repo_url_map:

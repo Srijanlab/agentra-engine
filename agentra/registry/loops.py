@@ -204,8 +204,8 @@ def get_loop(loop_id: str) -> dict | None:
 
 def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[dict]:
     """Stored loop summaries, most recently active first. The app-filtered case
-    (the common one -- already tuned once against Firestore quota, hence no
-    per-run scan) is a real indexed Query, not a fetch-then-filter."""
+    (the common one -- already tuned once for cost, hence no per-run scan) is a
+    real indexed Query, not a fetch-then-filter."""
     if core._ddb is not None:
         if app is not None:
             return _cache.get_or_set(f"loops:{app}:{limit}", lambda: _query_loops_by_app(app, limit), ttl=15)

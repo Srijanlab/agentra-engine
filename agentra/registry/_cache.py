@@ -1,8 +1,8 @@
-"""In-process TTL cache for hot Firestore reads.
+"""In-process TTL cache for hot DynamoDB reads.
 
-The Firestore free tier allows 50k reads/day -- a polling dashboard blows past
-that without this. Vercel keeps instances warm for minutes under active use, so
-even a per-instance cache with a short TTL cuts reads by 10-50x.
+A polling dashboard would otherwise issue the same registry scans several times
+a second. Vercel keeps instances warm for minutes under active use, so even a
+per-instance cache with a short TTL cuts reads (and cost) by 10-50x.
 """
 
 from __future__ import annotations
