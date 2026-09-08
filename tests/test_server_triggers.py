@@ -102,10 +102,10 @@ def test_scheduled_no_app_fans_out_to_every_registered_app(tmp_path, monkeypatch
     assert {j["payload"]["app"] for j in registry.list_jobs()} == {"one", "two"}
 
 
-def test_cron_endpoint_requires_the_secret_when_set(tmp_path, monkeypatch):
+def test_cron_endpoint_requires_a_token_when_set(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path)
-    monkeypatch.setenv("CRON_SECRET", "s3cr3t")
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "s3cr3t")
 
     assert _client().get("/trigger/cron").status_code == 401
     ok = _client().get("/trigger/cron", headers={"Authorization": "Bearer s3cr3t"})

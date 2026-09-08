@@ -168,17 +168,25 @@ async def _tick() -> dict:
     return {"apps": results}
 
 
-def _verify_cron(authorization: str | None) -> None:
-    secret = os.environ.get("CRON_SECRET")
-    if secret and authorization != f"Bearer {secret}":
-        raise HTTPException(status_code=401, detail="bad cron secret")
+def _verify_tick_auth(authorization: str | None) -> None:
+    """The loop's drain loop calls this on its idle tick (AGENTRA_INTERNAL_TOKEN);
+    an external cron may also use CRON_SECRET. Either satisfies it; if neither env
+    var is set the endpoint is open (local dev)."""
+    for var in ("AGENTRA_INTERNAL_TOKEN", "CRON_SECRET"):
+        secret = os.environ.get(var)
+        if secret and authorization == f"Bearer {secret}":
+            return
+    if os.environ.get("AGENTRA_INTERNAL_TOKEN") or os.environ.get("CRON_SECRET"):
+        raise HTTPException(status_code=401, detail="bad tick token")
 
 
 @router.get("/trigger/cron")
 async def trigger_cron(authorization: str | None = Header(default=None)) -> dict:
-    """Vercel Cron target (GET + Bearer CRON_SECRET). Same work as
-    POST /trigger/scheduled with no app."""
-    _verify_cron(authorization)
+    """The periodic scheduler tick: reconcile stale runs/loops, poll GitHub
+    comments for human answers, enqueue every app due for a scheduled cycle,
+    escalate stale waiting_for_human loops. Called by the loop's drain loop on
+    its idle tick (and usable as an external cron target)."""
+    _verify_tick_auth(authorization)
     return await _tick()
 
 
