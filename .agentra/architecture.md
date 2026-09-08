@@ -54,3 +54,4 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - DynamoDB init never raises: on bad creds `_ddb` is `None` and the engine silently falls back to local JSON (empty in prod) rather than erroring. Diagnose via `/debug/dynamodb`.
 - `agents/catalog.py` still describes the full agent pipeline (orchestrator, implementation, deployment, ...) that actually runs in agentra-loop — it is display metadata only.
 - Vercel function `maxDuration` is 30s; any endpoint doing real work must enqueue a job, not block.
+- `memory/core.py::_TRANSIENT_FAILURE_PATTERNS` matches 5xx/gateway text broadly (`API Error: 5\d\d`, `Bad Gateway`, `Service Unavailable`, `Gateway Timeout`) — a genuine server-side 500 raised by the app under test reads as transient/retryable and won't be filed as a defect; only 4xx client errors reliably stay filed.
