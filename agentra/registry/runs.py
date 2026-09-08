@@ -61,7 +61,7 @@ def list_runs(limit: int = 50) -> list[dict]:
     runs = _local_runs()
     ordered = sorted(
         ({"run_key": key, **info} for key, info in runs.items()),
-        key=lambda r: r["started_at"],
+        key=lambda r: r.get("started_at") or 0,  # a malformed record must not break the whole list
         reverse=True,
     )
     return ordered[:limit]
