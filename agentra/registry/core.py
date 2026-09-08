@@ -182,7 +182,7 @@ def get_slack_channel(name: str) -> str | None:
 
 def _remote_head_sha(repo_url: str, branch: str) -> str | None:
     # git_ops.remote_head_sha, not a bare `git ls-remote` -- this used to run
-    from agentra.agents.git_ops import remote_head_sha
+    from agentra.git_ops import remote_head_sha
 
     sha = remote_head_sha(repo_url, branch)
     if sha is None:
@@ -224,7 +224,7 @@ def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
         if _local_head_sha(repo) == remote_sha:
             return
         logger.info("get_app_repo: %s is stale vs origin/%s, resyncing", repo, branch)
-        from agentra.agents.git_ops import pull_latest
+        from agentra.git_ops import pull_latest
 
         pull_latest(repo, branch)
     except Exception:
@@ -297,7 +297,7 @@ def _resolve_repo(repo_url: str | None, branch: str, stored_path: Path, clone_de
     if clone_dest.exists():
         _sync_if_stale(clone_dest, repo_url, branch)
         return clone_dest
-    from agentra.agents.git_ops import GitOpError, clone_repo
+    from agentra.git_ops import GitOpError, clone_repo
 
     try:
         clone_repo(repo_url, clone_dest, branch=branch)
@@ -525,7 +525,7 @@ def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:
     # is DynamoDB-backed and the host has no git. No-op in cloud mode.
     if cloud_mode():
         return None
-    from agentra.agents.git_ops import GitOpError, commit_and_push
+    from agentra.git_ops import GitOpError, commit_and_push
 
     try:
         commit_and_push(repo, branch, message, [".agentra/"])

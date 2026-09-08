@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from agentra.agents import git_ops
+from agentra import git_ops
 from agentra.connectors import github_app
 
 
