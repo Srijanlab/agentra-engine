@@ -21,10 +21,11 @@ step of the three-service split:
   Chat + standup *generation* are held (503) pending a loop endpoint; Slack runs
   on the loop via Socket Mode. The loop's job-drain loop calls `GET /trigger/cron`
   every ~5 min to enqueue due cycles + reconcile.
-- **agentra-loop** = execution. The whole `agents/` pipeline + `agents/brain/`,
-  `orchestrator.py`, `docker`/`git`. It reaches engine state over RPC
+- **agentra-loop** = execution. The `agents/` pipeline + `agents/brain/` (the one
+  execution path — no `orchestrator.py`), `agents/job_runner.py`, `docker`/`git`,
+  Slack Socket Mode. It mounts no dashboard API. It reaches engine state over RPC
   (`AGENTRA_ENGINE_URL` -> `POST /internal/rpc`) and drains the job queue
-  (`registry.claim_next_job()`) on its tick.
+  (`registry.claim_next_job()`) on its 30 s poll.
 
 `srijanlab-agentra` is the frozen incumbent (its GCP VM is decommissioned).
 
