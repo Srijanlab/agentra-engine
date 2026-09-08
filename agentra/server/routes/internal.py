@@ -1,8 +1,8 @@
 """server/routes/internal.py — the loop's only door to engine-held state.
 
-Token-gated RPC (`AGENTRA_INTERNAL_TOKEN`), separate from the Firebase user gate.
-The loop calls `registry.*` / `Memory.*` methods here instead of touching Firestore
-or GitHub itself.
+Token-gated RPC (`AGENTRA_INTERNAL_TOKEN`), separate from the sign-in user gate.
+The loop calls `registry.*` / `Memory.*` methods here instead of touching the
+datastore or GitHub itself.
 """
 
 from __future__ import annotations

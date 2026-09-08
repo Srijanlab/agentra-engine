@@ -15,7 +15,7 @@ from agentra.memory import Memory
 
 def _isolate(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
-    monkeypatch.setattr(registry, "_db", None, raising=False)
+    monkeypatch.setattr(registry, "_ddb", None, raising=False)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
     monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")

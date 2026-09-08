@@ -35,7 +35,7 @@ flag what an implementer should be careful about.
    always-on service, changes min-instances/always-on scaling, adds a paid third-party API \
    dependency, touches terraform/*.tf, or otherwise plausibly moves the infra bill). Whichever \
    value you pick, give a concrete one-line reason naming the specific thing driving it -- \
-   e.g. "adds a new Cloud Run service", "changes min-instances/always-on scaling", "adds a \
+   e.g. "adds a new always-on service", "changes min-instances/always-on scaling", "adds a \
    paid third-party API dependency", "touches terraform/*.tf" -- never a generic restatement \
    of the level itself.
 

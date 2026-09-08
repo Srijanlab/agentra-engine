@@ -1,4 +1,4 @@
-"""Seeds realistic local fixture data so `agentra dev` shows a fully populated dashboard without any real GitHub App or Firestore credentials -- the local-testing capability that was missing: previously the only way to see the dashboard filled in was hand-rolled Playwright route mocks that never touched a real browser session."""
+"""Seeds realistic local fixture data so `agentra dev` shows a fully populated dashboard without any real GitHub App or DynamoDB credentials -- the local-testing capability that was missing: previously the only way to see the dashboard filled in was hand-rolled Playwright route mocks that never touched a real browser session."""
 
 from __future__ import annotations
 
@@ -33,10 +33,10 @@ _APPS = {
             {"description": "Per-app cost budget with a soft cap warning in the dashboard.", "source": "customer"},
             {"description": "Export a run's full agent-step transcript as markdown.", "source": "discovery"},
         ],
-        "in_progress": [("Retry transient Firestore writes with backoff", "dev/9f2c-firestore-retry", "seed0006")],
+        "in_progress": [("Retry transient DynamoDB writes with backoff", "dev/9f2c-ddb-retry", "seed0006")],
         "code_complete": [
             ("Stagnation breaker for no-progress cycles", "9c104a7"),
-            ("Firestore-backed run history", "ebbd94d"),
+            ("DynamoDB-backed run history", "ebbd94d"),
             ("Structured infra-cost gate", "3af9021"),
         ],
         "ready_to_review": [
@@ -232,7 +232,7 @@ def _seed_runs() -> None:
                  "run_id": "seed0005", "cost_usd": 0.33, "feature": "Bulk approve action",
                  "final_message": "Shipped the bulk-approve action and live-verified it. One promote away from prod."}),
         dict(run_key="seed0006", app="agentra", source="scheduled", status="running", started_at=now - 240,
-             objective=agentra_obj, loop_id=agentra_loop, feature="Retry transient Firestore writes with backoff"),
+             objective=agentra_obj, loop_id=agentra_loop, feature="Retry transient DynamoDB writes with backoff"),
         dict(run_key="seed0007", app="cap", source="scheduled", status="queued", started_at=now - 20,
              objective=cap_obj, loop_id=cap_loop, feature="Bulk-reject with a shared reason"),
         dict(run_key="seed0008", app="agentra", source="scheduled", status="completed", started_at=now - 7800,

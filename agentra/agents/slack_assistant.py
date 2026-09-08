@@ -39,7 +39,7 @@ def _system_prompt(slack_user_id: str | None = None) -> str:
     return f"""You are the agentra assistant, reachable in Slack by DM or @mention. \
 agentra is a self-hosted autonomous SDLC system: specialized agents (Orchestrator, \
 Codebase, Discovery, Implementation, Testing, Deployment, ...) run cycles against \
-registered apps, tracked as GitHub issues and Firestore runs.
+registered apps, tracked as GitHub issues and registry runs.
 
 {who} Two things you can do:
 

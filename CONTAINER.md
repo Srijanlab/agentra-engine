@@ -15,7 +15,7 @@ granted.
 |---|---|
 | Host filesystem (only `/workspace` is visible) | Code changes in the mounted repo (intentional — you want them) |
 | Host environment variables / secrets | `git commit` / `git push` from inside the container |
-| Host SSH keys, `~/.aws`, `~/.gcloud`, etc. | Outbound network (Claude API, git, Vercel, Firebase) |
+| Host SSH keys, `~/.aws`, cloud credentials, etc. | Outbound network (Claude API, git, Vercel, Firebase) |
 | Other running processes on the host | |
 
 ---

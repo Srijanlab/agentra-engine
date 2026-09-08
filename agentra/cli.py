@@ -207,7 +207,7 @@ def main() -> None:
     )
     serve_p.add_argument("--host", default="0.0.0.0")
     serve_p.add_argument(
-        "--port", type=int, default=None, help="Defaults to $PORT (Cloud Run convention) or 8080 if unset"
+        "--port", type=int, default=None, help="Defaults to $PORT if set, else 8080"
     )
 
     args = parser.parse_args()

@@ -4,7 +4,7 @@ sub-agent tool call) must be attributed to the orchestrator, not hidden in
 the run's cost aggregate.
 
 Per-agent cost/tokens now land in Langfuse as an `orchestrator` generation
-(_emit_orchestrator_generation) rather than a Firestore agent_steps row.
+(_emit_orchestrator_generation) rather than an agent_steps registry row.
 These fast unit tests monkeypatch query() and the Langfuse client.
 """
 

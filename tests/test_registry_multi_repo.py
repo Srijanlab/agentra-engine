@@ -33,7 +33,7 @@ def registry_env(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
     monkeypatch.setattr(registry, "REPOS_ROOT", tmp_path / "repos")
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     yield registry
 
 
@@ -171,7 +171,7 @@ def test_get_code_repos_unknown_app_returns_empty(registry_env):
 
 
 def test_cloud_mode_returns_unresolved_paths_without_touching_disk(tmp_path, registry_env, monkeypatch):
-    monkeypatch.setattr(registry, "_db", object())
+    monkeypatch.setattr(registry, "_ddb", object())
     monkeypatch.setattr(registry, "list_apps", lambda: {
         "agentra": {
             "repos": [

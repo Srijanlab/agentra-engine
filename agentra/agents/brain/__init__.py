@@ -263,7 +263,7 @@ class OrchestratorSession:
         branch: str | None = None,
         category: str | None = None,
     ) -> None:
-        """Called by implement_feature/discover_opportunities right after filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED result. category (e.g. "infra_cost", "product_direction", "implementation" -- see _escalate_to_human) is threaded into the structured human_input dict, not just the GitHub issue body, so the Firestore/local-JSON run record itself is queryable/chartable by escalation reason instead of only discoverable by grepping issue text."""
+        """Called by implement_feature/discover_opportunities right after filing/updating the needs_human GitHub issue for a HUMAN_INPUT_REQUIRED result. category (e.g. "infra_cost", "product_direction", "implementation" -- see _escalate_to_human) is threaded into the structured human_input dict, not just the GitHub issue body, so the run record itself is queryable/chartable by escalation reason instead of only discoverable by grepping issue text."""
         self.waiting_for_human = True
         self.human_input = {
             "issue_number": issue_number,
@@ -304,7 +304,7 @@ class OrchestratorSession:
         print(f"[agentra] {action} | cost so far: ${self.cost_usd:.4f}", flush=True)
         # Per-agent cost/tokens/turns now land in Langfuse (agents/base.py emits an
         # `agent` + aggregate `generation` observation per dispatch). Here we only
-        # keep the run's liveness signal fresh, throttled to bound Firestore writes.
+        # keep the run's liveness signal fresh, throttled to bound registry writes.
         now = time.time()
         if now - self._last_touch > 90:
             self._last_touch = now
@@ -450,7 +450,7 @@ async def run_autonomous_cycle(
             _finish_loop_rollup(run_id, _report)
             return _report
     finally:
-        # Bug #77: single full-document Firestore flush once this run reaches a
+        # Bug #77: single full-document registry flush once this run reaches a
         # terminal state (completed/failed/waiting_for_human) rather than a
         # per-log-line read+write.
         mem.finalize_run_log(run_id)

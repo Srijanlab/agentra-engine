@@ -580,9 +580,9 @@ async def deploy_pre_prod_self_hosted(
     # under test actually touches (confirmed live: a fully successful pre-prod
     # deploy still showed the connect screen, not real data). Inherited from this
     # process's own live container -- the AWS credentials especially must never
-    # land in a committed YAML file the way a non-secret Firestore project id
-    # once could; this is the same trust boundary agentra's own production
-    # containers already run under, not a new secret fetch or a wider grant.
+    # land in a committed file; this is the same trust boundary agentra's own
+    # production containers already run under, not a new secret fetch or a wider
+    # grant.
     env_args = _inherit_env(own_container, [
         "AGENTRA_DYNAMODB_TABLE_PREFIX", "AGENTRA_AWS_ACCESS_KEY_ID", "AGENTRA_AWS_SECRET_ACCESS_KEY", "AGENTRA_AWS_REGION",
         "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY",

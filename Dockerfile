@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-# agentra-engine — the API. Slim, Cloud-Run-first: no browser, no Node/CLIs, no
+# agentra-engine — the API. Production runs on Vercel (serverless); this image is
+# the fallback for any plain container host. Slim: no browser, no Node/CLIs, no
 # docker client. Just Python + git (registry/apps clone & pull repos over the
 # GitHub App). The dashboard is Srijanlab/agentra-ui, hosted separately; the LLM
 # + build workloads are Srijanlab/agentra-loop.
@@ -23,10 +24,9 @@ RUN useradd --create-home --shell /bin/bash agentuser \
 WORKDIR /workspace
 USER agentuser
 
-# Cloud Run sets $PORT; `agentra serve` already reads it (default 8080).
+# `agentra serve` reads $PORT if the host sets it (default 8080).
 EXPOSE 8080
 
-# No entrypoint script — Cloud Run has no repo to clone on start, the engine
-# just serves. Firestore + GitHub App creds come from the runtime service
-# account and mounted secrets, not a git checkout.
+# No entrypoint script — the engine has no repo to clone on start, it just
+# serves. DynamoDB + GitHub App creds come from the environment, not a checkout.
 CMD ["agentra", "serve"]
