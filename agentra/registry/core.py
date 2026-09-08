@@ -23,6 +23,7 @@ _SLACK_THREADS_PATH = AGENTRA_HOME / "slack_threads.json"
 _LLM_BACKEND_PATH = AGENTRA_HOME / "llm_backend.json"
 _RUNS_PATH = AGENTRA_HOME / "runs.json"
 _LOOPS_PATH = AGENTRA_HOME / "loops.json"
+_JOBS_PATH = AGENTRA_HOME / "jobs.json"
 _AGENT_STEPS_PATH = AGENTRA_HOME / "agent_steps.jsonl"
 
 _repos_env_value = os.environ.get("AGENTRA_REPOS_ROOT")

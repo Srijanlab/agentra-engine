@@ -68,8 +68,9 @@ _REGISTRY_METHODS = frozenset({
     "roll_up_loop", "set_loop_human_input", "set_loop_pipeline", "set_loop_status",
     "loop_id_for", "loop_id_for_issue",
     "list_agent_steps",
-    "list_waiting_for_human", "reconcile_stale_runs", "reconcile_waiting_for_human",
+    "list_waiting_for_human", "reconcile_stale_runs", "reconcile_stale_loops", "reconcile_waiting_for_human",
     "submit_request", "dispatch_once",
+    "enqueue_job", "claim_next_job", "report_job", "list_jobs",
 })
 
 _MEMORY_METHODS = frozenset({

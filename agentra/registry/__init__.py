@@ -61,6 +61,13 @@ from agentra.registry.loops import (
     set_loop_pipeline,
     set_loop_status,
 )
+from agentra.registry.jobs import (
+    JOB_KINDS,
+    claim_next_job,
+    enqueue_job,
+    list_jobs,
+    report_job,
+)
 
 _DELEGATED_NAMES = {
     "AGENTRA_HOME",
@@ -77,6 +84,7 @@ _DELEGATED_NAMES = {
     "_ddb",
     "_RUNS_PATH",
     "_LOOPS_PATH",
+    "_JOBS_PATH",
     "_AGENT_STEPS_PATH",
 }
 
@@ -124,6 +132,11 @@ __all__ = [
     "set_loop_pipeline",
     "set_loop_status",
     "list_loops",
+    "JOB_KINDS",
+    "enqueue_job",
+    "claim_next_job",
+    "report_job",
+    "list_jobs",
     "list_runs",
     "list_waiting_for_human",
     "loop_id_for",
