@@ -15,7 +15,6 @@ from agentra.memory import Memory
 
 def _isolate(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
-    monkeypatch.setattr(registry, "_ddb", None, raising=False)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
     monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")
@@ -264,7 +263,10 @@ def test_check_backlog_directive_says_end_run_for_tested_item(tmp_path, monkeypa
 # --- mirror-invariant drift guard (engine: RPC allowlist; loop: proxy set) --
 
 def test_new_registry_and_memory_methods_cross_the_loop_engine_boundary():
-    names = {"set_loop_pipeline", "get_loop_pipeline", "set_loop_human_input"}
+    names = {
+        "set_loop_pipeline", "get_loop_pipeline", "set_loop_human_input",
+        "enqueue_job", "claim_next_job", "report_job", "list_jobs",
+    }
     try:
         from agentra.server.routes.internal import _MEMORY_METHODS, _REGISTRY_METHODS
         assert names <= _REGISTRY_METHODS
