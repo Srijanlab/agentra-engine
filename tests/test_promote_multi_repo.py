@@ -69,14 +69,17 @@ def _register_multi_repo_app(tmp_path: Path) -> dict[str, Path]:
 # -- route-level validation -----------------------------------------------------------
 
 
-def test_promote_requires_target_repo_when_ambiguous(tmp_path, monkeypatch):
+def test_promote_without_target_repo_enqueues_an_auto_promote(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     _register_multi_repo_app(tmp_path)
 
     response = TestClient(server.app).post("/apps/agentra/promote")
 
-    assert response.status_code == 400
-    assert "target_repo" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["triggered"] is True
+    [job] = registry.list_jobs()
+    # issue #7: no explicit pick -> the loop auto-resolves which code repos to promote
+    assert job["kind"] == "promote" and job["payload"]["target_repos"] is None
 
 
 def test_promote_rejects_an_unknown_target_repo(tmp_path, monkeypatch):
@@ -98,7 +101,7 @@ def test_promote_dispatches_with_the_named_target_repo(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["triggered"] is True
     [job] = registry.list_jobs()
-    assert job["kind"] == "promote" and job["payload"]["target_repo"] == "engine"
+    assert job["kind"] == "promote" and job["payload"]["target_repos"] == ["engine"]
 
 
 def test_promote_legacy_single_repo_app_needs_no_target_repo(tmp_path, monkeypatch):

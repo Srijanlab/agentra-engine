@@ -219,27 +219,28 @@ async def promote_app(app_name: str, payload: PromoteTrigger | None = None) -> d
         raise HTTPException(status_code=409, detail=f"local checkout for {app_name!r} is missing and could not be recovered")
 
     code_repos = registry.get_code_repos(app_name)
-    target_repo = (payload or PromoteTrigger()).target_repo
-    if code_repos:
-        if not target_repo and len(code_repos) == 1:
-            target_repo = next(iter(code_repos))
-        if not target_repo:
-            raise HTTPException(
-                status_code=400,
-                detail=f"app {app_name!r} has multiple code repos ({', '.join(code_repos)}) -- set target_repo.",
-            )
-        if target_repo not in code_repos:
-            raise HTTPException(
-                status_code=400,
-                detail=f"target_repo={target_repo!r} is not one of {app_name!r}'s code repos: {', '.join(code_repos)}.",
-            )
+    requested = (payload or PromoteTrigger()).target_repo
+    if requested and requested not in code_repos:
+        raise HTTPException(
+            status_code=400,
+            detail=f"target_repo={requested!r} is not one of {app_name!r}'s code repos: {', '.join(code_repos)}.",
+        )
+    if requested:
+        target_repos: list[str] | None = [requested]
+    elif len(code_repos) == 1:
+        target_repos = [next(iter(code_repos))]
+    else:
+        # Multiple code repos and no explicit pick (issue #7): the loop, which has
+        # the checkouts, promotes every code repo whose pre-prod branch is ahead of
+        # its prod branch. `None` == "auto".
+        target_repos = None
 
     objective = Memory(repo).get_objective() or ""
     run_key = _new_run_key(app_name, "promote", objective)
     job_id = registry.enqueue_job("promote", {
-        "run_key": run_key, "app": app_name, "target_repo": target_repo,
+        "run_key": run_key, "app": app_name, "target_repos": target_repos,
     }, dedup_key=f"promote:{app_name}")
-    _server_log("promote", f"app={app_name!r} run_key={run_key} job={job_id} target_repo={target_repo!r} -- promotion queued")
+    _server_log("promote", f"app={app_name!r} run_key={run_key} job={job_id} target_repos={target_repos!r} -- promotion queued")
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
