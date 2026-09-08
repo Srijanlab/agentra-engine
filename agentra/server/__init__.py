@@ -20,7 +20,6 @@ from agentra.agents import catalog as agents_catalog
 from agentra.memory import Memory
 from agentra.server.state import _active_runs, _app_locks
 from agentra.server.utils import _strip_log_timestamp
-from agentra.server.routes.chat import AGENT_VOICES
 
 logger = logging.getLogger("agentra.server")
 
@@ -240,7 +239,6 @@ from agentra.server.routes.chat import router as chat_router  # noqa: E402
 from agentra.server.routes.triggers import router as triggers_router  # noqa: E402
 from agentra.server.routes.human_input import router as human_input_router  # noqa: E402
 from agentra.server.routes.review import router as review_router  # noqa: E402
-from agentra.server.routes.slack import router as slack_router  # noqa: E402
 from agentra.server.routes.internal import router as internal_router  # noqa: E402
 from agentra.a2a.routes import router as a2a_router  # noqa: E402
 
@@ -253,6 +251,5 @@ app.include_router(chat_router)
 app.include_router(triggers_router)
 app.include_router(human_input_router)
 app.include_router(review_router)
-app.include_router(slack_router)
 app.include_router(internal_router)
 app.include_router(a2a_router)
