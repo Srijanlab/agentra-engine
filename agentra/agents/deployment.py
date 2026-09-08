@@ -202,7 +202,9 @@ def _merge_and_push(repo: Path, source_ref: str, target_branch: str) -> str | No
 
 
 def persist_audit_trail(repo: Path, branch: str) -> str | None:
-    """Commit and push any dirty .agentra/ bookkeeping (released.json, memory/*, feedback_sync_state.json, codebase_spec_commit.json) onto `branch`."""
+    """Commit and push any dirty .agentra/ bookkeeping (released.json, memory/*,
+    feedback_sync_state.json) onto `branch`. Only ever called with the coordination
+    repo; per-code-repo `.agentra/` spec files are handled by `persist_repo_specs`."""
     from agentra.agents.git_ops import GitOpError, commit_and_push, pull_latest
 
     status = subprocess.run(
@@ -259,6 +261,71 @@ def persist_audit_trail(repo: Path, branch: str) -> str | None:
     except GitOpError as exc:
         return f"Failed to persist audit trail to {branch!r}: {exc}"
     return None
+
+
+_REPO_SPEC_PATHS = (".agentra/architecture.md", ".agentra/design.md", ".agentra/testing.md", ".agentra/state.json")
+
+
+def persist_repo_specs(repo: Path, branch: str) -> str | None:
+    """Commit a code repo's `.agentra/` spec files (architecture/design/testing/state)
+    onto `branch` -- and ONLY `branch`. The cycle may be mid-feature-branch on this
+    repo, so instead of commit-then-switch (which would leave a spec commit on the
+    feature branch, GitHub issue #-spec R1) this copies the files aside, discards the
+    working-tree copy, checks out `branch`, restores, and commits there. `origin/<branch>`
+    missing -> fall back to the current branch. Best-effort: returns an error string,
+    never raises, never fatal to the cycle."""
+    import shutil
+    import tempfile
+
+    from agentra.agents.git_ops import GitOpError, commit_and_push, fetch_ref
+
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", *_REPO_SPEC_PATHS],
+        capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        return None
+
+    if subprocess.run(
+        ["git", "-C", str(repo), "ls-remote", "--exit-code", "--heads", "origin", branch],
+        capture_output=True, text=True,
+    ).returncode != 0:
+        current = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if current and current != "HEAD":
+            branch = current
+
+    tmp = Path(tempfile.mkdtemp(prefix="agentra-spec-"))
+    try:
+        for rel in _REPO_SPEC_PATHS:
+            src = repo / rel
+            if src.exists():
+                shutil.copy2(src, tmp / Path(rel).name)
+        # Discard the working-tree spec changes so the branch switch is clean.
+        subprocess.run(["git", "-C", str(repo), "checkout", "--", ".agentra/"], capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo), "clean", "-fd", "--", ".agentra/"], capture_output=True, text=True)
+        try:
+            fetch_ref(repo, branch)
+            subprocess.run(
+                ["git", "-C", str(repo), "checkout", "-B", branch, f"origin/{branch}"],
+                check=True, capture_output=True, text=True,
+            )
+        except (GitOpError, subprocess.CalledProcessError) as exc:
+            detail = exc.stderr if isinstance(getattr(exc, "stderr", None), str) else str(exc)
+            return f"persist_repo_specs: could not check out {branch!r}: {detail}"
+
+        for f in tmp.iterdir():
+            (repo / ".agentra").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, repo / ".agentra" / f.name)
+        try:
+            commit_and_push(repo, branch, "agentra: sync .agentra/ specs", [".agentra/"])
+        except GitOpError as exc:
+            return f"persist_repo_specs: push to {branch!r} failed: {exc}"
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 async def merge_to_pre_prod_only(repo: Path, env: EnvironmentConfig, feature_branch: str) -> AgentResult:

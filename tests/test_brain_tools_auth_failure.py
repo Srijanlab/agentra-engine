@@ -87,10 +87,10 @@ def test_understand_codebase_escalates_on_auth_failure(tmp_path, monkeypatch):
     _patch_registry(monkeypatch)
     session = _session(tmp_path, cb_summary=None)  # force the scan path, not the loaded-summary no-op
     bug_calls = _bug_capture(monkeypatch, session)
-    async def fake_run_cached(*a, **k):
+    async def fake_run_cached(*a, **k):  # patches codebase.sync_spec
         return _auth_failure_result()
 
-    monkeypatch.setattr(brain.codebase, "run_cached", fake_run_cached)
+    monkeypatch.setattr(brain.codebase, "sync_spec", fake_run_cached)
 
     result = asyncio.run(_tool(session, "understand_codebase").handler({}))
 
@@ -323,10 +323,10 @@ def test_auth_failure_hard_stop_blocks_every_subsequent_tool_call_this_cycle(tmp
     _patch_registry(monkeypatch)
     session = _session(tmp_path, cb_summary=None)  # force the scan path
     _bug_capture(monkeypatch, session)
-    async def fake_run_cached(*a, **k):
+    async def fake_run_cached(*a, **k):  # patches codebase.sync_spec
         return _auth_failure_result()
 
-    monkeypatch.setattr(brain.codebase, "run_cached", fake_run_cached)
+    monkeypatch.setattr(brain.codebase, "sync_spec", fake_run_cached)
 
     asyncio.run(_tool(session, "understand_codebase").handler({}))
     assert session.hard_stop_reason is not None

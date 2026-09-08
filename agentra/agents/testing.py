@@ -3,12 +3,37 @@
 import datetime as dt
 import json
 import logging
+import subprocess
 from pathlib import Path
 
 from agentra.agents.base import AgentResult, run_agent
 from agentra.memory import Memory
+from agentra.memory.core import spec_header
 
 logger = logging.getLogger(__name__)
+
+
+def _git_head(repo: Path) -> str | None:
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _update_testing_md_last_run(mem: Memory, sha: str | None, status: str, summary: str) -> None:
+    """Rewrite only the `## Last run` block of `.agentra/testing.md`, keeping the
+    header and `## Local test recipe` section intact."""
+    when = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    last_run = f"## Last run\nsha: {(sha or '?')[:12]}  status: {status}  when: {when}\n{summary}\n"
+    existing = mem.read_spec("testing")
+    if existing and "## Last run" in existing:
+        head, _, _ = existing.partition("## Last run")
+        mem.write_spec("testing", head.rstrip() + "\n\n" + last_run)
+    elif existing:
+        mem.write_spec("testing", existing.rstrip() + "\n\n" + last_run)
+    else:
+        mem.write_spec("testing", spec_header("agent:testing", sha) + "# Testing\n\n## Local test recipe\n(unknown — seeded on next architecture sync)\n\n" + last_run)
 
 LOCAL_SYSTEM_PROMPT = """You are the Testing Agent in an autonomous product \
 engineering system, running in LOCAL mode. A feature was just implemented. \
@@ -141,20 +166,21 @@ Run the full local test/QA pass now, following your system prompt."""
         resume=session_id,
     )
     if mem is not None and result.ok and result.json_data:
-        # architecture/local-test-summary.md: a live, agent-maintained snapshot --
-        # GitHub issue #84: this used to share architecture/testing-notes.md with
-        # the human-authored "Testing Notes" app setting (server/routes/apps.py),
-        # so every local-test pass silently clobbered whatever a human had written
-        # there. Machine-generated summary now gets its own key; testing-notes
-        # stays exclusively human-owned.
+        # The code repo's own .agentra/testing.md '## Last run' + state.json.last_local_test
+        # (docs/agentra-spec.md). `mem` is the code-repo Memory (session.repo_memory),
+        # not the coordination one. testing-notes.md stays human-owned, untouched.
         data = result.json_data
-        lines = [
-            f"Lint: {data.get('lint_status', 'unknown')}",
-            f"Typecheck: {data.get('typecheck_status', 'unknown')}",
-        ]
-        if data.get("notes"):
-            lines.append(f"Notes: {data['notes']}")
-        mem.write("architecture", "local-test-summary", "\n".join(lines))
+        summary = "; ".join(filter(None, [
+            f"lint {data.get('lint_status', '?')}",
+            f"typecheck {data.get('typecheck_status', '?')}",
+            data.get("notes"),
+        ]))
+        head = _git_head(repo)
+        mem.write_state({"last_local_test": {
+            "sha": head, "status": "pass",
+            "when": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "summary": summary,
+        }})
+        _update_testing_md_last_run(mem, head, "pass", summary)
     return result
 
 

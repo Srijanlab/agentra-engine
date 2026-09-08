@@ -1,93 +1,66 @@
-"""Confirmed live on the deployed agentra-orchestrator VM: on a repo with an
-existing cached architecture/codebase.md, run_autonomous_cycle pre-seeds
-session.cb_summary directly from that cache (see __init__.py's own comment
-on why -- avoiding a wasted understand_codebase call) and the model, seeing
-a summary already loaded, has every reason never to call understand_codebase
-at all this cycle. codebase.run_cached -- the only place that used to call
-codegraph.load_or_build -- was therefore never invoked either, so
-mcp_config(repo) returned {} for assess_design_impact/implement_feature on
-every cycle of any mature/cached repo, silently never building a graph.
-grep on the VM's own logs for "graphify" turned up nothing, which is what
-surfaced this.
-
-Fix: run_autonomous_cycle also calls codegraph.load_or_build directly
-alongside the cb_summary pre-seed, so the graph exists regardless of
-whether the model calls understand_codebase this cycle.
+"""The brain preseed loads each repo's committed `.agentra/architecture.md`
+spec into the orchestrator prompt. It does NOT build or read a code graph --
+codegraph is a runtime navigation tool that implementation.py /
+architecture_review.py build lazily against the active code repo, decoupled
+from the spec (docs/agentra-spec.md).
 """
 
 import asyncio
 from pathlib import Path
 
 from agentra.agents import brain
+from agentra.environments import EnvironmentConfig
 from agentra.memory import Memory
+from agentra.memory.core import spec_header
 
 
 def _fake_query_capturing(captured):
     async def _fake_query(prompt, options):
-        # prompt is an async generator (single_prompt_stream wraps the plain string);
-        # drain it so callers can assert on the actual text content.
-        prompt_text_parts = []
+        parts = []
         async for item in prompt:
             content = item.get("message", {}).get("content", "")
             if content:
-                prompt_text_parts.append(content)
-        captured["prompt"] = "\n".join(prompt_text_parts)
-        captured["options"] = options
+                parts.append(content)
+        captured["prompt"] = "\n".join(parts)
         return
-        yield  # pragma: no cover -- makes this an async generator, never reached
+        yield  # pragma: no cover
 
     return _fake_query
 
 
-def _repo_with_code_and_cached_summary(tmp_path: Path) -> Path:
+def _repo_with_committed_spec(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
-    (repo / "src" / "main.py").write_text(
-        "def helper():\n    return 1\n\n\ndef main():\n    return helper() + 1\n"
-    )
-    Memory(repo).write("architecture", "codebase", "a cached codebase summary from a prior cycle")
+    (repo / "src" / "main.py").write_text("def helper():\n    return 1\n")
+    mem = Memory(repo)
+    mem.write_spec("architecture", spec_header("agent:codebase", "abc1234") + "# repo — Architecture\n## Purpose\nA tiny helper module.")
     return repo
 
 
-def test_run_autonomous_cycle_builds_graph_even_when_summary_is_pre_seeded_from_cache(tmp_path, monkeypatch):
-    repo = _repo_with_code_and_cached_summary(tmp_path)
+def test_preseed_loads_the_committed_spec_into_the_prompt(tmp_path, monkeypatch):
+    repo = _repo_with_committed_spec(tmp_path)
     captured = {}
     monkeypatch.setattr(brain, "query", _fake_query_capturing(captured))
-
-    from agentra.environments import EnvironmentConfig
 
     asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
 
-    assert (repo / "graphify-out" / "graph.json").exists(), (
-        "the graph must be built at cycle start regardless of whether the model "
-        "ever calls understand_codebase this cycle -- see codebase.run_cached, "
-        "the only other call site, which the pre-seed above bypasses entirely"
-    )
+    assert "A tiny helper module." in captured["prompt"]
 
 
-def test_run_autonomous_cycle_appends_graph_summary_to_the_preseeded_cb_summary(tmp_path, monkeypatch):
-    repo = _repo_with_code_and_cached_summary(tmp_path)
-    captured = {}
-    monkeypatch.setattr(brain, "query", _fake_query_capturing(captured))
-
-    from agentra.environments import EnvironmentConfig
-
-    asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
-
-    assert "helper" in captured["prompt"]  # the graph excerpt made it into the model's prompt
-
-
-def test_run_autonomous_cycle_does_not_build_a_graph_when_no_cache_exists_yet(tmp_path, monkeypatch):
-    """No cached summary -> the model is expected to call understand_codebase
-    itself (which builds the graph via codebase.run_cached) -- nothing for
-    this pre-seed shortcut to do in that case."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    captured = {}
-    monkeypatch.setattr(brain, "query", _fake_query_capturing(captured))
-
-    from agentra.environments import EnvironmentConfig
+def test_preseed_builds_no_code_graph(tmp_path, monkeypatch):
+    repo = _repo_with_committed_spec(tmp_path)
+    monkeypatch.setattr(brain, "query", _fake_query_capturing({}))
 
     asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))
 
     assert not (repo / "graphify-out").exists()
+
+
+def test_preseed_makes_no_codegraph_call(tmp_path, monkeypatch):
+    repo = _repo_with_committed_spec(tmp_path)
+    monkeypatch.setattr(brain, "query", _fake_query_capturing({}))
+    import agentra.agents.codegraph as codegraph_mod
+    monkeypatch.setattr(codegraph_mod, "load_or_build",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("codegraph called in preseed")))
+
+    asyncio.run(brain.run_autonomous_cycle(repo, "Ship useful features.", EnvironmentConfig()))

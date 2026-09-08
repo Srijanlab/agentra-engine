@@ -20,6 +20,7 @@ from agentra.memory.features import MemoryFeaturesMixin
 from agentra.memory.issue_lifecycle import MemoryIssueLifecycleMixin
 from agentra.memory.issues import MemoryIssuesMixin
 from agentra.memory.settings import MemorySettingsMixin
+from agentra.memory.specs import MemorySpecsMixin
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,9 @@ RUN_LOG_FLUSH_INTERVAL_SECONDS = 300
 RUN_LOG_MAX_LINES = 500
 
 
-class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, MemorySettingsMixin):
+class Memory(
+    MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, MemorySettingsMixin, MemorySpecsMixin
+):
     """Repo-scoped memory."""
 
     def __init__(self, repo: Path) -> None:
@@ -42,7 +45,7 @@ class Memory(MemoryIssuesMixin, MemoryIssueLifecycleMixin, MemoryFeaturesMixin, 
         self.log_root = self.root / "logs"
         self.released_path = self.root / "released.json"
         self.feedback_sync_state_path = self.root / "feedback_sync_state.json"
-        self.codebase_spec_commit_path = self.root / "codebase_spec_commit.json"
+        self.state_path = self.root / "state.json"
         self._log_buffers: dict[str, list[str]] = {}
         self._log_buffer_meta: dict[str, dict[str, float]] = {}
         # Cloud mode: the engine has no writable checkout dir. The GitHub- and
