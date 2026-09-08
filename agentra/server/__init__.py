@@ -17,12 +17,10 @@ from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware
 
 from agentra import registry
 from agentra.agents import catalog as agents_catalog
-from agentra.agents import deployment
 from agentra.memory import Memory
 from agentra.server.state import _active_runs, _app_locks
 from agentra.server.utils import _strip_log_timestamp
 from agentra.server.routes.chat import AGENT_VOICES
-from agentra.server.routes.triggers import _record_production_release, _branch_head_sha, _run_promote_background
 
 logger = logging.getLogger("agentra.server")
 
@@ -31,18 +29,6 @@ from agentra import observability  # noqa: E402
 observability.init_observability()
 
 app = FastAPI(title="agentra orchestrator")
-
-
-@app.middleware("http")
-async def _refresh_oidc_token(request, call_next):
-    # Fluid Compute delivers the OIDC JWT as a per-request header; sync it to the
-    # file identity_pool reads, then lazily build the Firestore client (it can't
-    # exist at import -- no token yet).
-    from agentra import registry
-
-    registry.sync_oidc_token_file(request.headers.get("x-vercel-oidc-token"))
-    registry.ensure_firestore()
-    return await call_next(request)
 
 
 # Order matters: CORS added last == outermost, so it answers preflight and
@@ -93,7 +79,7 @@ def _run_screenshot_path(run_key: str) -> Path | None:
     repo = registry.get_app_repo(run["app"])
     if repo is None:
         return None
-    from agentra.agents.testing import screenshot_path
+    from agentra.artifacts import screenshot_path
 
     return screenshot_path(repo, run_key)
 
@@ -105,7 +91,7 @@ def _run_report_path(run_key: str) -> Path | None:
     repo = registry.get_app_repo(run["app"])
     if repo is None:
         return None
-    from agentra.agents.testing import report_path
+    from agentra.artifacts import report_path
 
     return report_path(repo, run_key)
 
@@ -136,40 +122,13 @@ async def health() -> dict:
     """GitHub #113: /healthz is a pure alias so probes using either convention succeed."""
     try:
         return {"status": "ok", "apps_registered": len(registry.list_apps())}
-    except Exception as exc:  # never let a Firestore blip fail the liveness probe
+    except Exception as exc:  # never let a backend blip fail the liveness probe
         return {"status": "degraded", "error": f"{type(exc).__name__}"}
-
-
-@app.get("/debug/firestore")
-async def debug_firestore(request: Request) -> dict:
-    """Diagnose the keyless Firestore path (Vercel OIDC -> WIF). No secrets returned."""
-    from agentra import registry
-
-    out = {
-        "vercel_oidc_token_present": bool(os.environ.get("VERCEL_OIDC_TOKEN")),
-        "wif_config_present": bool(os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")),
-        "firestore_project": os.environ.get("AGENTRA_FIRESTORE_PROJECT"),
-        "firebase_project": os.environ.get("FIREBASE_PROJECT_ID"),
-        "allowed_emails_set": bool(os.environ.get("AGENTRA_ALLOWED_EMAILS")),
-        "internal_token_set": bool(os.environ.get("AGENTRA_INTERNAL_TOKEN")),
-        "db_connected": registry.firestore_client() is not None,
-        "github_token_loaded": bool(os.environ.get("GITHUB_TOKEN")),
-        "github_app_loaded": bool(os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")),
-        "vercel_env_keys": sorted(k for k in os.environ if k.startswith(("VERCEL", "AWS", "GOOGLE", "GCP"))),
-        "vercel_headers": sorted(h for h in request.headers if h.lower().startswith(("x-vercel", "x-oidc"))),
-    }
-    db = registry.firestore_client()
-    if db is not None:
-        try:
-            out["apps_doc_count"] = sum(1 for _ in db.collection("apps").limit(20).stream())
-        except Exception as exc:
-            out["read_error"] = f"{type(exc).__name__}: {exc}"[:400]
-    return out
 
 
 @app.get("/debug/dynamodb")
 async def debug_dynamodb() -> dict:
-    """Diagnose the DynamoDB path (static IAM keys, not OIDC). No secrets returned."""
+    """Diagnose the DynamoDB path (static IAM keys). No secrets returned."""
     from agentra import registry
 
     out = {

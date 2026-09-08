@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
@@ -10,10 +9,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from agentra import environments, registry
-from agentra.agents.brain import run_autonomous_cycle
+from agentra import registry
 from agentra.memory import Memory
-from agentra.server.utils import _lock_for, _paused_response, _server_log, _set_run
+from agentra.server.utils import _paused_response, _server_log
 
 logger = logging.getLogger(__name__)
 
@@ -23,59 +21,6 @@ router = APIRouter()
 class HumanInputAnswerPayload(BaseModel):
     issue_number: int
     answer: str
-
-
-def _feature_hint_for_resume(context: dict) -> str:
-    """A strong, explicit instruction (same "feature hint" mechanism run_autonomous_cycle already exposes for cli.py's --feature) telling the brain exactly which in-progress item to continue and how -- on top of, not instead of, check_backlog already listing in-progress work first and session.human_answer/human_answer_issue getting woven into the matching implement_feature call's spec (see tools.py)."""
-    tracking_issue = context.get("tracking_issue")
-    branch = context.get("branch")
-    if tracking_issue and branch:
-        return (
-            f"A human has just answered a blocking question for issue #{tracking_issue} on "
-            f"branch {branch!r}. Call implement_feature now with resume_branch={branch!r} and "
-            f"resolves_id={str(tracking_issue)!r} (or sub_feature_of, whichever matches how that "
-            "issue was originally being worked) to continue that exact interrupted call using "
-            "the human's answer -- do not start a new branch or new work first."
-        )
-    return (
-        "A human has just answered a blocking question raised earlier this run. Call "
-        "check_backlog to see what was in progress and continue it."
-    )
-
-
-async def _run_human_resume_background(run_key: str, app_name: str, repo: Path, context: dict, answer: str) -> None:
-    lock = _lock_for(app_name)
-    async with lock:
-        _set_run(run_key, status="running")
-        try:
-            env = environments.load(repo) or environments.EnvironmentConfig()
-            objective = Memory(repo).get_objective() or ""
-            report = await run_autonomous_cycle(
-                repo,
-                objective,
-                env,
-                feature=_feature_hint_for_resume(context),
-                run_id=run_key,
-                human_answer=answer,
-                human_answer_issue=context.get("tracking_issue"),
-                app_name=app_name,
-            )
-            _set_run(
-                run_key,
-                status="blocked" if report.waiting_for_human else "completed",
-                ended_at=time.time(),
-                cost_usd=report.cost_usd,
-                summary=report.final_message,
-                feature=report.feature,
-            )
-            _server_log(
-                "human-input",
-                f"app={app_name!r} run_key={run_key} agentra_run_id={report.run_id} resumed | "
-                f"waiting_for_human={report.waiting_for_human} cost=${report.cost_usd:.4f}",
-            )
-        except Exception as exc:
-            _set_run(run_key, status="failed", ended_at=time.time(), error=str(exc), summary=str(exc)[:2000])
-            _server_log("human-input", f"app={app_name!r} run_key={run_key} raised: {exc!r}")
 
 
 _SOURCE_LABEL = {"human-input": "the dashboard", "slack": "Slack", "github-comment": "a GitHub comment"}
@@ -142,9 +87,12 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         logger.warning("dispatch_human_answer: could not set loop %s active", loop_id, exc_info=True)
     mem.record_human_answer(issue_number, answer, resumed_run_key=run_key)
     _ack_slack_thread(app_name, issue_number, answer, source)
-    _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} -- human answer accepted, resuming")
-    asyncio.create_task(_run_human_resume_background(run_key, app_name, repo, context, answer))
-    return {"run_key": run_key, "branch": context.get("branch"), "session_id": context.get("session_id")}
+    job_id = registry.enqueue_job("human_resume", {
+        "run_key": run_key, "app": app_name, "issue_number": issue_number,
+        "answer": answer, "context": context,
+    }, dedup_key=f"human_resume:{app_name}:{issue_number}")
+    _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} job={job_id} -- human answer accepted, resume queued")
+    return {"run_key": run_key, "job_id": job_id, "branch": context.get("branch"), "session_id": context.get("session_id")}
 
 
 @router.post("/apps/{app_name}/human-input")

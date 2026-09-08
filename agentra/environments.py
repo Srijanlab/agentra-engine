@@ -30,7 +30,7 @@ class EnvironmentConfig:
     deploy_strategy: str = "vercel_firebase"
     # Per-app schedule: how often a scheduled cycle should actually run this
     schedule_hours: float = 24.0
-    # Per-app opt-out of the alarm-triggered prod-debug path. The GCP
+    # Per-app opt-out of the alarm-triggered prod-debug path.
     alarm_enabled: bool = True
 
     @property

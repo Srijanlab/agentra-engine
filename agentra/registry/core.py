@@ -23,6 +23,7 @@ _SLACK_THREADS_PATH = AGENTRA_HOME / "slack_threads.json"
 _LLM_BACKEND_PATH = AGENTRA_HOME / "llm_backend.json"
 _RUNS_PATH = AGENTRA_HOME / "runs.json"
 _LOOPS_PATH = AGENTRA_HOME / "loops.json"
+_JOBS_PATH = AGENTRA_HOME / "jobs.json"
 _AGENT_STEPS_PATH = AGENTRA_HOME / "agent_steps.jsonl"
 
 _repos_env_value = os.environ.get("AGENTRA_REPOS_ROOT")
@@ -37,89 +38,12 @@ REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 HUMAN_INPUT_MAX_WAIT_SECONDS = float(os.environ.get("AGENTRA_HUMAN_INPUT_MAX_WAIT_HOURS", "24")) * 3600
 
 
-# Vercel injects a fresh OIDC JWT per invocation; identity_pool reads it from a
-# file. sync_oidc_token_file() copies the env var onto disk -- call it before any
-# Firestore use (see server middleware).
-_OIDC_TOKEN_FILE = "/tmp/agentra_vercel_oidc_token"
-
-
-def sync_oidc_token_file(token: str | None = None) -> None:
-    # Fluid Compute delivers the OIDC JWT as the x-vercel-oidc-token request
-    # header (not an env var), so the caller passes it in from the request.
-    token = token or os.environ.get("VERCEL_OIDC_TOKEN")
-    if not token:
-        return
-    os.environ["VERCEL_OIDC_TOKEN"] = token  # so downstream env checks pass
-    try:
-        with open(_OIDC_TOKEN_FILE, "w") as fh:
-            fh.write(token)
-    except OSError:
-        pass
-
-
-def _gcp_credentials():
-    """Credentials for Firestore, in priority order. Returns None to fall back to
-    ADC / the metadata server (i.e. running on GCP)."""
-    # 1. Keyless: Vercel OIDC -> Workload Identity Federation (survives the
-    #    iam.disableServiceAccountKeyCreation org policy -- no key anywhere).
-    wif_config = os.environ.get("GCP_WORKLOAD_IDENTITY_CONFIG")
-    if wif_config and os.environ.get("VERCEL_OIDC_TOKEN"):
-        sync_oidc_token_file()
-        from google.auth import identity_pool
-
-        cfg = json.loads(wif_config)
-        cfg.setdefault("credential_source", {})["file"] = _OIDC_TOKEN_FILE
-        return identity_pool.Credentials.from_info(cfg)
-    # 2. A service-account key from an env var, if one is ever available.
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if sa_json:
-        from google.oauth2 import service_account
-
-        return service_account.Credentials.from_service_account_info(json.loads(sa_json))
-    return None
-
-
-def _init_firestore():
-    project = os.environ.get("AGENTRA_FIRESTORE_PROJECT")
-    if not project:
-        return None
-    try:
-        from google.cloud import firestore
-
-        creds = _gcp_credentials()
-        if creds is not None:
-            return firestore.Client(project=project, credentials=creds)
-        return firestore.Client(project=project)
-    except Exception:
-        # Never crash the whole app on a credential/import problem -- endpoints
-        # that need Firestore will 503, the rest (and /health) still work.
-        logger.error("Firestore init failed -- running without it", exc_info=True)
-        return None
-
-
-_db = _init_firestore()
-
-
-def ensure_firestore():
-    """Lazy init for the Vercel path: the OIDC token only exists per-request, so
-    _db can't be built at import. Call once the token file is in place."""
-    global _db
-    if _db is None:
-        _db = _init_firestore()
-    return _db
-
-
-def firestore_client():
-    return _db
-
-
 def _init_dynamodb():
     """Static IAM keys, not OIDC federation -- this AWS account has a diagnosed
     prior failure of AssumeRoleWithWebIdentity (see deploy/aws's CiUser comment
-    in the loop repo), so no per-request token refresh is needed here at all,
-    unlike Firestore's WIF dance above. AGENTRA_AWS_* is prefixed rather than
-    bare AWS_* because Vercel's own Lambda-based runtime reserves those bare
-    names for its own unrelated execution-role credentials."""
+    in the loop repo), so no per-request token refresh is needed. AGENTRA_AWS_*
+    is prefixed rather than bare AWS_* because Vercel's own Lambda-based runtime
+    reserves those bare names for its own unrelated execution-role credentials."""
     prefix = os.environ.get("AGENTRA_DYNAMODB_TABLE_PREFIX")
     if not prefix:
         return None
@@ -139,13 +63,10 @@ def _init_dynamodb():
         return None
 
 
-# Migration in progress: apps/runs/loops/requests still read/write Firestore
-# via `_db` above until their own PRs land; collections already ported (see
-# is_paused/pause/resume/get_llm_backend/set_llm_backend below) use `_ddb`
-# instead. Once every collection is ported and Firestore is decommissioned,
-# `_ddb` absorbs `_db`'s name -- kept distinct for now so a not-yet-ported
-# collection can't be handed a DynamoDB resource and call Firestore-shaped
-# methods on it.
+# DynamoDB backs every registry collection on the engine (Vercel). When
+# AGENTRA_DYNAMODB_TABLE_PREFIX is unset -- the CLI, tests, the loop's own
+# process -- `_ddb` is None and every function falls back to local JSON under
+# AGENTRA_HOME.
 _ddb = _init_dynamodb()
 
 
@@ -154,11 +75,9 @@ def dynamodb_resource():
 
 
 def cloud_mode() -> bool:
-    """True on the engine (Vercel, no persistent disk), regardless of which
-    backend serves the registry -- during the Firestore->DynamoDB migration
-    both `_db` and `_ddb` may be configured at once, and this must stay true
-    either way. False everywhere else (CLI, tests, the loop's own process)."""
-    return _db is not None or _ddb is not None
+    """True on the engine (Vercel, no persistent disk, DynamoDB-backed registry).
+    False everywhere else (CLI, tests, the loop's own process)."""
+    return _ddb is not None
 
 
 def _local_apps() -> dict[str, dict]:
@@ -263,7 +182,7 @@ def get_slack_channel(name: str) -> str | None:
 
 def _remote_head_sha(repo_url: str, branch: str) -> str | None:
     # git_ops.remote_head_sha, not a bare `git ls-remote` -- this used to run
-    from agentra.agents.git_ops import remote_head_sha
+    from agentra.git_ops import remote_head_sha
 
     sha = remote_head_sha(repo_url, branch)
     if sha is None:
@@ -305,7 +224,7 @@ def _sync_if_stale(repo: Path, repo_url: str, branch: str) -> None:
         if _local_head_sha(repo) == remote_sha:
             return
         logger.info("get_app_repo: %s is stale vs origin/%s, resyncing", repo, branch)
-        from agentra.agents.git_ops import pull_latest
+        from agentra.git_ops import pull_latest
 
         pull_latest(repo, branch)
     except Exception:
@@ -362,9 +281,9 @@ def _repo_specs(app_name: str, entry: dict) -> list[RepoSpec]:
 def _resolve_repo(repo_url: str | None, branch: str, stored_path: Path, clone_dest: Path) -> Path | None:
     """Ensure one repo's checkout exists on this host and return its path -- cloning
     to `clone_dest` if the stored path isn't here, resyncing if stale. Cloud mode
-    (the engine, Vercel -- no persistent disk regardless of which backend serves
-    the registry) just returns the stored path unresolved."""
-    if _db is not None or _ddb is not None:
+    (the engine, Vercel -- no persistent disk) just returns the stored path
+    unresolved."""
+    if cloud_mode():
         return stored_path
     if stored_path.exists() and repo_url:
         _sync_if_stale(stored_path, repo_url, branch)
@@ -372,13 +291,13 @@ def _resolve_repo(repo_url: str | None, branch: str, stored_path: Path, clone_de
     if not repo_url:
         return stored_path if stored_path.exists() else None
     # The stored path has no checkout on THIS host -- it's from wherever the app
-    # last ran (GCP VM, Vercel sandbox, ...). A fresh clone goes to this runtime's
+    # last ran (a CI runner, a Vercel sandbox, ...). A fresh clone goes to this runtime's
     # REPOS_ROOT, never back to that foreign (often unwritable) path, which used to
     # fail every cycle with a read-only-filesystem mkdir.
     if clone_dest.exists():
         _sync_if_stale(clone_dest, repo_url, branch)
         return clone_dest
-    from agentra.agents.git_ops import GitOpError, clone_repo
+    from agentra.git_ops import GitOpError, clone_repo
 
     try:
         clone_repo(repo_url, clone_dest, branch=branch)
@@ -501,8 +420,7 @@ _SLACK_THREAD_CAP = 300
 
 def _slack_threads() -> dict:
     """Local/CLI fallback only -- the cloud path (agentra-slack-threads, a real
-    table+GSI, see below) never reads this; a legacy Firestore system/slack_threads
-    doc, if one still exists, is simply orphaned once this ships."""
+    table+GSI, see below) never reads this."""
     if not _SLACK_THREADS_PATH.exists():
         return {}
     return json.loads(_SLACK_THREADS_PATH.read_text())
@@ -603,11 +521,11 @@ def set_llm_backend(backend: str) -> None:
 
 
 def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:
-    # `.agentra/` is the local-JSON fallback store; with Firestore it holds
-    # nothing worth committing, and the host has no git. No-op in cloud mode.
-    if _db is not None:
+    # `.agentra/` is the local-JSON fallback store; on the engine the registry
+    # is DynamoDB-backed and the host has no git. No-op in cloud mode.
+    if cloud_mode():
         return None
-    from agentra.agents.git_ops import GitOpError, commit_and_push
+    from agentra.git_ops import GitOpError, commit_and_push
 
     try:
         commit_and_push(repo, branch, message, [".agentra/"])

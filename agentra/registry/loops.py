@@ -100,21 +100,26 @@ def bind_loop_for_run(app: str, objective: str) -> str:
 
 
 def roll_up_loop(loop_id: str, run_key: str, run_status: str, cost_usd: float) -> None:
-    """Fold a finished run's outcome into its loop's rolling totals."""
+    """Fold a finished run's outcome into its loop's rolling totals. Idempotent
+    per run_key -- a reconcile pass (reconcile_stale_loops) can safely re-fold a
+    run whose original roll-up was lost without inflating run_count/cost."""
     doc = _get_loop_doc(loop_id)
     if doc is None:
         return
     loop_status = "waiting_for_human" if run_status in ("waiting_for_human", "escalated", "blocked") else doc.get("status", "active")
     if loop_status == "active" and (doc.get("pipeline") or {}).get("terminal"):
         loop_status = "shipped"  # delivered through pre-prod, awaiting a human Promote
-    _write_loop(loop_id, {
-        "run_count": int(doc.get("run_count", 0)) + 1,
-        "total_cost_usd": float(doc.get("total_cost_usd", 0.0)) + (cost_usd or 0.0),
+    already_folded = run_key and doc.get("last_run_key") == run_key
+    fields = {
         "last_run_key": run_key,
         "last_run_status": run_status,
         "status": loop_status,
         "updated_at": time.time(),
-    })
+    }
+    if not already_folded:
+        fields["run_count"] = int(doc.get("run_count", 0)) + 1
+        fields["total_cost_usd"] = float(doc.get("total_cost_usd", 0.0)) + (cost_usd or 0.0)
+    _write_loop(loop_id, fields)
 
 
 def set_loop_status(loop_id: str, status: str) -> None:
@@ -204,8 +209,8 @@ def get_loop(loop_id: str) -> dict | None:
 
 def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[dict]:
     """Stored loop summaries, most recently active first. The app-filtered case
-    (the common one -- already tuned once against Firestore quota, hence no
-    per-run scan) is a real indexed Query, not a fetch-then-filter."""
+    (the common one -- already tuned once for cost, hence no per-run scan) is a
+    real indexed Query, not a fetch-then-filter."""
     if core._ddb is not None:
         if app is not None:
             return _cache.get_or_set(f"loops:{app}:{limit}", lambda: _query_loops_by_app(app, limit), ttl=15)

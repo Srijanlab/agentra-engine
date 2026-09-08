@@ -21,6 +21,7 @@ _PUBLIC_PREFIXES = (
     "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
     "/trigger/queue",     # internal enqueue path (loop / SQS)
+    "/trigger/cron",      # own bearer token (AGENTRA_INTERNAL_TOKEN / CRON_SECRET)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible
     "/debug/",            # temporary diagnostics
 )

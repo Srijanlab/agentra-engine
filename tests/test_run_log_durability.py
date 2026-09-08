@@ -215,7 +215,6 @@ def _isolate_registry(tmp_path, monkeypatch):
 
 def test_stream_run_logs_falls_back_to_the_registry_when_local_file_missing(tmp_path, ddb_run_logs, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
-    monkeypatch.setattr(registry, "_db", None)  # local-only for run/app bookkeeping -- only run-logs is DynamoDB-backed here
 
     repo = tmp_path / "myapp"
     repo.mkdir()
@@ -241,7 +240,6 @@ def test_stream_run_logs_falls_back_to_the_registry_when_local_file_missing(tmp_
 
 def test_stream_run_logs_strips_the_timestamp_from_a_locally_tailed_line(tmp_path, ddb_run_logs, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
-    monkeypatch.setattr(registry, "_db", None)
 
     repo = tmp_path / "myapp"
     repo.mkdir()

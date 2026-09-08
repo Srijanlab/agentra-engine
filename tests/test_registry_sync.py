@@ -53,7 +53,7 @@ def registry_env(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
     monkeypatch.setattr(registry, "REPOS_ROOT", tmp_path / "repos")
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     yield registry
 
 

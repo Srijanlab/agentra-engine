@@ -1,8 +1,8 @@
 name: image
 
-# Build the engine image and push it to GHCR. Host-agnostic — whatever runs
-# agentra-engine (Fly / Oracle / a box) pulls from here. GCP billing is closed,
-# so no Cloud Build / Artifact Registry / Cloud Run.
+# Build the engine image and push it to GHCR. Production is Vercel (serverless,
+# built from source on push); this image is host-agnostic for any plain
+# container host (Fly / Oracle / a box) that wants to run agentra-engine.
 #
 #   push to beta -> ghcr.io/srijanlab/agentra-engine:preprod  (+ :sha)
 #   push to main -> ghcr.io/srijanlab/agentra-engine:prod      (+ :sha, :latest)

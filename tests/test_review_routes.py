@@ -38,7 +38,7 @@ def _register_tmp_app(tmp_path: Path, name: str = "myapp") -> Path:
 
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
-    monkeypatch.setattr(registry, "_db", None)
+    monkeypatch.setattr(registry, "_ddb", None)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
@@ -121,7 +121,7 @@ def test_ready_to_review_attaches_test_report_when_one_exists(tmp_path, monkeypa
     github_issues.mark_shipped_to_preprod(repo_url, tested_issue["number"])
     github_issues.mark_tested(repo_url, tested_issue["number"])
 
-    from agentra.agents.testing import report_path
+    from agentra.artifacts import report_path
 
     path = report_path(repo, "run-abc")
     path.parent.mkdir(parents=True, exist_ok=True)

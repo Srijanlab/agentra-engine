@@ -1,8 +1,8 @@
 """server/routes/internal.py — the loop's only door to engine-held state.
 
-Token-gated RPC (`AGENTRA_INTERNAL_TOKEN`), separate from the Firebase user gate.
-The loop calls `registry.*` / `Memory.*` methods here instead of touching Firestore
-or GitHub itself.
+Token-gated RPC (`AGENTRA_INTERNAL_TOKEN`), separate from the sign-in user gate.
+The loop calls `registry.*` / `Memory.*` methods here instead of touching the
+datastore or GitHub itself.
 """
 
 from __future__ import annotations
@@ -68,8 +68,9 @@ _REGISTRY_METHODS = frozenset({
     "roll_up_loop", "set_loop_human_input", "set_loop_pipeline", "set_loop_status",
     "loop_id_for", "loop_id_for_issue",
     "list_agent_steps",
-    "list_waiting_for_human", "reconcile_stale_runs", "reconcile_waiting_for_human",
+    "list_waiting_for_human", "reconcile_stale_runs", "reconcile_stale_loops", "reconcile_waiting_for_human",
     "submit_request", "dispatch_once",
+    "enqueue_job", "claim_next_job", "report_job", "list_jobs",
 })
 
 _MEMORY_METHODS = frozenset({

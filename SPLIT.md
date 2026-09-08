@@ -6,25 +6,32 @@ step of the three-service split:
 | Repo | Role | Host |
 |---|---|---|
 | `agentra-ui` | dashboard (React/Vite) | Firebase Hosting |
-| `agentra-engine` | the API — Firestore + GitHub + Slack, sole credential holder | Cloud Run |
-| `agentra-loop` | the autonomous orchestrator — runs cycles, `docker build`, git | TBD |
+| `agentra-engine` | the API — DynamoDB + GitHub + Slack, sole credential holder | Vercel (serverless) |
+| `agentra-loop` | the autonomous orchestrator — runs cycles, `docker build`, git | AWS ECS-on-EC2 (us-west-2) |
 
-**At this stage `agentra-engine` and `agentra-loop` are identical** — both are
-`srijanlab-agentra` minus `agentra/web/`. They diverge in later stages:
+`agentra-engine` and `agentra-loop` share the `agentra.*` state/connector core
+(vendored into both, not published) but the split is real:
 
-- **agentra-engine** keeps `server/` (pure-API routes), `registry/`, `memory/`,
-  `connectors/`, and drops `agents/brain/` + the specialised agents + the LLM/repo
-  routes (`chat`, `standup`, `human_input`, `triggers`' cycle-spawn).
-- **agentra-loop** keeps `agents/`, `proxy/` (NIM), the LLM/repo routes, and replaces
-  direct `registry`/`Memory`/Firestore access with an HTTP client to the engine.
+- **agentra-engine** = the API + state authority. `server/` (the full dashboard
+  API), `registry/` + `memory/` (DynamoDB, local-JSON fallback), `connectors/`,
+  `proxy/`, the `/internal/*` RPC handlers, and the `a2a/` metadata endpoints.
+  It runs **no cycle / promote / prod-debug** -- a trigger records a run and
+  `registry.enqueue_job(...)`; the loop claims it. `agents/` here holds only the
+  bits the dashboard's chat / standup / Slack assistant still call (`base.py`,
+  `catalog.py`, `safety.py`, `slack_assistant.py` -- moving to the loop next).
+  A Vercel Cron hits `GET /trigger/cron` every 15 min to enqueue due cycles.
+- **agentra-loop** = execution. The whole `agents/` pipeline + `agents/brain/`,
+  `orchestrator.py`, `docker`/`git`. It reaches engine state over RPC
+  (`AGENTRA_ENGINE_URL` -> `POST /internal/rpc`) and drains the job queue
+  (`registry.claim_next_job()`) on its tick.
 
-`srijanlab-agentra` stays as the running incumbent (the GCP VM keeps serving from it)
-until the loop has a new home and the VM is decommissioned.
+`srijanlab-agentra` is the frozen incumbent (its GCP VM is decommissioned).
 
 ## Two separate GitHub concerns — don't conflate them
 
-- **Deploy access** — WIF → GCP → Cloud Run. Only for shipping this platform's own
-  images. Per-repo, set up in `deploy/cloudrun/`. Nothing to do with the App.
+- **Deploy access** — each repo's own CI (Vercel Git integration for the engine,
+  GitHub Actions + `ecs update-service` for the loop, Firebase for the UI).
+  Nothing to do with the App.
 - **Issue / contents access** — the `agentra-orchestrator` GitHub App, used across
   *every* app agentra manages to read backlogs, open PRs, comment on issues.
   `connectors/github_app.py` mints an installation token **per `owner/repo`**.

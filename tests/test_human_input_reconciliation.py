@@ -6,7 +6,6 @@ infra -- see compute.tf's agentra-trigger-loop, already hitting this
 endpoint every 15 minutes).
 """
 
-import asyncio
 import subprocess
 import time
 from pathlib import Path
@@ -14,15 +13,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from agentra import environments, registry, server
-from agentra.agents.brain import AutonomousCycleReport
 from agentra.connectors import github_fake
 from agentra.memory import Memory
 from agentra.server.routes import triggers
 
-
-def _close_background_coro(coro):
-    coro.close()
-    return None
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -48,7 +42,7 @@ def _register_tmp_app(tmp_path: Path, name: str = "myapp") -> Path:
 
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
-    monkeypatch.setattr(registry, "_db", None, raising=False)
+    monkeypatch.setattr(registry, "_ddb", None, raising=False)
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
     monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
     monkeypatch.setattr(registry, "INBOX_ROOT", home / "inbox")
@@ -58,7 +52,6 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_AGENT_STEPS_PATH", home / "agent_steps.jsonl")
     server._active_runs.clear()
     server._app_locks.clear()
-    monkeypatch.setattr(server.asyncio, "create_task", _close_background_coro)
     github_fake.install(monkeypatch=monkeypatch)
 
 
@@ -195,58 +188,3 @@ def test_reconcile_human_input_timeouts_no_op_when_nothing_is_overdue(tmp_path, 
     triggers._reconcile_human_input_timeouts()
 
     assert registry.get_loop(lid)["status"] == "waiting_for_human"
-
-
-# -- a blocked run terminates; the LOOP is what stays waiting_for_human --------
-
-
-def test_run_autonomous_background_terminates_the_run_and_parks_the_loop(tmp_path, monkeypatch):
-    """A run that hits HUMAN_INPUT_REQUIRED still terminates (status=blocked).
-    The *loop* is what's parked on the question -- so it's the loop that shows
-    in the dashboard's 'Needs your input' panel until a human answers, and a
-    later answer dispatches a fresh run against it."""
-    _isolate_registry(tmp_path, monkeypatch)
-    repo = _register_tmp_app(tmp_path)
-    loop_id = registry.bind_loop("myapp", 17, title="#17")
-
-    async def fake_run_autonomous_cycle(repo_arg, objective, env, **kwargs):
-        # Simulates mark_waiting_for_human's own mid-cycle write.
-        registry.set_loop_human_input(loop_id, {
-            "issue_number": 17, "question": "Should we use OAuth or magic links?",
-            "waiting_since": time.time(),
-        })
-        return AutonomousCycleReport(
-            run_id=kwargs["run_id"], actions=["escalated to a human"], final_message="blocked", cost_usd=0.01,
-            waiting_for_human=True,
-        )
-
-    monkeypatch.setattr(triggers, "run_autonomous_cycle", fake_run_autonomous_cycle)
-    server._active_runs["run-key-1"] = {"app": "myapp", "source": "scheduled"}
-    registry.record_run("run-key-1", app="myapp", source="scheduled", status="queued",
-                        started_at=time.time(), loop_id=loop_id)
-
-    asyncio.run(triggers._run_autonomous_background("run-key-1", "myapp", repo, "objective", None, False))
-
-    assert registry.get_run("run-key-1")["status"] == "blocked"
-    assert registry.get_loop(loop_id)["status"] == "waiting_for_human"
-    assert loop_id in {l["loop_id"] for l in registry.list_waiting_for_human()}
-
-
-def test_run_autonomous_background_still_completes_normally(tmp_path, monkeypatch):
-    """The other half of the same branch: a cycle that finishes without
-    hitting HUMAN_INPUT_REQUIRED must still report status="completed" as
-    before -- this fix must not make every run look like it's waiting on a
-    human."""
-    _isolate_registry(tmp_path, monkeypatch)
-    repo = _register_tmp_app(tmp_path)
-
-    async def fake_run_autonomous_cycle(repo_arg, objective, env, **kwargs):
-        return AutonomousCycleReport(run_id=kwargs["run_id"], actions=["did stuff"], final_message="ok", cost_usd=0.01)
-
-    monkeypatch.setattr(triggers, "run_autonomous_cycle", fake_run_autonomous_cycle)
-    server._active_runs["run-key-2"] = {"app": "myapp", "source": "scheduled"}
-    registry.record_run("run-key-2", app="myapp", source="scheduled", status="queued", started_at=time.time())
-
-    asyncio.run(triggers._run_autonomous_background("run-key-2", "myapp", repo, "objective", None, False))
-
-    assert registry.get_run("run-key-2")["status"] == "completed"

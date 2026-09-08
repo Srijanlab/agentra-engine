@@ -1,6 +1,6 @@
-"""DynamoDB-backed registry paths, mocked via moto (the cloud path had zero
-test coverage under Firestore either -- this is a net-new addition, not a
-port of existing tests). Covers Phase 1's PoC (agentra-system: pause/
+"""DynamoDB-backed registry paths, mocked via moto (the cloud path had no test
+coverage before this -- a net-new addition, not a port of existing tests).
+Covers Phase 1's PoC (agentra-system: pause/
 llm_backend) plus the shared _dynamo.py helpers every later collection will
 build on (merge_update, try_conditional_update).
 """
@@ -279,14 +279,14 @@ def test_list_apps_is_cached_within_ttl(ddb_env):
 
 
 def test_cloud_mode_true_with_either_backend_configured(monkeypatch):
-    monkeypatch.setattr(core, "_db", None)
+    monkeypatch.setattr(core, "_ddb", None)
     monkeypatch.setattr(core, "_ddb", None)
     assert registry.cloud_mode() is False
 
-    monkeypatch.setattr(core, "_db", object())
+    monkeypatch.setattr(core, "_ddb", object())
     assert registry.cloud_mode() is True
 
-    monkeypatch.setattr(core, "_db", None)
+    monkeypatch.setattr(core, "_ddb", None)
     monkeypatch.setattr(core, "_ddb", object())
     assert registry.cloud_mode() is True
 

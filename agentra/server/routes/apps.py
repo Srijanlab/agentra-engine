@@ -96,7 +96,7 @@ def _apply_app_config(
     if registry.cloud_mode():
         return None  # cloud: no local checkout to commit .agentra/ from
 
-    from agentra.agents.git_ops import GitOpError, commit_and_push
+    from agentra.git_ops import GitOpError, commit_and_push
 
     try:
         commit_and_push(dest, branch, commit_message, [".agentra/"])
@@ -213,7 +213,7 @@ async def list_apps() -> dict:
         if url and owner_repo_from_url(url):
             repo_url_map[name] = url
 
-    # One GraphQL call for all apps, cached in Firestore -- the dashboard polls
+    # One GraphQL call for all apps, cached in DynamoDB -- the dashboard polls
     # this often and the backlog counts don't change second-to-second.
     batch: dict[str, dict] = {}
     if repo_url_map:
@@ -247,7 +247,7 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
 
     coord_dest = registry.REPOS_ROOT / payload.name / coord.name
     if not registry.cloud_mode():
-        from agentra.agents.git_ops import GitOpError, clone_repo
+        from agentra.git_ops import GitOpError, clone_repo
 
         for r in payload.repos:
             repo_dest = registry.REPOS_ROOT / payload.name / r.name
@@ -312,7 +312,7 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         # Local/CLI: clone up front. Cloud mode has no git -- the repo_url +
         # ensure_labels() below is the validation, and the loop clones on demand.
         try:
-            from agentra.agents.git_ops import GitOpError, clone_repo
+            from agentra.git_ops import GitOpError, clone_repo
 
             clone_repo(payload.repo_url, dest, branch=payload.branch)
         except GitOpError as exc:

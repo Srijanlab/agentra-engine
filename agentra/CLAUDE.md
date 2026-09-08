@@ -1,13 +1,9 @@
-## Production promotion (self-hosted VM)
+## agentra-engine
 
-Never call `deployment.promote_prod_self_hosted`/`promote_prod` directly (e.g. via `docker exec agentra-<color> python3 -c ...`). Use the real `POST /apps/{app_name}/promote` endpoint (agentra/server/routes/triggers.py) -- it takes the per-app lock, skips if a cycle is already running, and records a proper Firestore run. A raw direct call bypasses all of that and can race a concurrent autonomous cycle.
+This repo is the API + state authority. It runs **no** autonomous cycle,
+promotion, or prod-debug pass -- a trigger endpoint records a run and calls
+`registry.enqueue_job(...)`; agentra-loop claims the job and executes it. Do not
+add cycle / agent-pipeline code here; it belongs in agentra-loop.
 
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+`agents/` here holds only what the dashboard's chat / standup / Slack assistant
+still call (`base.py`, `catalog.py`, `safety.py`, `slack_assistant.py`).

@@ -61,7 +61,7 @@ def list_runs(limit: int = 50) -> list[dict]:
     runs = _local_runs()
     ordered = sorted(
         ({"run_key": key, **info} for key, info in runs.items()),
-        key=lambda r: r["started_at"],
+        key=lambda r: r.get("started_at") or 0,  # a malformed record must not break the whole list
         reverse=True,
     )
     return ordered[:limit]
@@ -119,7 +119,32 @@ def reconcile_stale_runs() -> list[str]:
                 "the process running this cycle likely died (e.g. an OOM kill or revision rollout)",
             )
             marked.append(run_key)
+    reconcile_stale_loops()
     return marked
+
+
+def reconcile_stale_loops() -> list[str]:
+    """Un-stick loops whose last run ended but never rolled up -- an exception in
+    the cycle tail, or a container killed mid-cycle, skips brain._finish_loop_rollup
+    and leaves the loop at last_run_status="running" forever, so every later cycle
+    treats it as still in flight. Reconcile from the run's actual terminal state."""
+    from agentra.registry import loops as _loops
+
+    now = time.time()
+    fixed: list[str] = []
+    for loop in _loops.list_loops(limit=200):
+        if loop.get("last_run_status") not in ("running", "queued"):
+            continue
+        loop_id, last_key = loop.get("loop_id"), loop.get("last_run_key")
+        run = get_run(last_key) if last_key else None
+        run_status = (run or {}).get("status")
+        if run_status in ("completed", "failed", "blocked", "waiting_for_human"):
+            _loops.roll_up_loop(loop_id, last_key, run_status, 0.0)
+            fixed.append(loop_id)
+        elif now - float(loop.get("updated_at") or 0) > core.STALE_PROCESSING_SECONDS:
+            _loops.roll_up_loop(loop_id, last_key or "", "failed", 0.0)
+            fixed.append(loop_id)
+    return fixed
 
 
 def list_agent_steps(app: str | None = None, limit: int = 100) -> list[dict]:

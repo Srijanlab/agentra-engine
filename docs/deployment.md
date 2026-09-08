@@ -1,363 +1,52 @@
-# Deploying agentra to GCP
+# Deploying agentra-engine
 
-The always-on orchestrator (`agentra/server.py`, run via `agentra serve`) is
-deployed as a Cloud Run service in its own dedicated project, **agentra-prod**,
-separate from any app it might manage (e.g. ContentAutomationPlatform's own
-`cap-prod-503116`). Infrastructure is defined in `deploy/gcp/terraform/`.
+The engine is the API + state authority. It runs as **one Vercel serverless
+function** (`api/index.py` + the `vercel.json` rewrite) and holds every
+credential and every piece of registry state.
 
-Specialized agents are not deployed separately — they run as short-lived
-subprocesses the Claude Agent SDK spawns inside the orchestrator service
-itself (`agents/base.py::run_agent`), the same as every other entry point in
-this codebase. "On demand, not a standing service" was already true of that
-architecture before this deployment existed.
+- `main` -> Vercel Production
+- `beta` -> a Vercel Preview deployment (alias it to a stable URL for the loop's
+  Testing Agent)
 
-## Current state: deployed idle, dashboard live
+There is no CDK/Terraform for the engine — Vercel's Git integration builds and
+deploys on push. Setup, the full env-var list, and the sign-in gate are in
+[`deploy/vercel/README.md`](../deploy/vercel/README.md).
 
-This deployment intentionally has **zero apps registered** as shipped, but
-registering one is now a normal, supported action — visit the orchestrator
-URL in a browser (the dashboard, TASK-015, is served from `GET /`) and use
-the "Register a repo" form, or `POST /apps` directly, to add one. Real admin
-auth for that UI is still future work (not part of this repo yet); today
-anyone who can reach the URL can register/run apps, same trust boundary as
-every other trigger endpoint.
+## State
 
-The multi-app registry (`~/.agentra/apps.json`, `agentra/registry.py`) lives
-on a GCS FUSE volume mount (TASK-018, `deploy/gcp/terraform/storage.tf`/
-`cloudrun.tf`) at `/data` inside the container, not the ephemeral local
-disk — `AGENTRA_HOME=/data/home` survives an instance restart/redeploy.
-Repo checkouts deliberately do **not** live on that mount:  gcsfuse doesn't
-support `chmod`, which `git clone` needs, confirmed live (cloning failed
-with `chmod on .git/config.lock: Operation not permitted` the one time
-this was tried). Checkouts live on the container's own local disk instead
-(`AGENTRA_REPOS_ROOT=/home/agentuser/repos`, agentuser's home — nothing at
-the container root is writable by the non-root user this runs as) and are
-**not** expected to survive a restart. `registry.get_app_repo()`
-transparently re-clones from the app's stored `repo_url` if its checkout
-is missing, so this is self-healing rather than durable: the actual
-durable copy of a project's history is whatever it has pushed to its own
-git remote. Locally (no GCS mount) both env vars default to paths under
-`~/.agentra`.
+All registry collections (apps, runs, loops, requests, gh-cache, slack-threads,
+memory, `system`) live in **DynamoDB**, one table per collection, prefixed by
+`AGENTRA_DYNAMODB_TABLE_PREFIX`. The tables are provisioned by the loop's CDK
+(`AgentraData` stack in `agentra-loop/deploy/aws`). With that env var unset
+(local dev, CI) the registry falls back to JSON files under `~/.agentra`.
 
-## One-time setup
+## The loop boundary
 
-```bash
-# 1. Create and configure the project (already done for agentra-prod; steps
-#    kept here for reference / a future re-deploy to a different project).
-gcloud projects create agentra-prod --name="Agentra"
-gcloud billing projects link agentra-prod --billing-account=<ACCOUNT_ID>
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
-  secretmanager.googleapis.com cloudscheduler.googleapis.com \
-  pubsub.googleapis.com cloudbuild.googleapis.com monitoring.googleapis.com \
-  logging.googleapis.com iam.googleapis.com cloudresourcemanager.googleapis.com \
-  --project=agentra-prod
+`agentra-loop` runs the cycles and reaches engine state over HTTP:
 
-# 2. terraform init (from deploy/gcp/terraform/)
-terraform init
+- `POST /internal/rpc` — whitelisted `registry.*` / `Memory.*` calls
+- `POST /internal/git-token` — per-repo GitHub App installation tokens
+- `POST /internal/slack/message` — Slack replies via the engine's bot token
 
-# 3. Bootstrap: APIs + Artifact Registry repo must exist before the image
-#    can be pushed, and the image must exist before the Cloud Run service
-#    resource can be applied. Two-phase apply:
-terraform plan -target=google_project_service.apis \
-  -target=google_artifact_registry_repository.agentra \
-  -var="claude_code_oauth_token=$(cat .claude_oauth_token)" \
-  -var="github_token=$(cat .github_pat)" \
-  -out=/tmp/tfplan_bootstrap
-terraform apply /tmp/tfplan_bootstrap
+All `/internal/*` routes require the shared `AGENTRA_INTERNAL_TOKEN` bearer.
 
-# 4. Build and push the image
-gcloud builds submit --config=deploy/gcp/cloudbuild.yaml \
-  --substitutions=_IMAGE="us-central1-docker.pkg.dev/agentra-prod/agentra/agentra:staging" \
-  --project=agentra-prod .
+## Triggers
 
-# 5. Apply everything else (Cloud Run service, secrets, Scheduler, Pub/Sub, IAM)
-terraform plan \
-  -var="claude_code_oauth_token=$(cat .claude_oauth_token)" \
-  -var="github_token=$(cat .github_pat)" \
-  -out=/tmp/tfplan_full
-terraform apply /tmp/tfplan_full
-```
+`POST /trigger/scheduled`, `/trigger/alarm` (HTTP Basic, `ALARM_WEBHOOK_PASSWORD`),
+`/trigger/queue`, and `POST /apps/{name}/run`. Each checks the durable pause
+marker (`registry.PAUSE_PATH` / the `system` table) first and no-ops while paused.
 
-After step 5, `terraform output orchestrator_url` is the live service URL.
+## Slack
 
-## Redeploying after a code change
+`POST /slack/events` handles both the #68 human-input thread flow and the
+ask/act assistant (`agentra/agents/slack_assistant.py`). Import
+`docs/slack-app-manifest.json` to configure the Slack app. `SLACK_BOT_TOKEN`
+posts messages; `SLACK_ALLOWED_USERS` optionally gates senders.
 
-Cloud Run Services (unlike Worker Pools) reliably pick up a new revision
-from `gcloud run services update --image=...` even when reusing the mutable
-`:staging` tag — confirmed for this deployment. Rebuild and redeploy:
+## Model backend
 
-```bash
-gcloud builds submit --config=deploy/gcp/cloudbuild.yaml \
-  --substitutions=_IMAGE="us-central1-docker.pkg.dev/agentra-prod/agentra/agentra:staging" \
-  --project=agentra-prod .
-gcloud run services update agentra-orchestrator --region=us-central1 \
-  --project=agentra-prod \
-  --image="us-central1-docker.pkg.dev/agentra-prod/agentra/agentra:staging"
-```
-
-## Secrets and rotation
-
-All three secrets live in Secret Manager (`deploy/gcp/terraform/secrets.tf`),
-never as plain env vars or committed to the repo:
-
-| Secret | Used for | Rotation |
-|---|---|---|
-| `agentra-claude-code-oauth-token` | `CLAUDE_CODE_OAUTH_TOKEN` — the Claude CLI's auth, read before its on-disk credentials file | **Expires.** Re-run `claude login` locally, copy the new `accessToken`, then: `gcloud secrets versions add agentra-claude-code-oauth-token --project=agentra-prod --data-file=-` (paste the token, Ctrl-D). No redeploy needed — Cloud Run reads `version: latest` on each new revision, but for an *existing* running revision to pick it up, restart it: `gcloud run services update agentra-orchestrator --region=us-central1 --project=agentra-prod --no-traffic && gcloud run services update-traffic agentra-orchestrator --region=us-central1 --project=agentra-prod --to-latest` (or just redeploy, per above). |
-| `agentra-github-token` | `GITHUB_TOKEN` — `git-askpass.sh`'s password for git pull/push (TASK-014) | GitHub PATs expire per their configured lifetime. Generate a new one (repo scope) at github.com/settings/tokens, then `gcloud secrets versions add agentra-github-token --project=agentra-prod --data-file=-`. |
-| `agentra-alarm-webhook-password` | HTTP Basic Auth password for `/trigger/alarm` (see below) | Terraform-generated (`random_password`); rotate by tainting and re-applying: `terraform apply -replace=random_password.alarm_webhook_password`, then update the value in whatever Monitoring notification channel uses it. |
-
-Both `.claude_oauth_token` and `.github_pat` are gitignored, untracked loose
-files at the repo root — kept locally only as the source used to populate
-the Terraform variables above at apply time (`-var="...=$(cat ...)"`), never
-committed.
-
-## The three trigger paths
-
-`agentra/server.py` exposes three POST endpoints, one per vision.md trigger
-type. Each logs its source and outcome to `~/.agentra/server.log` on the
-instance.
-
-### Scheduled — `POST /trigger/scheduled`
-
-Cloud Scheduler → Cloud Run, authenticated via an OIDC token from the
-`agentra-scheduler-invoker` service account (`roles/run.invoker` on the
-service, nothing broader). The job (`agentra-daily-cycle`) exists but is
-**paused** — no app is registered yet, so a live cron would just produce
-"app not registered" no-ops in the logs every day. Once a real app exists:
-
-```bash
-gcloud scheduler jobs update http agentra-daily-cycle --region=us-central1 \
-  --project=agentra-prod \
-  --message-body='{"app":"<real-app-name>"}'
-gcloud scheduler jobs resume agentra-daily-cycle --region=us-central1 --project=agentra-prod
-```
-
-### Error/alarm — `POST /trigger/alarm`
-
-Meant to sit behind a GCP Monitoring alerting policy's **Webhook**
-notification channel — dispatches to `orchestrator.run_prod_debug_cycle`.
-Not fully wired to a live alerting policy yet: there's no deployed *app*
-with its own metrics to alert on. Two things need deciding once one exists:
-
-1. GCP Monitoring's webhook delivery has no OIDC support (unlike Scheduler
-   and Pub/Sub push), so it can't authenticate via Cloud Run's IAM invoker
-   check the way the other two trigger paths do. `server.py` has its own
-   HTTP Basic Auth check for this one path
-   (`_verify_alarm_webhook_auth`, gated on `ALARM_WEBHOOK_PASSWORD` —
-   see the secrets table above) as a result.
-2. For Monitoring's webhook to reach this endpoint at all, the Cloud Run
-   service needs an `allUsers` **invoker** grant (Cloud Run's IAM invoker
-   check happens before any request body is inspected — it can't be scoped
-   per-path). That grant is deliberately *not* made in `cloudrun.tf` today,
-   since there's no real alerting policy that needs it yet and the other two
-   trigger paths currently rely on the service staying private. Add it
-   explicitly when wiring the first real alerting policy:
-   `gcloud run services add-iam-policy-binding agentra-orchestrator --region=us-central1 --project=agentra-prod --member=allUsers --role=roles/run.invoker`
-   — the Basic Auth check remains the real access control for that path
-   once this grant is made.
-
-Can be exercised directly today (bypasses steps 1-2 above, since a direct
-authenticated call doesn't need the Cloud Run service to be public):
-
-```bash
-curl -X POST "$(terraform output -raw orchestrator_url)/trigger/alarm" \
-  -H "Content-Type: application/json" \
-  -u "monitoring:$(gcloud secrets versions access latest --secret=agentra-alarm-webhook-password --project=agentra-prod)" \
-  -d '{"app":"<real-app-name>","symptom":"500 errors spiking"}'
-```
-
-### Queue — `POST /trigger/queue`
-
-A Pub/Sub push subscription (`agentra-work-queue-push`, topic
-`agentra-work-queue`) → Cloud Run, authenticated the same OIDC-via-IAM-invoker
-way as the scheduled path (`agentra-pubsub-invoker` service account). Publish
-a message shaped like `registry.submit_request()`'s params to enqueue work:
-
-```bash
-gcloud pubsub topics publish agentra-work-queue --project=agentra-prod \
-  --message='{"app":"<real-app-name>","type":"bug","description":"...","severity":"high"}'
-```
-
-This is live and fully working today — verified end-to-end locally (see the
-commit history) — it just has nothing to route to until an app is
-registered.
-
-## Public access: https://agentra.srijanlab.com
-
-The dashboard is reachable at `https://agentra.srijanlab.com`, gated by
-Cloudflare Access (email one-time-PIN, `deploy/cloudflare/terraform/`) --
-`gcloud run services proxy` is no longer the only way in, though it still
-works for anyone with Cloud Run IAM invoker access. The Cloud Run service
-itself is still fully private (no `allUsers` invoker anywhere): a
-`cloudflared` sidecar container in the same revision (`cloudrun.tf`)
-tunnels traffic in over `localhost`, inside that revision's shared network
-namespace, never through Cloud Run's own HTTP ingress. Set
-`TUNNEL_TRANSPORT_PROTOCOL=http2` on that container -- cloudflared's
-default QUIC/UDP transport fails outright on Cloud Run's networking
-(confirmed live: "failed to dial to edge with quic: timeout"). See
-`deploy/cloudflare/terraform/README.md` for setup/rotation.
-
-## Dashboard and app registration (TASK-015/016)
-
-The dashboard is a real React app (`agentra/web/`, Vite + TypeScript +
-Tailwind) built at Docker build time (a dedicated `web-builder` stage in
-`Dockerfile`) and served as static files from `GET /` (`server.py` mounts
-`agentra/web/dist/assets` and serves `index.html`) -- not a hand-maintained
-HTML string. For local dev: `cd agentra/web && npm install && npm run
-build` before `agentra serve`, or point `AGENTRA_WEB_DIST` at wherever a
-build landed; without a build present, `GET /` returns a JSON hint instead
-of a blank page.
-
-The UI gates itself behind the GitHub connector (below): with nothing
-connected, it shows a single "Connect GitHub" screen, not an empty
-dashboard. Once connected, it shows system status (with pause/resume, see
-below), a form to register any GitHub repo by URL, the registered-apps
-list with a "Run now" button, the standup panel (see below), recent runs,
-and recent signals -- organized as tabs (Apps / Activity / Standups), not
-one long scroll. Backed by JSON APIs that are just as usable directly:
-
-- `POST /apps` — `{"name", "repo_url", "branch": "main", "objective": null}`.
-  Clones server-side (same `GIT_ASKPASS`/`GITHUB_TOKEN` credential as
-  TASK-014's pull/push) under `AGENTRA_REPOS_ROOT`, registers it.
-- `GET /apps` — registry, plus each app's objective/shipped/known-bug counts.
-- `POST /apps/{name}/run` — on-demand equivalent of `/trigger/scheduled`.
-- `GET /runs`, `GET /signals` — feed the dashboard's activity tables.
-
-### GitHub connector
-
-`POST /apps`'s clone step (and TASK-014's pull/push) tries a GitHub App
-installation token first, via `agentra/connectors/github_app.py`, falling
-back to the static `GITHUB_TOKEN`/`GIT_ASKPASS` credential whenever the App
-isn't configured or isn't installed on a given repo. This replaced the
-static token as the primary path because that token is a fine-grained PAT
-scoped to a handful of repos at creation time -- confirmed live,
-registering an org-owned repo the token was never scoped to 403'd outright.
-A GitHub App scales to any org/repo it gets installed on instead.
-
-Two env vars configure it: `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`
-(the App's PEM key, from its settings page's "Generate a private key"),
-both Secret-Manager-sourced (`agentra-github-app-id`,
-`agentra-github-app-private-key`). `GET /connectors/github` reports
-configuration status and which accounts/orgs the App can currently reach;
-the dashboard's "Connect a GitHub account/org" link opens the App's public
-install page (`github.com/apps/<slug>/installations/new`) so adding a new
-org doesn't require finding GitHub's own settings pages by hand.
-
-**"Where can this GitHub App be installed?"** (a setting on the App itself,
-not something this repo controls) matters here: "Only on this account"
-means literally only orgs the App-creating account already administers can
-install it -- no request/approval flow, no partial allowlist. "Any account"
-lets anyone install it on their *own* account/repos, which grants them
-zero access to this agentra deployment or its data (it only lets *them*
-manage *their own* repos through the App) -- the real tradeoff is just
-broader install-ability, not a data exposure.
-
-No auth on any of this yet beyond Cloud Run's IAM invoker check on the
-service as a whole — anyone who can reach the URL can register/run apps.
-Fine for the current single-operator deployment; needs real auth before
-this is opened up to a team.
-
-## Kill switch (TASK-017)
-
-`POST /system/pause` (optional `{"reason": "..."}`) / `POST /system/resume`
-/ `GET /system/status`. The pause state is a durable marker file
-(`registry.PAUSE_PATH`, under `AGENTRA_HOME` — on the same GCS mount as the
-registry, TASK-018) checked at the top of every trigger path: scheduled,
-alarm, queue, and the on-demand `/apps/{name}/run`. While paused, each
-returns a clean no-op (`{"triggered": false, "reason": "system is paused"}`)
-instead of starting new agent work. Survives a restart.
-
-## Slack human-input loop (GitHub #68)
-
-When a run hits HUMAN_INPUT_REQUIRED it posts a concise proposal to Slack. A
-human **reply in that thread** resumes the run with the answer (same effect as
-the dashboard's "Needs your input" panel or a GitHub-issue comment). If the run
-still needs input after resuming, the follow-up question lands in the **same
-thread** — a real back-and-forth until the decision is settled.
-
-Inbound path: `POST /slack/events` (`agentra/server/routes/slack.py`), Slack
-request-signature verified. To enable:
-
-1. Create the Slack app by importing `docs/slack-app-manifest.json` (Slack API
-   dashboard → *Create New App* → *From a manifest*). This is the canonical
-   setup: it configures the bot user, event subscriptions (`app_mention`,
-   `message.im`, `message.channels`, `message.groups`) and bot scopes in one
-   step — no hand-configuring. The manifest's `request_url` placeholder is
-   `https://agentra.srijanlab.com/slack/events`; adjust for your host.
-2. Set `SLACK_SIGNING_SECRET` (the app's Signing Secret) as a Vercel
-   environment variable on the engine deployment — a missing value just
-   leaves the endpoint returning 403.
-
-`SLACK_BOT_TOKEN` (from `agentra-slack-bot-token`) is what posts messages;
-thread→run mapping lives at `registry` `system/slack_threads`.
-
-## Slack assistant (ask / act)
-
-The same `/slack/events` endpoint also runs a conversational assistant: **DM the
-agentra app** or **@mention it** in a channel and it answers questions about the
-running system and takes actions against agentra's own HTTP API (trigger a cycle,
-pause/resume, submit a backlog item, answer a needs-human issue, switch the model
-backend, …). It cannot promote to production or run destructive shell commands.
-Each Slack thread keeps its own agent session; history is under
-`AGENTRA_HOME/chat_store/agentra/`. Implementation:
-`agentra/agents/slack_assistant.py`.
-
-Importing `docs/slack-app-manifest.json` (see above) already enables the
-`app_mention` / `message.im` events and the `app_mentions:read`,
-`im:history`, `im:read`, `chat:write` scopes it needs. Distinct from the #68
-human-input thread flow above — a reply inside a HUMAN_INPUT_REQUIRED thread
-still resumes that run.
-
-### `SLACK_ALLOWED_USERS` (sender allowlist)
-
-Optional, comma-separated Slack user IDs (e.g. `U0ABC123,U0DEF456`). It gates
-**both** paths of the inbound endpoint: the ask/act assistant **and** the #68
-escalation-reply resume path. It must therefore list every human who answers
-escalations from Slack — an unlisted user's thread reply will **not** resume a
-blocked run (they get a denial pointing at the dashboard / GitHub issue).
-
-Enforced synchronously before any work is dispatched; a match is exact and
-case-sensitive. Unlisted (or missing-`user`) senders get a plain-text denial in
-the same channel/thread and nothing runs. Leaving it **unset means open access**
-to all senders, with a one-time `slack`-channel warning logged at first use.
-Set as a Vercel environment variable (`SLACK_ALLOWED_USERS`) on the engine
-deployment; unset/empty is equivalent to "no allowlist".
-
-## Model backend: Claude vs NIMS API
-
-The agents' LLM traffic normally goes straight to `api.anthropic.com` using the
-VM's `claude auth login` session. A global toggle (dashboard → Account Settings →
-**Model Backend**, or `GET`/`POST /system/llm-backend` with `{"backend":
-"claude"|"nim"}`) can instead route it through a self-hosted NVIDIA NIM proxy:
-
-```
-app container ──(ANTHROPIC_BASE_URL)──▶ agentra-nim-nginx ──▶ agentra-nim-proxy ──▶ integrate.api.nvidia.com
-```
-
-`agentra-nim-proxy` (`agentra/proxy/main.py`, same image as the app, different
-entrypoint) translates the Anthropic Messages API to NIM's OpenAI-compatible
-chat-completions API; `agentra-nim-nginx` fronts it for SSE streaming. Both run on
-`agentra-app-net`, started by `compute.tf`'s startup script. The proxy reads
-`NVIDIA_API_KEY` from the `agentra-nvidia-api-key` Secret Manager secret (created
-out of band; `secrets.tf` only grants the compute SA access to it).
-
-Default is `claude`, stored like the pause flag (`system/llm_backend` in
-Firestore). It takes effect on the next agent turn — no redeploy. When set to
-`claude`, `agentra/agents/base.py:_sdk_env` returns no env at all, so the SDK
-falls back to the login session; `NIM_PROXY_URL` on the app container is inert
-until the toggle flips.
-
-## Daily standup (TASK-019)
-
-For each registered app, `POST /standup/daily` (behind the paused
-`agentra-daily-standup` Scheduler job, `0 8 * * *` UTC — resume it the same
-way as `agentra-daily-cycle` once an app exists, no per-app body needed
-since it iterates the whole registry) generates a short "Yesterday" /
-"Today" report and persists it to that app's own
-`.agentra/standups/<date>.md`. Grounded only in that project's real data:
-"yesterday" comes from timestamped `.agentra/logs/*.log` lines in the last
-24h, "today" from the actual open `known_bugs`/`feature_queue`/objective —
-the model is explicitly instructed not to invent activity or plans beyond
-what it's given, and an empty project gets a plain "no activity / no
-backlog" report with no LLM call at all. `POST /apps/{name}/standup` runs
-one app's standup on demand; `GET /apps/{name}/standup/latest` (and the
-dashboard's standup panel) reads the most recent one back.
+A global toggle (dashboard -> Account Settings, or `GET`/`POST
+/system/llm-backend`) routes agent LLM traffic either straight to
+`api.anthropic.com` or through the self-hosted NVIDIA NIM proxy
+(`agentra/proxy/main.py`). Default `claude`; stored in the `system` table; takes
+effect on the next agent turn.

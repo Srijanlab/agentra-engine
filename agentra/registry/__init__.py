@@ -12,7 +12,6 @@ from agentra.registry.core import (
     RepoSpec,
     cloud_mode,
     dynamodb_resource,
-    firestore_client,
     get_app_repo,
     get_app_repos,
     get_code_repos,
@@ -22,8 +21,6 @@ from agentra.registry.core import (
     is_paused,
     list_apps,
     repo_url_for_path,
-    sync_oidc_token_file,
-    ensure_firestore,
     pause,
     persist_agentra_dir,
     record_slack_thread,
@@ -48,6 +45,7 @@ from agentra.registry.runs import (
     loop_id_for,
     loop_id_for_issue,
     record_run,
+    reconcile_stale_loops,
     reconcile_stale_runs,
 )
 from agentra.registry.loops import (
@@ -63,6 +61,13 @@ from agentra.registry.loops import (
     set_loop_pipeline,
     set_loop_status,
 )
+from agentra.registry.jobs import (
+    JOB_KINDS,
+    claim_next_job,
+    enqueue_job,
+    list_jobs,
+    report_job,
+)
 
 _DELEGATED_NAMES = {
     "AGENTRA_HOME",
@@ -76,10 +81,10 @@ _DELEGATED_NAMES = {
     "STALE_PROCESSING_SECONDS",
     "STALE_RUN_SECONDS",
     "HUMAN_INPUT_MAX_WAIT_SECONDS",
-    "_db",
     "_ddb",
     "_RUNS_PATH",
     "_LOOPS_PATH",
+    "_JOBS_PATH",
     "_AGENT_STEPS_PATH",
 }
 
@@ -106,7 +111,6 @@ __all__ = [
     "RepoSpec",
     "cloud_mode",
     "dynamodb_resource",
-    "firestore_client",
     "get_app_repo",
     "get_app_repos",
     "get_code_repos",
@@ -119,8 +123,6 @@ __all__ = [
     "list_agent_steps",
     "list_apps",
     "repo_url_for_path",
-    "sync_oidc_token_file",
-    "ensure_firestore",
     "bind_loop",
     "bind_loop_for_run",
     "get_loop",
@@ -130,6 +132,11 @@ __all__ = [
     "set_loop_pipeline",
     "set_loop_status",
     "list_loops",
+    "JOB_KINDS",
+    "enqueue_job",
+    "claim_next_job",
+    "report_job",
+    "list_jobs",
     "list_runs",
     "list_waiting_for_human",
     "loop_id_for",
@@ -141,6 +148,7 @@ __all__ = [
     "slack_thread_for",
     "record_run",
     "reconcile_stale_runs",
+    "reconcile_stale_loops",
     "reconcile_waiting_for_human",
     "register_app",
     "remove_app",
