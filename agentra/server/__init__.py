@@ -17,12 +17,10 @@ from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware
 
 from agentra import registry
 from agentra.agents import catalog as agents_catalog
-from agentra.agents import deployment
 from agentra.memory import Memory
 from agentra.server.state import _active_runs, _app_locks
 from agentra.server.utils import _strip_log_timestamp
 from agentra.server.routes.chat import AGENT_VOICES
-from agentra.server.routes.triggers import _record_production_release, _branch_head_sha, _run_promote_background
 
 logger = logging.getLogger("agentra.server")
 
@@ -81,7 +79,7 @@ def _run_screenshot_path(run_key: str) -> Path | None:
     repo = registry.get_app_repo(run["app"])
     if repo is None:
         return None
-    from agentra.agents.testing import screenshot_path
+    from agentra.artifacts import screenshot_path
 
     return screenshot_path(repo, run_key)
 
@@ -93,7 +91,7 @@ def _run_report_path(run_key: str) -> Path | None:
     repo = registry.get_app_repo(run["app"])
     if repo is None:
         return None
-    from agentra.agents.testing import report_path
+    from agentra.artifacts import report_path
 
     return report_path(repo, run_key)
 

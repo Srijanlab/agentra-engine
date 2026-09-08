@@ -98,7 +98,7 @@ async def _build_ready_to_review(name: str) -> dict:
     mem = Memory(repo)
     items = await asyncio.to_thread(mem.tested_items)
 
-    from agentra.agents.testing import report_path
+    from agentra.artifacts import report_path
 
     def _attach_report(item: dict) -> dict:
         run_ids = mem.run_ids_for(str(item.get("external_id"))) if item.get("external_id") else []

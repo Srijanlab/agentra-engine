@@ -121,7 +121,7 @@ def test_ready_to_review_attaches_test_report_when_one_exists(tmp_path, monkeypa
     github_issues.mark_shipped_to_preprod(repo_url, tested_issue["number"])
     github_issues.mark_tested(repo_url, tested_issue["number"])
 
-    from agentra.agents.testing import report_path
+    from agentra.artifacts import report_path
 
     path = report_path(repo, "run-abc")
     path.parent.mkdir(parents=True, exist_ok=True)

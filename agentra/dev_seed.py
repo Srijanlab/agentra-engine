@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from agentra import registry
-from agentra.agents.testing import report_path
+from agentra.artifacts import report_path
 from agentra.connectors import github_fake
 from agentra.memory import Memory
 
