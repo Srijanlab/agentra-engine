@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 48c2a93c1a33bd8eaec5ee020f4a56ec7ac568be -->
+<!-- source-sha: 5af167e9fc8a0de7d4c28021d47313b034b03158 -->
 - Engine = state authority, loop = execution — a hard split. Trigger endpoints only `registry.enqueue_job({cycle|promote|prod_debug|human_resume})`; agentra-loop drains the queue and reports back. The engine carries no `claude-agent-sdk` and no docker/deploy code.
 - One RPC contract. `POST /internal/rpc` gated by `AGENTRA_INTERNAL_TOKEN` (+ optional Vercel-header IP allowlist), restricted to the `_REGISTRY_METHODS` / `_MEMORY_METHODS` frozensets, is the entire state surface the loop may touch. Credential-holding side doors are separate token-gated endpoints (`/internal/git-token`, `/internal/slack/message`, `/internal/runs/{id}/log`).
 - Dual-path persistence. Every registry/memory write is `if core._ddb: <DynamoDB> else: <local JSON under AGENTRA_HOME>`. DynamoDB (static `AGENTRA_AWS_*` IAM keys, prefixed to dodge Vercel's reserved bare `AWS_*`) backs prod; local JSON serves the CLI, tests, and the loop's own process. `cloud_mode()` gates all checkout-dependent behavior.
@@ -13,5 +13,3 @@
 - Failure taxonomy is regex-driven in `memory/core.py`: transient/retryable vs. unfixable-by-agentra (auth/permission) vs. login-required. 4xx client defects stay non-transient so they still get filed. Regression tests lock in the exact wording per issue.
 - Graceful degradation everywhere. `/health` never fails; DynamoDB init returns `None` instead of raising; Langfuse calls are try/except no-ops; `api/index.py` serves a diagnostic fallback app if `agentra.server` fails to import.
 - Held, not half-built. Chat-turn and standup generation return 503 pending their move to the loop.
-- Layered auth. Dashboard = Firebase ID token + `AGENTRA_ALLOWED_EMAILS`; `/internal/*` = internal bearer token; `/trigger/alarm` = Basic-auth password; `/trigger/cron` = internal token or `CRON_SECRET`.
-- Polling over webhooks. No inbound Slack/GitHub webhook; the loop hits `GET /trigger/cron` (~5 min) to reconcile stale runs, poll `need_human` issue comments, enqueue due scheduled cycles, and escalate timed-out human-input loops.
