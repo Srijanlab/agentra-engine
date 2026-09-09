@@ -233,6 +233,7 @@ async def list_agent_metadata() -> dict:
 from agentra.server.routes.systems import router as systems_router  # noqa: E402
 from agentra.server.routes.connectors import router as connectors_router  # noqa: E402
 from agentra.server.routes.apps import router as apps_router  # noqa: E402
+from agentra.server.routes.schedule import router as schedule_router  # noqa: E402
 from agentra.server.routes.loops import router as loops_router  # noqa: E402
 from agentra.server.routes.standup import router as standup_router  # noqa: E402
 from agentra.server.routes.chat import router as chat_router  # noqa: E402
@@ -245,6 +246,7 @@ from agentra.a2a.routes import router as a2a_router  # noqa: E402
 app.include_router(systems_router)
 app.include_router(connectors_router)
 app.include_router(apps_router)
+app.include_router(schedule_router)
 app.include_router(loops_router)
 app.include_router(standup_router)
 app.include_router(chat_router)

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.memory import Memory
+from agentra.registry.scheduler import compute_schedule_status
 from agentra.server.routes.human_input import dispatch_human_answer
 from agentra.server.state import _active_runs
 from agentra.server.utils import _paused_response, _server_log
@@ -77,9 +78,7 @@ async def _enqueue_cycle(
         return {"triggered": False, "reason": "no objective set for this app"}
 
     if enforce_schedule:
-        env = environments.load(repo) or environments.EnvironmentConfig()
-        last = registry.last_run_at(app_name, source="scheduled")
-        due_in = None if last is None else env.schedule_hours * 3600 - (time.time() - last)
+        due_in = compute_schedule_status(app_name, repo).due_in_seconds
         if due_in is not None and due_in > 0:
             _server_log(source, f"app={app_name!r} not due for {due_in / 3600:.1f}h more -- skipped")
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
