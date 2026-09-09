@@ -51,6 +51,7 @@ from agentra.registry.runs import (
 from agentra.registry.loops import (
     bind_loop,
     bind_loop_for_run,
+    bind_promote_loop,
     get_loop,
     get_loop_pipeline,
     list_loops,
@@ -125,6 +126,7 @@ __all__ = [
     "repo_url_for_path",
     "bind_loop",
     "bind_loop_for_run",
+    "bind_promote_loop",
     "get_loop",
     "get_loop_pipeline",
     "roll_up_loop",

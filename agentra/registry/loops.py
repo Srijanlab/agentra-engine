@@ -99,6 +99,32 @@ def bind_loop_for_run(app: str, objective: str) -> str:
     return loop_id
 
 
+def bind_promote_loop(app: str) -> str:
+    """Create (or refresh) the single 'Promote to prod' loop for `app` and return
+    its id, so a promote job's run can link to it (record_run(run_key, loop_id=...))
+    and the dashboard can show promote progress the same way it shows a cycle.
+    Idempotent -- one promote loop per app, promote runs roll into it."""
+    from agentra.registry.runs import loop_id_for  # local import to avoid circular
+
+    loop_id = loop_id_for(f"promote:{app}")
+    now = time.time()
+    existing = _get_loop_doc(loop_id)
+    fields: dict[str, Any] = {
+        "loop_id": loop_id,
+        "app": app,
+        "kind": "objective",
+        "objective": "Promote to prod",
+        "title": "Promote to prod",
+        "updated_at": now,
+        "langfuse_session_id": loop_id,
+        "status": "active",
+    }
+    if existing is None:
+        fields.update(created_at=now, run_count=0, total_cost_usd=0.0)
+    _write_loop(loop_id, fields)
+    return loop_id
+
+
 def roll_up_loop(loop_id: str, run_key: str, run_status: str, cost_usd: float) -> None:
     """Fold a finished run's outcome into its loop's rolling totals. Idempotent
     per run_key -- a reconcile pass (reconcile_stale_loops) can safely re-fold a

@@ -33,10 +33,19 @@ def test_healthz_is_a_pure_alias_of_health(tmp_path, monkeypatch):
     body = healthz.json()
     assert body["status"] == "ok"
     assert isinstance(body["apps_registered"], int)
-    assert set(body) == {"status", "apps_registered"}
+    assert set(body) == {"status", "apps_registered", "commit"}
 
 
 def test_health_body_unchanged(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
+    monkeypatch.delenv("VERCEL_GIT_COMMIT_SHA", raising=False)
+    monkeypatch.delenv("AGENTRA_BUILD_SHA", raising=False)
     client = TestClient(server.app)
-    assert client.get("/health").json() == {"status": "ok", "apps_registered": 0}
+    assert client.get("/health").json() == {"status": "ok", "apps_registered": 0, "commit": ""}
+
+
+def test_health_reports_the_deployed_commit(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "abc1234def")
+    client = TestClient(server.app)
+    assert client.get("/health").json()["commit"] == "abc1234def"
