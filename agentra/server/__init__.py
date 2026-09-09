@@ -118,11 +118,15 @@ async def favicon() -> FileResponse:
 @app.get("/health")
 @app.get("/healthz")
 async def health() -> dict:
-    """GitHub #113: /healthz is a pure alias so probes using either convention succeed."""
+    """GitHub #113: /healthz is a pure alias so probes using either convention succeed.
+    `commit` is the deployed build's git SHA (Vercel injects VERCEL_GIT_COMMIT_SHA) --
+    the loop's verify_pre_prod uses it to confirm a pre-prod deploy has caught up
+    before the Testing Agent runs."""
+    commit = os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("AGENTRA_BUILD_SHA") or ""
     try:
-        return {"status": "ok", "apps_registered": len(registry.list_apps())}
+        return {"status": "ok", "apps_registered": len(registry.list_apps()), "commit": commit}
     except Exception as exc:  # never let a backend blip fail the liveness probe
-        return {"status": "degraded", "error": f"{type(exc).__name__}"}
+        return {"status": "degraded", "error": f"{type(exc).__name__}", "commit": commit}
 
 
 @app.get("/debug/dynamodb")
