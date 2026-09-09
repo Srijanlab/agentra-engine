@@ -13,3 +13,5 @@
 - Failure taxonomy is regex-driven in `memory/core.py`: transient/retryable vs. unfixable-by-agentra (auth/permission) vs. login-required. 4xx client defects stay non-transient so they still get filed. Regression tests lock in the exact wording per issue.
 - Graceful degradation everywhere. `/health` never fails; DynamoDB init returns `None` instead of raising; Langfuse calls are try/except no-ops; `api/index.py` serves a diagnostic fallback app if `agentra.server` fails to import.
 - Held, not half-built. Chat-turn and standup generation return 503 pending their move to the loop.
+- Layered auth. Dashboard = Firebase ID token + `AGENTRA_ALLOWED_EMAILS`; `/internal/*` = internal bearer token; `/trigger/alarm` = Basic-auth password; `/trigger/cron` = internal token or `CRON_SECRET`.
+- Polling over webhooks. No inbound Slack/GitHub webhook; the loop hits `GET /trigger/cron` (~5 min) to reconcile stale runs, poll `need_human` issue comments, enqueue due scheduled cycles, and escalate timed-out human-input loops.
