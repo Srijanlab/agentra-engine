@@ -10,6 +10,12 @@ name: image
 on:
   push:
     branches: [beta, main]
+    # Docs / ADRs / agent-regenerated .agentra/ specs don't change the image.
+    paths-ignore:
+      - "**.md"
+      - ".agentra/**"
+      - "docs/**"
+      - "LICENSE"
   workflow_dispatch:
 
 concurrency:
