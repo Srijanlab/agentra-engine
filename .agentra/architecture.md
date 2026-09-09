@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 38cdbe8dce7d0ef0aa0f9ae592cc7066a3de03d8 -->
+<!-- source-sha: 48c2a93c1a33bd8eaec5ee020f4a56ec7ac568be -->
 # engine — Architecture
 
 ## Purpose
@@ -33,7 +33,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `cloud_mode()` (== DynamoDB configured) means no writable checkout: local-file `Memory` methods and `persist_agentra_dir` become no-ops / raise `OSError`, and repo resolution returns the stored path unresolved.
 - `AGENTRA_AWS_*` is deliberately prefixed, not bare `AWS_*` — Vercel's Lambda runtime reserves the bare names for its own execution-role creds.
 - Job claim is a CAS `pending -> claimed` on the `by-status` GSI; a job stuck in `claimed` past `STALE_PROCESSING_SECONDS` (1h) is re-queued so a crashed loop can't strand work. Terminal jobs carry `expires_at` for DynamoDB native TTL.
-- `/health` and `/healthz` are identical and must never fail on a backend blip (catch-all -> `{status: degraded}`).
+- `/health` and `/healthz` are identical and must never fail on a backend blip (catch-all -> `{status: degraded}`). Both also return `commit` (deployed `VERCEL_GIT_COMMIT_SHA`, fallback `AGENTRA_BUILD_SHA`, else `""`) so the loop's `verify_pre_prod` can confirm a pre-prod deploy has caught up.
 
 ## Conventions
 - Every registry/memory storage function branches `if core._ddb is not None: <dynamo> else: <local JSON>`; new state follows the same dual-path shape with a local fallback for tests/dev.
