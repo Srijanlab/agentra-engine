@@ -24,6 +24,12 @@ class EnvironmentConfig:
     firebase_prod_alias: str = "default"
     # True when this app already has CI/CD that deploys on push to pre_prod_branch/
     ci_cd_on_push: bool = False
+    # Live pre-prod URL for the deployed pre_prod_branch. When set, a code change
+    # merged to pre-prod is NOT finalised in the same run -- deploy_pre_prod ends
+    # the run after the merge and the issue's next scheduled cycle resumes at
+    # verify_pre_prod (by then CI/CD has had time to deploy). Empty -> the merge
+    # is the terminal proof, same as before.
+    pre_prod_url: str = ""
     # Opt-in only. When true, the Production Debugging Agent may deploy a
     auto_remediate_prod: bool = False
     # Which deployment mechanism agents/deployment.py's PRE_PROD_STRATEGIES/
@@ -48,6 +54,7 @@ _GITHUB_VARIABLE_NAMES = {
     "firebase_pre_prod_alias": "AGENTRA_FIREBASE_PRE_PROD_ALIAS",
     "firebase_prod_alias": "AGENTRA_FIREBASE_PROD_ALIAS",
     "ci_cd_on_push": "AGENTRA_CI_CD_ON_PUSH",
+    "pre_prod_url": "AGENTRA_PRE_PROD_URL",
     "auto_remediate_prod": "AGENTRA_AUTO_REMEDIATE_PROD",
     "schedule_hours": "AGENTRA_SCHEDULE_HOURS",
     "alarm_enabled": "AGENTRA_ALARM_ENABLED",
