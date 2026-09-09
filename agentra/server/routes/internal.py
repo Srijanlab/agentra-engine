@@ -80,7 +80,7 @@ _MEMORY_METHODS = frozenset({
     "record_failure", "record_failure_on_issue",
     "code_complete_items", "shipped_pending_test_items", "tested_items",
     "feature_queue", "in_progress_features", "shipped_features",
-    "record_code_complete", "record_shipped_to_preprod", "record_tested",
+    "record_code_complete", "record_planned_sub_issues", "record_shipped_to_preprod", "record_tested",
     "released_features", "pending_promotion_features", "record_released",
     "record_feature_request", "clear_feature_request",
     "get_objective", "set_objective", "append_documentation",

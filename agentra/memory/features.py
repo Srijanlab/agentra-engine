@@ -219,6 +219,33 @@ class MemoryFeaturesMixin:
 
         return {"issue_number": issue_number, "board_issue_number": board_issue_number}
 
+    def record_planned_sub_issues(self, parent_number: int, briefs: list[str]) -> list[int]:
+        """File the not-yet-built parts of a multi-part feature as OPEN sub-issues of
+        `parent_number`, so check_backlog shows the whole breakdown (sub_issues_total
+        reflects every part) instead of only the part just implemented. Returns the
+        created issue numbers; best-effort -- a failure to file one part is logged,
+        not raised."""
+        repo_url = self._repo_url()
+        if not repo_url:
+            return []
+        from agentra.connectors import github_issues
+
+        created: list[int] = []
+        for brief in briefs:
+            brief = brief.strip()
+            if not brief:
+                continue
+            try:
+                issue = github_issues.create_sub_issue(
+                    repo_url, parent_number, brief[:250],
+                    f"Planned part of #{parent_number}, not yet implemented.\n\n{brief}",
+                    labels=[_STORY_LABEL, _AGENTRA_LABEL],
+                )
+                created.append(issue["number"])
+            except Exception:
+                logger.warning("record_planned_sub_issues: failed to file part %r under #%s", brief[:80], parent_number, exc_info=True)
+        return created
+
     def record_shipped_to_preprod(self, issue_numbers: list[str], run_id: str | None = None) -> list[str]:
         """Transitions each code-complete issue (bug or feature, same label either way) to status:shipped -- called once deploy_pre_prod has actually merged their branch into pre-prod/beta. Returns the ones that succeeded."""
         repo_url = self._repo_url()
