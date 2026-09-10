@@ -38,6 +38,15 @@ async def _attach_run_ids_to_all(mem: Memory, items: list[dict]) -> list[dict]:
     return list(await asyncio.gather(*(asyncio.to_thread(_attach_run_ids, mem, item) for item in items)))
 
 
+@router.get("/pipeline/stages")
+async def get_pipeline_stages() -> dict:
+    """The ordered pipeline stages the dashboard renders as columns -- key, display
+    name, backing GitHub status label, legacy label aliases, and position."""
+    from agentra.memory.core import pipeline_stages
+
+    return {"stages": pipeline_stages()}
+
+
 @router.get("/apps/{name}/backlog-board")
 async def get_backlog_board(name: str) -> dict:
     """Kanban-style view of the backlog: not-started bugs/features, everything with real work

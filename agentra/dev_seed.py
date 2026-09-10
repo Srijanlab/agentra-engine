@@ -133,7 +133,7 @@ def _git_init_with_remote(repo: Path, remote_url: str | None) -> None:
 
 
 def _walk_to_tested(mem: Memory, repo: Path, feature: str, run_id: str, report: dict) -> None:
-    """in-progress -> code_complete -> shipped -> tested on one issue, plus the run<->issue
+    """in-progress -> code_complete -> awaiting-testing -> tested on one issue, plus the run<->issue
     link run_ids_for reads and the test-report artifact the Ready to Review section attaches."""
     fr = mem.record_feature_request(description=feature, source="discovery")
     if not fr or not fr.get("number"):

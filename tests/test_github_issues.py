@@ -206,7 +206,7 @@ def test_mark_shipped_comments_appends_body_and_labels_without_closing(monkeypat
         ("post", "https://api.github.com/repos/acme/app/issues/42/comments", {"body": "Shipped as 'Dark mode'."}),
         ("get", "https://api.github.com/repos/acme/app/issues/42"),
         ("patch", "https://api.github.com/repos/acme/app/issues/42", {"body": "Original body.\n\n---\nShipped-Run-ID: run1\n"}),
-        ("post", "https://api.github.com/repos/acme/app/issues/42/labels", {"labels": ["status:shipped"]}),
+        ("post", "https://api.github.com/repos/acme/app/issues/42/labels", {"labels": ["status:awaiting-testing"]}),
     ]
     # Crucially, no "state" key anywhere -- unlike close_issue, the issue stays open.
     assert all("state" not in call[2] for call in calls if call[0] == "patch")
@@ -220,7 +220,7 @@ def test_mark_shipped_with_no_comment_or_body_suffix_only_adds_the_label(monkeyp
 
     github_issues.mark_shipped("https://github.com/acme/app.git", 42)
 
-    assert calls == [("https://api.github.com/repos/acme/app/issues/42/labels", {"labels": ["status:shipped"]})]
+    assert calls == [("https://api.github.com/repos/acme/app/issues/42/labels", {"labels": ["status:awaiting-testing"]})]
 
 
 def test_list_in_progress_features_excludes_issues_already_marked_shipped(monkeypatch):
@@ -324,8 +324,8 @@ def test_ensure_labels_creates_only_the_missing_ones(monkeypatch):
     github_issues.ensure_labels("https://github.com/acme/app.git")
 
     assert sorted(created) == [
-        "agentra", "blocking_agentra", "discovery", "feature", "need_human", "status:code_complete", "status:done",
-        "status:in-progress", "status:shipped", "status:tested",
+        "agentra", "blocking_agentra", "discovery", "feature", "need_human", "status:awaiting-testing",
+        "status:code_complete", "status:done", "status:in-progress", "status:tested",
     ]
 
 

@@ -163,12 +163,13 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
 
     if github_data is not None:
         # Use pre-fetched batch data — no GitHub API calls here.
-        from agentra.memory.core import _STATUS_SHIPPED_LABEL, _label_names
+        from agentra.memory.core import _at_awaiting_testing_stage
         open_bugs = [i for i in github_data.get("open_bugs", [])
-                     if _STATUS_SHIPPED_LABEL not in i.get("labels", [])]
-        # shipped = open features with status:shipped + closed features
+                     if not _at_awaiting_testing_stage(i.get("labels", []))]
+        # shipped = open features awaiting testing (status:awaiting-testing / legacy
+        # status:shipped) + closed features
         open_shipped = [i for i in github_data.get("open_features", [])
-                        if _STATUS_SHIPPED_LABEL in i.get("labels", [])]
+                        if _at_awaiting_testing_stage(i.get("labels", []))]
         closed_features = github_data.get("closed_features", [])
         shipped_count = len(open_shipped) + len(closed_features)
         # released = closed features with status:done label
@@ -266,6 +267,7 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
 
         code_repo_names = [r.name for r in payload.repos if r.role == "code"]
         github_issues.ensure_labels(coord.repo_url, extra=[f"repo:{name}" for name in code_repo_names])
+        github_issues.migrate_awaiting_testing_label(coord.repo_url)
     except Exception as exc:
         _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
 
@@ -327,6 +329,7 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         from agentra.connectors import github_issues
 
         github_issues.ensure_labels(payload.repo_url)
+        github_issues.migrate_awaiting_testing_label(payload.repo_url)
     except Exception as exc:
         _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
 

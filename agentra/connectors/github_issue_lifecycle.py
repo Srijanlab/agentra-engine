@@ -265,7 +265,7 @@ def close_issue(
 
 
 def mark_shipped(repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None) -> None:
-    """Like close_issue but leaves the issue OPEN and stamps 'status:shipped'."""
+    """Like close_issue but leaves the issue OPEN and stamps 'status:awaiting-testing'."""
     import httpx
     from agentra.connectors.github_issues import _headers, _owner_repo_or_raise
     from agentra.connectors.github_app import GITHUB_API
@@ -291,7 +291,7 @@ def mark_shipped(repo_url: str, issue_number: int, comment: str | None = None, b
             json={"body": current_body.rstrip() + "\n\n" + body_suffix},
             timeout=15,
         ).raise_for_status()
-    add_labels(repo_url, issue_number, ["status:shipped"])
+    add_labels(repo_url, issue_number, ["status:awaiting-testing"])
 
 
 def mark_code_complete(repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None) -> None:
@@ -327,20 +327,66 @@ def mark_code_complete(repo_url: str, issue_number: int, comment: str | None = N
 
 
 def mark_shipped_to_preprod(repo_url: str, issue_number: int, comment: str | None = None) -> None:
-    """Second stage: the code-complete branch has been merged into pre-prod/beta. Transitions status:code_complete -> status:shipped."""
+    """Second stage: the code-complete branch has been merged into pre-prod/beta. Transitions status:code_complete -> status:awaiting-testing."""
     from agentra.connectors.github_issues import remove_label
 
     if comment:
         add_comment(repo_url, issue_number, comment)
     remove_label(repo_url, issue_number, "status:code_complete")
-    add_labels(repo_url, issue_number, ["status:shipped"])
+    add_labels(repo_url, issue_number, ["status:awaiting-testing"])
+    remove_label(repo_url, issue_number, "status:shipped")
 
 
 def mark_tested(repo_url: str, issue_number: int, comment: str | None = None) -> None:
-    """Third stage: verify_pre_prod passed against the live pre-prod deployment. Transitions status:shipped -> status:tested."""
+    """Third stage: verify_pre_prod passed against the live pre-prod deployment. Transitions status:awaiting-testing -> status:tested."""
     from agentra.connectors.github_issues import remove_label
 
     if comment:
         add_comment(repo_url, issue_number, comment)
+    remove_label(repo_url, issue_number, "status:awaiting-testing")
     remove_label(repo_url, issue_number, "status:shipped")
     add_labels(repo_url, issue_number, ["status:tested"])
+
+
+def migrate_awaiting_testing_label(repo_url: str) -> int:
+    """One-time, idempotent: ensure the status:awaiting-testing label exists (cloning
+    colour/description from the legacy status:shipped label if present), then move
+    every open issue off status:shipped onto status:awaiting-testing. Returns the
+    number of issues moved -- 0 when there is nothing to migrate. GitHub issue #38."""
+    import httpx
+    from agentra.connectors.github_app import GITHUB_API
+    from agentra.connectors.github_issues import _headers, _owner_repo_or_raise, remove_label
+
+    owner_repo = _owner_repo_or_raise(repo_url)
+    headers = _headers(repo_url)
+
+    labels_resp = httpx.get(
+        f"{GITHUB_API}/repos/{owner_repo}/labels", headers=headers, params={"per_page": 100}, timeout=15
+    )
+    labels_resp.raise_for_status()
+    existing = {lbl["name"]: lbl for lbl in labels_resp.json()}
+
+    if "status:awaiting-testing" not in existing:
+        old = existing.get("status:shipped")
+        create_resp = httpx.post(
+            f"{GITHUB_API}/repos/{owner_repo}/labels",
+            headers=headers,
+            json={
+                "name": "status:awaiting-testing",
+                "color": (old or {}).get("color") or "bfd4f2",
+                "description": (old or {}).get("description")
+                or "Merged into pre-prod/beta -- awaiting live verification (verify_pre_prod)",
+            },
+            timeout=15,
+        )
+        if not (create_resp.status_code == 422 and any(
+            e.get("code") == "already_exists" for e in create_resp.json().get("errors", [])
+        )):
+            create_resp.raise_for_status()
+
+    moved = 0
+    for issue in list_open_issues(repo_url, labels=["status:shipped"]):
+        add_labels(repo_url, issue["number"], ["status:awaiting-testing"])
+        remove_label(repo_url, issue["number"], "status:shipped")
+        moved += 1
+    return moved

@@ -103,6 +103,12 @@ def main() -> None:
 
     sub.add_parser("dispatch", help="Absorb everything currently in the inbox into each app's ledgers")
 
+    mig_p = sub.add_parser(
+        "migrate-labels",
+        help="One-time (idempotent): rename status:shipped -> status:awaiting-testing on a repo's open issues",
+    )
+    mig_p.add_argument("--repo", required=True, type=Path)
+
     serve_p = sub.add_parser("serve", help="Run the always-on HTTP server for scheduled/alarm/queue triggers")
     serve_p.add_argument("--host", default="0.0.0.0")
     serve_p.add_argument("--port", type=int, default=None, help="Defaults to $PORT if set, else 8080")
@@ -153,6 +159,17 @@ def main() -> None:
             screenshot_url=args.screenshot_url,
         )
         print(f"Submitted request {request_id} for app {args.app!r} (pending in the inbox until `agentra dispatch` runs)")
+
+    elif args.command == "migrate-labels":
+        from agentra.connectors import github_issues
+
+        repo = args.repo.resolve()
+        repo_url = registry.repo_url_for_path(repo)
+        if not repo_url:
+            print(f"no github.com remote resolved for {repo}")
+        else:
+            moved = github_issues.migrate_awaiting_testing_label(repo_url)
+            print(f"migrated {moved} open issue(s): status:shipped -> status:awaiting-testing")
 
     elif args.command == "dispatch":
         summary = registry.dispatch_once()

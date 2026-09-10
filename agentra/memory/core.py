@@ -45,13 +45,33 @@ _NEED_HUMAN_LABEL = "need_human"
 _BLOCKING_AGENTRA_LABEL = "blocking_agentra"
 _STATUS_IN_PROGRESS_LABEL = "status:in-progress"
 _STATUS_CODE_COMPLETE_LABEL = "status:code_complete"
-_STATUS_SHIPPED_LABEL = "status:shipped"
+# GitHub issue #38: the "merged to pre-prod, awaiting live verification" stage was
+# renamed status:shipped -> status:awaiting-testing. Reads still recognise the old
+# name (_STATUS_AWAITING_TESTING_LABELS / _at_awaiting_testing_stage); writes emit
+# the new label and strip the legacy one.
+_STATUS_AWAITING_TESTING_LABEL = "status:awaiting-testing"
+_LEGACY_STATUS_SHIPPED_LABEL = "status:shipped"
+_STATUS_AWAITING_TESTING_LABELS = frozenset({_STATUS_AWAITING_TESTING_LABEL, _LEGACY_STATUS_SHIPPED_LABEL})
+# Back-compat alias -- existing imports keep working, now pointing at the new name.
+_STATUS_SHIPPED_LABEL = _STATUS_AWAITING_TESTING_LABEL
 _STATUS_TESTED_LABEL = "status:tested"
 _STATUS_DONE_LABEL = "status:done"
 # Forward-progress labels -- an issue carrying any of these is no longer
 # "not started" backlog, regardless of which stage it's at.
 _STATUS_PROGRESS_LABELS = (
-    _STATUS_CODE_COMPLETE_LABEL, _STATUS_SHIPPED_LABEL, _STATUS_TESTED_LABEL, _STATUS_DONE_LABEL,
+    _STATUS_CODE_COMPLETE_LABEL, _STATUS_AWAITING_TESTING_LABEL, _LEGACY_STATUS_SHIPPED_LABEL,
+    _STATUS_TESTED_LABEL, _STATUS_DONE_LABEL,
+)
+
+# GitHub issue #38: the dashboard's pipeline columns, in order. Each stage:
+# key, display name, backing GitHub status label (None for the implicit backlog).
+_PIPELINE_STAGES = (
+    ("queue", "Backlog", None),
+    ("in-progress", "In Progress", _STATUS_IN_PROGRESS_LABEL),
+    ("code_complete", "Code Complete", _STATUS_CODE_COMPLETE_LABEL),
+    ("awaiting-testing", "Awaiting Testing", _STATUS_AWAITING_TESTING_LABEL),
+    ("tested", "Ready to Review", _STATUS_TESTED_LABEL),
+    ("done", "In Production", _STATUS_DONE_LABEL),
 )
 _OBJECTIVE_VARIABLE = "AGENTRA_OBJECTIVE"
 
@@ -132,6 +152,29 @@ def format_safety_denial_line(tool_name: str, pattern: str, detail: str, limit: 
 
 def _label_names(issue: dict) -> set[str]:
     return {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in issue.get("labels", [])}
+
+
+def _at_awaiting_testing_stage(labels) -> bool:
+    """True when an issue carries the awaiting-testing label under either its
+    current (status:awaiting-testing) or legacy (status:shipped) name."""
+    return bool(_STATUS_AWAITING_TESTING_LABELS.intersection(labels))
+
+
+def pipeline_stages() -> list[dict]:
+    """The dashboard's pipeline columns in order -- key, display name, backing
+    GitHub status label (None for the implicit backlog), legacy label aliases,
+    and position. GitHub issue #38 adds 'awaiting-testing' between code-complete
+    and in-production."""
+    return [
+        {
+            "key": key,
+            "display": display,
+            "label": label,
+            "legacy_labels": [_LEGACY_STATUS_SHIPPED_LABEL] if key == "awaiting-testing" else [],
+            "position": position,
+        }
+        for position, (key, display, label) in enumerate(_PIPELINE_STAGES)
+    ]
 
 
 def _issue_description(issue: dict) -> str:

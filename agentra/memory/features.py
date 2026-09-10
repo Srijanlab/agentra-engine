@@ -13,11 +13,12 @@ from agentra.memory.core import (
     _BUG_LABEL,
     _FEATURE_LABEL,
     _NEED_HUMAN_LABEL,
+    _STATUS_AWAITING_TESTING_LABELS,
     _STATUS_CODE_COMPLETE_LABEL,
     _STATUS_PROGRESS_LABELS,
-    _STATUS_SHIPPED_LABEL,
     _STATUS_TESTED_LABEL,
     _STORY_LABEL,
+    _at_awaiting_testing_stage,
     _github_bug_to_dict,
     _github_feature_to_dict,
     _github_shipped_to_dict,
@@ -28,10 +29,12 @@ from agentra.memory.core import (
 class MemoryFeaturesMixin:
     """Mixin for Memory: feature queue, shipped/released records, and the full record_shipped branching logic."""
 
-    def _items_at_stage(self, status_label: str) -> list[dict]:
+    def _items_at_stage(self, status_label) -> list[dict]:
         """Open bug- or feature-labeled issues (either type -- the priority order in
         check_backlog cares about pipeline stage, not bug vs. feature) carrying the
-        given status label. Each entry gets a 'kind' field ('bug' or 'feature')."""
+        given status label (a single name, or a set of interchangeable names). Each
+        entry gets a 'kind' field ('bug' or 'feature')."""
+        wanted = {status_label} if isinstance(status_label, str) else set(status_label)
         repo_url = self._repo_url()
         if not repo_url:
             return []
@@ -43,12 +46,12 @@ class MemoryFeaturesMixin:
             result = []
             for i in bugs:
                 names = _label_names(i)
-                if status_label in names and _NEED_HUMAN_LABEL not in names:
+                if wanted & names and _NEED_HUMAN_LABEL not in names:
                     entry = _github_bug_to_dict(i)
                     entry["kind"] = "bug"
                     result.append(entry)
             for i in features:
-                if status_label in _label_names(i):
+                if wanted & _label_names(i):
                     entry = _github_feature_to_dict(i)
                     entry["kind"] = "feature"
                     result.append(entry)
@@ -62,8 +65,8 @@ class MemoryFeaturesMixin:
         return self._items_at_stage(_STATUS_CODE_COMPLETE_LABEL)
 
     def shipped_pending_test_items(self) -> list[dict]:
-        """Bugs/features stamped status:shipped (merged to pre-prod, not yet live-verified) -- excludes status:tested, which is a later stage."""
-        return self._items_at_stage(_STATUS_SHIPPED_LABEL)
+        """Bugs/features stamped status:awaiting-testing (or the legacy status:shipped) -- merged to pre-prod, not yet live-verified; excludes status:tested, a later stage."""
+        return self._items_at_stage(_STATUS_AWAITING_TESTING_LABELS)
 
     def tested_items(self) -> list[dict]:
         """Bugs/features stamped status:tested -- live-verified against pre-prod, one Promote away from production. The dashboard's "Ready to Review" tab."""
@@ -123,7 +126,7 @@ class MemoryFeaturesMixin:
 
             open_shipped = [
                 i for i in github_issues.list_open_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
-                if _STATUS_SHIPPED_LABEL in _label_names(i) or _STATUS_TESTED_LABEL in _label_names(i)
+                if _at_awaiting_testing_stage(_label_names(i)) or _STATUS_TESTED_LABEL in _label_names(i)
             ]
             closed = github_issues.list_closed_issues(repo_url, labels=[_FEATURE_LABEL, _AGENTRA_LABEL])
             return [_github_shipped_to_dict(i) for i in open_shipped + closed]
@@ -247,7 +250,7 @@ class MemoryFeaturesMixin:
         return created
 
     def record_shipped_to_preprod(self, issue_numbers: list[str], run_id: str | None = None) -> list[str]:
-        """Transitions each code-complete issue (bug or feature, same label either way) to status:shipped -- called once deploy_pre_prod has actually merged their branch into pre-prod/beta. Returns the ones that succeeded."""
+        """Transitions each code-complete issue (bug or feature, same label either way) to status:awaiting-testing -- called once deploy_pre_prod has actually merged their branch into pre-prod/beta. Returns the ones that succeeded."""
         repo_url = self._repo_url()
         if not repo_url:
             return []
@@ -271,7 +274,7 @@ class MemoryFeaturesMixin:
         return moved
 
     def record_tested(self, issue_numbers: list[str], run_id: str | None = None) -> list[str]:
-        """Transitions each shipped issue to status:tested -- called once verify_pre_prod has passed against the live pre-prod deployment. Returns the ones that succeeded."""
+        """Transitions each awaiting-testing issue to status:tested -- called once verify_pre_prod has passed against the live pre-prod deployment. Returns the ones that succeeded."""
         repo_url = self._repo_url()
         if not repo_url:
             return []

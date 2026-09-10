@@ -317,7 +317,7 @@ def list_in_progress_features(repo_url: str, labels: list[str] | None = None) ->
         }
         for i in data["repository"]["issues"]["nodes"]
         if i["subIssuesSummary"]["total"] > 0
-        and "status:shipped" not in {l["name"] for l in i["labels"]["nodes"]}
+        and not ({"status:shipped", "status:awaiting-testing"} & {l["name"] for l in i["labels"]["nodes"]})
     ]
 
 
@@ -331,7 +331,7 @@ _LABEL_DEFINITIONS: dict[str, tuple[str, str]] = {
     "blocking_agentra": ("b60205", "Blocks agentra's own further progress until a human resolves it"),
     "status:in-progress": ("fef2c0", "Real work has started -- see In-Progress-Branch comment for where"),
     "status:code_complete": ("c2e0c6", "Coding done, pushed to its remote feature branch -- awaiting merge to pre-prod/beta"),
-    "status:shipped": ("bfd4f2", "Merged into pre-prod/beta -- awaiting live verification (verify_pre_prod)"),
+    "status:awaiting-testing": ("bfd4f2", "Merged into pre-prod/beta -- awaiting live verification (verify_pre_prod)"),
     "status:tested": ("1d76db", "Live-verified against pre-prod (verify_pre_prod passed) -- awaiting production promotion"),
     "status:done": ("0e8a16", "Actually deployed to production"),
 }
@@ -428,6 +428,7 @@ from agentra.connectors.github_issue_lifecycle import (  # noqa: E402
     mark_shipped,
     mark_shipped_to_preprod,
     mark_tested,
+    migrate_awaiting_testing_label,
     escalate_existing_issue,
     find_tracking_issue_for_branch,
     record_commit,
@@ -457,6 +458,7 @@ __all__ = [
     "mark_code_complete",
     "mark_shipped_to_preprod",
     "mark_tested",
+    "migrate_awaiting_testing_label",
     "record_in_progress_branch",
     "get_in_progress_branch",
     "get_in_progress_run_id",

@@ -127,8 +127,8 @@ def notify_shipped(
     channel: str | None = None,
 ) -> bool:
     """Posts a 'shipped to pre-prod' notification, once pre-prod delivery is actually confirmed
-    (trivial merge success, or verify_pre_prod pass) -- never at the earlier status:shipped
-    GitHub label stamp. `channel` is the app's own Slack channel (registry.get_slack_channel),
+    (trivial merge success, or verify_pre_prod pass) -- never at the earlier
+    status:awaiting-testing GitHub label stamp. `channel` is the app's own Slack channel (registry.get_slack_channel),
     falling back to the global SLACK_HUMAN_INPUT_CHANNEL env var when unset. No-ops (returns
     False) when Slack isn't configured or no channel resolves, and never raises (mirrors
     notify_human_input_required's fail-open behavior)."""
