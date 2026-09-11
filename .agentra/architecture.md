@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 3367ae4d6b821a86dd8438ec50fb7bc5cafafb7c -->
+<!-- source-sha: 34df69787fc2dc8938fafd7c5f392b03096e203f -->
 # engine — Architecture
 
 ## Purpose
@@ -36,6 +36,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `/health` and `/healthz` are identical and must never fail on a backend blip (catch-all -> `{status: degraded}`). Both also return `commit` (deployed `VERCEL_GIT_COMMIT_SHA`, fallback `AGENTRA_BUILD_SHA`, else `""`) so the loop's `verify_pre_prod` can confirm a pre-prod deploy has caught up.
 - The pre-prod-merged-awaiting-verification status label was renamed `status:shipped` -> `status:awaiting-testing` (GitHub issue #38); every write path emits the new name and strips the old, but every read path (`_at_awaiting_testing_stage`, `issue_status`, `_items_at_stage`) still matches both, so a repo never carrying the new label doesn't silently lose items mid-pipeline.
 - A loop left `active`/`waiting_for_human`/`escalated` whose tracked issue is later closed by a human is otherwise orphaned forever: `_reconcile_closed_issue_loops` (run for every app on each `/trigger/cron` tick) marks it `released` with pipeline `terminal=True` so no later scheduled cycle re-binds to it (agentra#20/#25).
+- `list_loops` orders by real activity, not by any write: `roll_up_loop` alone stamps `last_run_at` (a run actually finished); administrative-only writes (`set_loop_status`, `set_loop_pipeline`) still bump `updated_at` but must never change list order — sort key is `last_run_at or created_at`, never `updated_at` (a bulk retire pass previously dumped every touched loop, days-old and fresh alike, to the top together).
 
 ## Conventions
 - Every registry/memory storage function branches `if core._ddb is not None: <dynamo> else: <local JSON>`; new state follows the same dual-path shape with a local fallback for tests/dev.
@@ -59,3 +60,4 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `agents/catalog.py` still describes the full agent pipeline (orchestrator, implementation, deployment, ...) that actually runs in agentra-loop — it is display metadata only.
 - Vercel function `maxDuration` is 30s; any endpoint doing real work must enqueue a job, not block.
 - Open issues still carrying the legacy `status:shipped` label (pre-#38) only get renamed onto `status:awaiting-testing` when `migrate_awaiting_testing_label` actually runs for that repo — via `agentra migrate-labels --repo <path>` or automatically on `POST /apps` registration. Until then they rely on every read path's back-compat matching, not an actual label change.
+- The `loops` table's `by-app-recency` GSI is keyed on `updated_at`, not the real-activity `last_run_at` that `list_loops` actually sorts by; `_query_loops_by_app` compensates by overfetching `max(limit, _RECENCY_OVERFETCH=200)` rows off the index and re-sorting by `_recency` in Python (safe since `updated_at >= last_run_at` always) — bump the constant if an administrative pass ever touches more than ~200 loops of one app at once.
