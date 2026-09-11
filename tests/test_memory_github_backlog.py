@@ -833,3 +833,38 @@ def test_resume_session_id_for_returns_none_when_github_call_fails(tmp_path, mon
     )
 
     assert mem.resume_session_id_for("13") is None
+
+
+# ── human_input_pending() must read real GitHub's label shape ──────────────
+# github_issues.get_issue returns the raw REST payload: labels are
+# {"name": ..., ...} objects, not plain strings. A bare `"need_human" in
+# issue["labels"]` never matches that shape (only github_fake's flat-string
+# labels, which is why this went uncaught) and always returned False --
+# the throttle guard's dedup check then re-posted the same "Auto-escalated"
+# comment on every single cycle instead of once (confirmed live on agentra
+# issues #38 and #15: 3-4 identical comments).
+
+
+def test_human_input_pending_true_when_the_real_github_label_object_is_present(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_issue",
+        lambda repo_url, n: {"number": n, "state": "open", "labels": [
+            {"id": 1, "name": "feature", "color": "ededed"},
+            {"id": 2, "name": "need_human", "color": "d93f0b"},
+        ]},
+    )
+
+    assert mem.human_input_pending(38) is True
+
+
+def test_human_input_pending_false_once_the_need_human_label_is_gone(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+    monkeypatch.setattr(
+        github_issues, "get_issue",
+        lambda repo_url, n: {"number": n, "state": "open", "labels": [{"id": 1, "name": "feature", "color": "ededed"}]},
+    )
+
+    assert mem.human_input_pending(38) is False
