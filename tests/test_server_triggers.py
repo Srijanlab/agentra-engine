@@ -113,6 +113,29 @@ def test_cron_endpoint_requires_a_token_when_set(tmp_path, monkeypatch):
     assert {j["payload"]["app"] for j in registry.list_jobs()} == {"myapp"}
 
 
+def test_cron_releases_a_loop_whose_tracked_issue_has_been_closed(tmp_path, monkeypatch):
+    """A run that ends non-terminally leaves its loop `active`; if a human then
+    closes the issue, the scheduler tick must release the loop so no later cycle
+    re-binds to it (agentra#20/#25)."""
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    backend = github_fake.install(monkeypatch=monkeypatch)
+    repo_url = "https://github.com/acme/myapp.git"
+    issue = backend.create_issue(repo_url, "stale work", "body")
+    loop_id = registry.bind_loop("myapp", issue["number"], title="stale work", kind="bug")
+    registry.set_loop_pipeline(loop_id, status="shipped", terminal=False, next_node="resume_delivery")
+
+    _client().get("/trigger/cron")
+    assert registry.get_loop(loop_id)["status"] == "active"  # issue still open
+
+    backend.close_issue(repo_url, issue["number"])
+    _client().get("/trigger/cron")
+
+    loop = registry.get_loop(loop_id)
+    assert loop["status"] == "released"
+    assert loop["pipeline"]["terminal"] is True
+
+
 def test_promote_enqueues_a_promote_job(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path)
