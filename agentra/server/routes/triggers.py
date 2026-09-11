@@ -121,6 +121,34 @@ def _reconcile_human_input_for_app(app_name: str) -> None:
             logger.warning("_reconcile_human_input_for_app: failed for app=%r issue=#%s", app_name, issue_number, exc_info=True)
 
 
+def _reconcile_closed_issue_loops(app_name: str) -> None:
+    """Release any loop still `active`/`waiting_for_human` whose tracked issue is
+    closed. A run that ends non-terminally (shipped, resume_delivery) leaves its
+    loop `active`; if a human then closes the issue, nothing flips the loop and
+    every later scheduled cycle re-binds to it via bind_loop_for_run -- the run
+    tied to a dead issue/loop (agentra#20/#25). issue_status needs a GitHub read,
+    so this lives here, not in registry/."""
+    repo = registry.get_app_repo(app_name)
+    if repo is None:
+        return
+    mem = Memory(repo)
+    for loop in registry.list_loops(app=app_name):
+        if loop.get("status") not in ("active", "waiting_for_human", "escalated"):
+            continue
+        issue_number = loop.get("issue_number")
+        if not issue_number:
+            continue
+        try:
+            if mem.issue_status(str(issue_number)) != "done":
+                continue
+        except Exception:
+            continue
+        loop_id = loop["loop_id"]
+        registry.set_loop_pipeline(loop_id, terminal=True, status="done", next_node="done")
+        registry.set_loop_status(loop_id, "released")
+        _server_log("scheduled", f"app={app_name!r} loop={loop_id} issue=#{issue_number} closed -- loop released")
+
+
 def _reconcile_human_input_timeouts() -> None:
     """A run must never sit in waiting_for_human forever -- escalate past max-wait."""
     try:
@@ -162,6 +190,10 @@ async def _tick() -> dict:
             _reconcile_human_input_for_app(app_name)
         except Exception:
             logger.warning("tick: human-input reconciliation failed for app=%r", app_name, exc_info=True)
+        try:
+            _reconcile_closed_issue_loops(app_name)
+        except Exception:
+            logger.warning("tick: closed-issue loop reconciliation failed for app=%r", app_name, exc_info=True)
         results[app_name] = await _enqueue_cycle(app_name, "scheduled", None, None, False, enforce_schedule=True)
     _reconcile_human_input_timeouts()
     return {"apps": results}

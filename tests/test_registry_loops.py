@@ -134,6 +134,22 @@ def test_bind_loop_for_run_reuses_an_active_issue_loop_instead_of_a_parallel_doc
     assert loop_id == issue_loop_id  # the in-flight issue loop wins, 1:1 issue<->loop preserved
 
 
+def test_bind_loop_for_run_ignores_a_blocked_issue_loop(tmp_path, monkeypatch):
+    """A loop parked on waiting_for_human / escalated is blocked on a human -- a
+    fresh scheduled cycle must not bind to it (that let an orphaned wait whose
+    issue was later closed hijack every future cycle -- agentra#20). Mirrors the
+    agentra-loop copy; the engine's implementation is the one the loop proxies to."""
+    _isolate(tmp_path, monkeypatch)
+    blocked = _bind("r1", "app", 20, title="#20", kind="bug")
+    registry.set_loop_human_input(blocked, {"question": "q", "issue_number": 20})
+    assert registry.get_loop(blocked)["status"] == "waiting_for_human"
+
+    fresh = registry.bind_loop_for_run("app", "ship useful features")
+
+    assert fresh != blocked
+    assert registry.get_loop(fresh)["kind"] == "objective"
+
+
 def test_bind_loop_retires_the_objective_placeholder_from_this_run(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     registry.record_run("r1", app="app", status="running", started_at=time.time())

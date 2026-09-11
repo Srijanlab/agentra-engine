@@ -189,7 +189,8 @@ class MemoryIssueLifecycleMixin:
 
     def issue_status(self, external_id: str) -> str | None:
         """The pipeline stage of a tracked issue, from its status: label -- one of
-        queue / in-progress / code_complete / shipped / tested / done. 'queue' means
+        queue / in-progress / code_complete / awaiting-testing / tested / done.
+        The legacy status:shipped label also maps to 'awaiting-testing'. 'queue' means
         an open agentra issue with no status label; 'done' also covers a closed issue.
         None if the id is non-numeric or the issue can't be read."""
         if not str(external_id).isdigit():
@@ -200,8 +201,9 @@ class MemoryIssueLifecycleMixin:
         try:
             from agentra.connectors import github_issues
             from agentra.memory.core import (
+                _LEGACY_STATUS_SHIPPED_LABEL, _STATUS_AWAITING_TESTING_LABEL,
                 _STATUS_CODE_COMPLETE_LABEL, _STATUS_DONE_LABEL, _STATUS_IN_PROGRESS_LABEL,
-                _STATUS_SHIPPED_LABEL, _STATUS_TESTED_LABEL, _label_names,
+                _STATUS_TESTED_LABEL, _label_names,
             )
 
             issue = github_issues.get_issue(repo_url, int(external_id))
@@ -213,7 +215,8 @@ class MemoryIssueLifecycleMixin:
             for label, stage in (
                 (_STATUS_DONE_LABEL, "done"),
                 (_STATUS_TESTED_LABEL, "tested"),
-                (_STATUS_SHIPPED_LABEL, "shipped"),
+                (_STATUS_AWAITING_TESTING_LABEL, "awaiting-testing"),
+                (_LEGACY_STATUS_SHIPPED_LABEL, "awaiting-testing"),
                 (_STATUS_CODE_COMPLETE_LABEL, "code_complete"),
                 (_STATUS_IN_PROGRESS_LABEL, "in-progress"),
             ):

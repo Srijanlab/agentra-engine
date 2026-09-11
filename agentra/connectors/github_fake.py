@@ -94,7 +94,8 @@ class FakeGitHubBackend:
         results = [
             i
             for i in self.issues[repo_url].values()
-            if i["state"] == "open" and i.get("sub_issue_numbers") and "status:shipped" not in i["labels"]
+            if i["state"] == "open" and i.get("sub_issue_numbers")
+            and not ({"status:shipped", "status:awaiting-testing"} & set(i["labels"]))
         ]
         if labels:
             results = [i for i in results if all(label in i["labels"] for label in labels)]
@@ -330,7 +331,7 @@ class FakeGitHubBackend:
             issue = self.issues[repo_url][issue_number]
             issue["body"] = (issue.get("body") or "").rstrip() + "\n\n" + body_suffix
             self._save()
-        self.add_labels(repo_url, issue_number, ["status:shipped"])
+        self.add_labels(repo_url, issue_number, ["status:awaiting-testing"])
 
     def mark_code_complete(
         self, repo_url: str, issue_number: int, comment: str | None = None, body_suffix: str | None = None
@@ -352,15 +353,26 @@ class FakeGitHubBackend:
         if comment:
             self.add_comment(repo_url, issue_number, comment)
         self.remove_label(repo_url, issue_number, "status:code_complete")
-        self.add_labels(repo_url, issue_number, ["status:shipped"])
+        self.remove_label(repo_url, issue_number, "status:shipped")
+        self.add_labels(repo_url, issue_number, ["status:awaiting-testing"])
 
     def mark_tested(self, repo_url: str, issue_number: int, comment: str | None = None) -> None:
         if issue_number not in self.issues[repo_url]:
             return
         if comment:
             self.add_comment(repo_url, issue_number, comment)
+        self.remove_label(repo_url, issue_number, "status:awaiting-testing")
         self.remove_label(repo_url, issue_number, "status:shipped")
         self.add_labels(repo_url, issue_number, ["status:tested"])
+
+    def migrate_awaiting_testing_label(self, repo_url: str) -> int:
+        moved = 0
+        for issue in self.issues[repo_url].values():
+            if issue["state"] == "open" and "status:shipped" in issue["labels"]:
+                self.add_labels(repo_url, issue["number"], ["status:awaiting-testing"])
+                self.remove_label(repo_url, issue["number"], "status:shipped")
+                moved += 1
+        return moved
 
     def list_variables(self, repo_url: str) -> dict[str, str]:
         return dict(self.variables[repo_url])
@@ -388,6 +400,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "mark_code_complete", backend.mark_code_complete),
         (github_issues, "mark_shipped_to_preprod", backend.mark_shipped_to_preprod),
         (github_issues, "mark_tested", backend.mark_tested),
+        (github_issues, "migrate_awaiting_testing_label", backend.migrate_awaiting_testing_label),
         (github_issues, "add_comment", backend.add_comment),
         (github_issues, "list_comments", backend.list_comments),
         (github_issues, "record_in_progress_branch", backend.record_in_progress_branch),

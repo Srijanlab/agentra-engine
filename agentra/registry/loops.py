@@ -75,9 +75,15 @@ def bind_loop_for_run(app: str, objective: str) -> str:
     Idempotent: a second call for the same app+objective refreshes updated_at only."""
     from agentra.registry.runs import loop_id_for  # local import to avoid circular
 
+    # Only "active" -- a loop parked on "waiting_for_human"/"escalated" is blocked on a
+    # human, not in flight: a fresh scheduled cycle must NOT bind to it and silently
+    # "continue" it (a resume only happens via dispatch_human_answer, which flips the
+    # loop back to "active" first). Reusing a blocked loop also let an orphaned
+    # waiting_for_human loop whose issue was later closed hijack every future cycle
+    # (confirmed live: agentra#20 / run 02499a0e). Mirrors agentra-loop.
     existing_loops = [
         l for l in list_loops(app=app, limit=10)
-        if l.get("issue_number") and l.get("status") in ("active", "waiting_for_human", "escalated")
+        if l.get("issue_number") and l.get("status") == "active"
     ]
     if existing_loops:
         return existing_loops[0]["loop_id"]
