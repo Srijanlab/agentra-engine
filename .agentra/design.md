@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 1be5e541d9b14492de83a9da2893754844a8eb6f -->
+<!-- source-sha: 3367ae4d6b821a86dd8438ec50fb7bc5cafafb7c -->
 - Engine = state authority, loop = execution — a hard split. Trigger endpoints only `registry.enqueue_job({cycle|promote|prod_debug|human_resume})`; agentra-loop drains the queue and reports back. The engine carries no `claude-agent-sdk` and no docker/deploy code.
 - One RPC contract. `POST /internal/rpc` gated by `AGENTRA_INTERNAL_TOKEN` (+ optional Vercel-header IP allowlist), restricted to the `_REGISTRY_METHODS` / `_MEMORY_METHODS` frozensets, is the entire state surface the loop may touch. Credential-holding side doors are separate token-gated endpoints (`/internal/git-token`, `/internal/slack/message`, `/internal/runs/{id}/log`).
 - Dual-path persistence. Every registry/memory write is `if core._ddb: <DynamoDB> else: <local JSON under AGENTRA_HOME>`. DynamoDB (static prefixed `AGENTRA_AWS_*` IAM keys) backs prod; local JSON serves the CLI, tests, and the loop's own process. `cloud_mode()` gates all checkout-dependent behavior.
@@ -7,3 +7,6 @@
 - Module-proxy pattern for `registry`/`memory` so sub-modules can mutate shared `core` state through delegated names.
 - Memory modelled as GitHub Issues/Projects composed from 5 mixins; failure triage via regex classes (transient / unfixable / login-required).
 - SRP + 500-line file cap + domain subfolders enforced by CLAUDE.md; features needing a checkout return 503 rather than half-working.
+- Backward-compatible label rename (GitHub issue #38): `status:shipped` -> `status:awaiting-testing` is a write-forward, read-both migration — every write path emits/strips the new label, every read path matches both names via `_STATUS_AWAITING_TESTING_LABELS`/`_at_awaiting_testing_stage`, and a separate idempotent `migrate_awaiting_testing_label` call (CLI `migrate-labels`, or automatic on app registration) does the actual one-time GitHub-side move for a given repo.
+- Single source of truth for pipeline UI shape: `memory.core.pipeline_stages()` defines the dashboard's ordered columns once, exposed read-only at `GET /pipeline/stages` instead of each caller re-deriving stage names/order.
+- Loop lifecycle self-healing: `_reconcile_closed_issue_loops` releases any loop left `active`/`waiting_for_human`/`escalated` whose tracked GitHub issue was closed out-of-band, so a stale loop can't hijack a future scheduled cycle (agentra#20/#25).
