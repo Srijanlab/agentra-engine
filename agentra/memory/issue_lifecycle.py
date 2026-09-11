@@ -6,7 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from agentra.memory.core import _STATUS_DONE_LABEL, _STATUS_IN_PROGRESS_LABEL, _NEED_HUMAN_LABEL
+from agentra.memory.core import _STATUS_DONE_LABEL, _STATUS_IN_PROGRESS_LABEL, _NEED_HUMAN_LABEL, _label_names
 
 
 class MemoryIssueLifecycleMixin:
@@ -76,7 +76,15 @@ class MemoryIssueLifecycleMixin:
             from agentra.connectors import github_issues
 
             issue = github_issues.get_issue(repo_url, issue_number)
-            return issue is not None and _NEED_HUMAN_LABEL in (issue.get("labels") or [])
+            # github_issues.get_issue returns the raw GitHub REST payload, whose
+            # `labels` are {"name": ..., ...} objects, not plain strings -- a bare
+            # `_NEED_HUMAN_LABEL in issue["labels"]` never matches against real
+            # GitHub (only against github_fake's flat-string labels, which is why
+            # this went uncaught) and this always returned False, so the throttle
+            # guard re-posted the same escalation comment every single cycle
+            # instead of once (confirmed live on issues #38 and #15: 3-4 identical
+            # "Auto-escalated" comments).
+            return issue is not None and _NEED_HUMAN_LABEL in _label_names(issue)
         except Exception:
             return True
 
