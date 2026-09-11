@@ -96,6 +96,34 @@ def test_list_loops_orders_by_updated_at_and_filters_by_app(tmp_path, monkeypatc
     assert [l["issue_number"] for l in registry.list_loops(app="a")] == ["3", "1"]
 
 
+def test_list_loops_ignores_administrative_touches_for_ordering(tmp_path, monkeypatch):
+    """A retire/reconcile pass that only calls set_loop_status/set_loop_pipeline
+    (no real run) must not shove a days-old, already-resolved loop above one
+    that genuinely just ran -- confirmed live: a bulk loop-retirement pass
+    stamped updated_at on every loop it touched and dumped them all at the top
+    of the dashboard's Loops list together."""
+    import json
+
+    _isolate(tmp_path, monkeypatch)
+    old_loop = _bind("r_old", "app", 1, title="ancient")
+    registry.roll_up_loop(old_loop, "r_old", "completed", 0.1)  # ran days ago
+    fresh_loop = _bind("r_fresh", "app", 2, title="just happened")
+    registry.roll_up_loop(fresh_loop, "r_fresh", "completed", 0.1)  # ran just now
+
+    # Backdate the old loop's real-activity timestamps directly in storage.
+    loops = json.loads(registry._LOOPS_PATH.read_text())
+    loops[old_loop]["last_run_at"] = time.time() - 999999
+    loops[old_loop]["created_at"] = time.time() - 999999
+    registry._LOOPS_PATH.write_text(json.dumps(loops))
+
+    # An administrative-only retire touches every loop's updated_at, old and fresh alike.
+    registry.set_loop_status(old_loop, "released")
+    registry.set_loop_status(fresh_loop, "released")
+
+    ordered = [l["issue_number"] for l in registry.list_loops(app="app")]
+    assert ordered == ["2", "1"]  # the fresh one still sorts first despite the admin touch
+
+
 def test_set_loop_status_rejects_unknown_value(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     registry.record_run("r1", app="app", status="running", started_at=time.time())

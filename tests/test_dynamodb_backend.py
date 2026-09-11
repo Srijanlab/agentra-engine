@@ -526,6 +526,27 @@ def test_list_loops_filters_by_app_via_the_gsi(ddb_env):
     assert {l["loop_id"] for l in mine} == {loops.bind_loop("myapp", 1), loops.bind_loop("myapp", 2)}
 
 
+def test_list_loops_by_app_gsi_ignores_administrative_touches_for_ordering(ddb_env):
+    """The by-app-recency GSI orders by updated_at, but list_loops must sort by
+    real activity (last_run_at) -- a retire/reconcile pass that only calls
+    set_loop_status (no run) bumps updated_at on every loop it touches and must
+    not shove a days-old, already-resolved loop above one that just ran."""
+    from agentra.registry import loops
+
+    old_loop = loops.bind_loop("myapp", 1)
+    loops.roll_up_loop(old_loop, "r_old", "completed", 0.1)  # ran days ago
+    fresh_loop = loops.bind_loop("myapp", 2)
+    loops.roll_up_loop(fresh_loop, "r_fresh", "completed", 0.1)  # ran just now
+    loops._write_loop(old_loop, {"last_run_at": time.time() - 999999, "created_at": time.time() - 999999})
+
+    # An administrative-only retire touches every loop's updated_at, old and fresh alike.
+    loops.set_loop_status(old_loop, "released")
+    loops.set_loop_status(fresh_loop, "released")
+
+    ordered = [l["loop_id"] for l in loops.list_loops(app="myapp")]
+    assert ordered == [fresh_loop, old_loop]
+
+
 def test_list_loops_unfiltered_scans_and_sorts_by_recency(ddb_env):
     from agentra.registry import loops
 
