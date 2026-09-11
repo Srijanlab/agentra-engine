@@ -142,11 +142,13 @@ def roll_up_loop(loop_id: str, run_key: str, run_status: str, cost_usd: float) -
     if loop_status == "active" and (doc.get("pipeline") or {}).get("terminal"):
         loop_status = "shipped"  # delivered through pre-prod, awaiting a human Promote
     already_folded = run_key and doc.get("last_run_key") == run_key
+    now = time.time()
     fields = {
         "last_run_key": run_key,
         "last_run_status": run_status,
         "status": loop_status,
-        "updated_at": time.time(),
+        "updated_at": now,
+        "last_run_at": now,  # real activity only -- see list_loops' _recency()
     }
     if not already_folded:
         fields["run_count"] = int(doc.get("run_count", 0)) + 1
@@ -239,6 +241,17 @@ def get_loop(loop_id: str) -> dict | None:
     return {**doc, "runs": runs}
 
 
+def _recency(loop: dict) -> float:
+    """Sort key for 'most recently active' -- last_run_at (stamped only by
+    roll_up_loop, i.e. a real run actually finished) if the loop has ever run,
+    else created_at. Deliberately NOT updated_at: an administrative-only write
+    (set_loop_status/set_loop_pipeline used by a retire/reconcile pass, not a
+    run) also bumps updated_at, which used to shove every loop it touched --
+    days-old and freshly resolved alike -- to the top of the list together
+    (confirmed live: a bulk loop-retirement pass did exactly this)."""
+    return loop.get("last_run_at") or loop.get("created_at") or 0
+
+
 def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[dict]:
     """Stored loop summaries, most recently active first. The app-filtered case
     (the common one -- already tuned once for cost, hence no per-run scan) is a
@@ -248,7 +261,7 @@ def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[d
             return _cache.get_or_set(f"loops:{app}:{limit}", lambda: _query_loops_by_app(app, limit), ttl=15)
         return _cache.get_or_set(f"loops:{limit}", lambda: _scan_loops(limit), ttl=15)
 
-    loops = sorted(_local_loops().values(), key=lambda l: l.get("updated_at", 0), reverse=True)[:limit]
+    loops = sorted(_local_loops().values(), key=_recency, reverse=True)[:limit]
     if app is not None:
         loops = [l for l in loops if l.get("app") == app]
     return loops
@@ -261,8 +274,17 @@ def _scan_loops(limit: int) -> list[dict]:
     from agentra.registry import _dynamo
 
     items = _dynamo.scan_all(_dynamo.table("loops"))
-    items.sort(key=lambda l: l.get("updated_at", 0), reverse=True)
+    items.sort(key=_recency, reverse=True)
     return items[:limit]
+
+
+# The by-app-recency GSI orders by updated_at, not the real-activity-only
+# last_run_at -- fetch a generous window off the index (updated_at is always
+# >= last_run_at, so the true top-`limit` by last_run_at is guaranteed to be
+# inside a window this much larger, short of the whole table getting touched
+# administratively at once) and re-sort by _recency in Python. Table is small
+# (see _scan_loops); re-sorting a few hundred items is free.
+_RECENCY_OVERFETCH = 200
 
 
 def _query_loops_by_app(app: str, limit: int) -> list[dict]:
@@ -271,9 +293,12 @@ def _query_loops_by_app(app: str, limit: int) -> list[dict]:
     from agentra.registry import _dynamo
 
     resp = _dynamo.table("loops").query(
-        IndexName="by-app-recency", KeyConditionExpression=Key("app").eq(app), ScanIndexForward=False, Limit=limit
+        IndexName="by-app-recency", KeyConditionExpression=Key("app").eq(app), ScanIndexForward=False,
+        Limit=max(limit, _RECENCY_OVERFETCH),
     )
-    return [_dynamo.from_item(i) for i in resp.get("Items", [])]
+    items = [_dynamo.from_item(i) for i in resp.get("Items", [])]
+    items.sort(key=_recency, reverse=True)
+    return items[:limit]
 
 
 def _get_loop_doc(loop_id: str) -> dict | None:
