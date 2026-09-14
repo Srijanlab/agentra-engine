@@ -105,6 +105,16 @@ def _apply_app_config(
         return str(exc)
 
 
+def _invalidate_app_cache(name: str) -> None:
+    """Best-effort -- a cache-evict failure must never fail the write it follows."""
+    try:
+        from agentra.server.gh_cache import invalidate_app
+
+        invalidate_app(name)
+    except Exception:
+        logger.warning("gh_cache invalidation failed for app=%r", name, exc_info=True)
+
+
 def _coord_view(name: str, info: dict) -> dict:
     """{"repo_path", "repo_url", "branch"} sourced from the coordination repo --
     a legacy single-repo entry has these at the top level already; a multi-repo
@@ -200,8 +210,6 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
 
 @router.get("/apps")
 async def list_apps() -> dict:
-    import hashlib
-
     from agentra.connectors import github_issues
     from agentra.connectors.github_app import owner_repo_from_url
     from agentra.server.gh_cache import cached
@@ -214,16 +222,15 @@ async def list_apps() -> dict:
         if url and owner_repo_from_url(url):
             repo_url_map[name] = url
 
-    # One GraphQL call for all apps, cached in DynamoDB -- the dashboard polls
-    # this often and the backlog counts don't change second-to-second.
+    # One GraphQL call for all apps, cached -- the dashboard polls this often
+    # and the backlog counts don't change second-to-second. A stable key (not
+    # hashed from the current app roster) so a per-app write can target it via
+    # invalidate_app() without tracking which apps happen to be in it.
     batch: dict[str, dict] = {}
     if repo_url_map:
         urls = sorted(repo_url_map.values())
-        key = "digest_batch:" + hashlib.sha1(",".join(urls).encode()).hexdigest()[:16]
         try:
-            raw = await cached(
-                key, lambda: asyncio.to_thread(github_issues.fetch_app_digest_batch, urls), ttl=90
-            )
+            raw = await cached("digest_batch", lambda: asyncio.to_thread(github_issues.fetch_app_digest_batch, urls))
             url_to_name = {v: k for k, v in repo_url_map.items()}
             batch = {url_to_name[u]: d for u, d in (raw or {}).items() if u in url_to_name}
         except Exception:
@@ -373,7 +380,7 @@ async def get_app(name: str) -> dict:
 
     from agentra.server.gh_cache import cached
 
-    return await cached(f"app_detail:{name}", lambda: _build_app_detail(name, apps[name]), ttl=60)
+    return await cached(f"app_detail:{name}", lambda: _build_app_detail(name, apps[name]))
 
 
 async def _build_app_detail(name: str, info: dict) -> dict:
@@ -451,6 +458,8 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
     )
     if payload.slack_channel_id is not None:
         registry.set_slack_channel(name, payload.slack_channel_id)
+    if payload.objective is not None:
+        _invalidate_app_cache(name)
     _server_log("update", f"app={name!r} configuration updated" + (f" -- push failed: {push_warning}" if push_warning else ""))
     result = {"updated": True, "name": name}
     if push_warning:
@@ -477,6 +486,7 @@ async def submit_backlog_request(name: str, payload: BacklogRequestPayload) -> d
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     registry.dispatch_once()
+    _invalidate_app_cache(name)
     _server_log("queue", f"request_id={request_id} app={name!r} type={payload.type!r} -- submitted from dashboard")
     return {"submitted": True, "request_id": request_id}
 

@@ -56,7 +56,7 @@ async def get_backlog_board(name: str) -> dict:
     full run_ids history (1:N), not just the single most-recent run."""
     from agentra.server.gh_cache import cached
 
-    return await cached(f"backlog_board:{name}", lambda: _build_backlog_board(name), ttl=45)
+    return await cached(f"backlog_board:{name}", lambda: _build_backlog_board(name))
 
 
 async def _build_backlog_board(name: str) -> dict:
@@ -99,7 +99,7 @@ async def get_ready_to_review(name: str) -> dict:
     view, not just whichever run they happen to click into) and its full run_ids history (1:N)."""
     from agentra.server.gh_cache import cached
 
-    return await cached(f"ready_to_review:{name}", lambda: _build_ready_to_review(name), ttl=45)
+    return await cached(f"ready_to_review:{name}", lambda: _build_ready_to_review(name))
 
 
 async def _build_ready_to_review(name: str) -> dict:

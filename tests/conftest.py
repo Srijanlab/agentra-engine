@@ -11,6 +11,8 @@ their own env via monkeypatch and mock the transport.
 
 import os
 
+import pytest
+
 for _var in (
     "AGENTRA_ENGINE_URL",
     "AGENTRA_DYNAMODB_TABLE_PREFIX",
@@ -19,5 +21,19 @@ for _var in (
     "AGENTRA_AWS_REGION",
     "AGENTRA_FIRESTORE_PROJECT",
     "GCP_WORKLOAD_IDENTITY_CONFIG",
+    "AGENTRA_GH_CACHE_TTL_SECONDS",
 ):
     os.environ.pop(_var, None)
+
+
+@pytest.fixture(autouse=True)
+def _clear_gh_cache_inprocess_layer():
+    """The gh_cache in-process dict is a module-level singleton shared by every
+    test in this process -- without a reset, a cached read from one test's
+    (now torn-down) fixtures would leak into the next test's assertions now
+    that local/CLI mode caches too, not just the DynamoDB path."""
+    from agentra.server.gh_cache import _inprocess
+
+    _inprocess.clear()
+    yield
+    _inprocess.clear()
