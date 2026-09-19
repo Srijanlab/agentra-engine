@@ -143,3 +143,36 @@ def test_ready_to_review_attaches_test_report_when_one_exists(tmp_path, monkeypa
     assert items["A tested feature"]["run_ids"] == ["run-abc"]
     assert items["Tested with no report"]["test_report"] is None
     assert items["Tested with no report"]["run_ids"] == ["run-missing"]
+
+
+def test_feature_request_submission_invalidates_the_cached_backlog_board(tmp_path, monkeypatch):
+    """gh_cache issue #15: a write through the dashboard's own submit endpoint
+    must be visible on the very next read, not just after the TTL expires."""
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    client = TestClient(server.app)
+
+    first = client.get("/apps/myapp/backlog-board")
+    assert first.status_code == 200
+    titles_before = {f["description"] for f in first.json()["not_started"]["features"]}
+    assert "A dashboard-submitted idea" not in titles_before
+
+    submit = client.post("/apps/myapp/feature-requests", json={"description": "A dashboard-submitted idea"})
+    assert submit.status_code == 200
+
+    second = client.get("/apps/myapp/backlog-board")
+    assert second.status_code == 200
+    titles_after = {f["description"] for f in second.json()["not_started"]["features"]}
+    assert "A dashboard-submitted idea" in titles_after
+
+
+def test_two_reads_within_the_ttl_return_byte_equivalent_bodies(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    client = TestClient(server.app)
+
+    first = client.get("/apps/myapp/backlog-board")
+    second = client.get("/apps/myapp/backlog-board")
+
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content

@@ -94,6 +94,20 @@ _MEMORY_METHODS = frozenset({
     "run_ids_for", "record_spec", "get_spec",
 })
 
+# The subset of _MEMORY_METHODS that changes GitHub Issues/Projects state for an
+# app -- a successful call here must invalidate that app's dashboard cache
+# entries (server/gh_cache) so the read endpoints don't serve a now-stale view.
+_MEMORY_MUTATION_METHODS = frozenset({
+    "record_known_bug", "clear_known_bug",
+    "clear_resolved_transient_bugs", "clear_resolved_auth_bugs",
+    "record_failure", "record_failure_on_issue",
+    "record_feature_request", "clear_feature_request",
+    "record_code_complete", "record_planned_sub_issues", "record_shipped_to_preprod",
+    "record_tested", "record_released", "mark_status_done", "record_commit",
+    "record_in_progress_branch", "escalate_existing_issue", "set_objective",
+    "append_documentation", "record_human_answer",
+})
+
 
 def _json_safe(value):
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -118,6 +132,25 @@ class _UrlMemory(Memory):
 
     def _repo_url(self) -> str:
         return self._forced_url
+
+
+def _app_name_for_coordination_repo(repo_url: str) -> str | None:
+    for app_name, app in registry.list_apps().items():
+        for spec in registry.core._repo_specs(app_name, app):
+            if spec.role == "coordination" and spec.repo_url == repo_url:
+                return app_name
+    return None
+
+
+def _invalidate_gh_cache_for_rpc(repo_url: str) -> None:
+    try:
+        app_name = _app_name_for_coordination_repo(repo_url)
+        if app_name:
+            from agentra.server.gh_cache import invalidate_app
+
+            invalidate_app(app_name)
+    except Exception:
+        logger.warning("gh_cache invalidation failed for repo_url=%r", repo_url, exc_info=True)
 
 
 def _memory_for(repo_url: str) -> Memory:
@@ -161,6 +194,10 @@ async def rpc(req: RpcRequest) -> dict:
     except Exception as exc:
         logger.warning("rpc %s.%s failed: %s", req.target, req.method, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+
+    if req.target == "memory" and req.method in _MEMORY_MUTATION_METHODS and req.repo_url:
+        _invalidate_gh_cache_for_rpc(req.repo_url)
+
     return {"result": _json_safe(result)}
 
 

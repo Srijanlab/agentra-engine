@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 3367ae4d6b821a86dd8438ec50fb7bc5cafafb7c -->
+<!-- source-sha: 462dc65f9f56af32a6dda9e7ff5072147469302d -->
 # engine — Architecture
 
 ## Purpose
@@ -47,6 +47,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - Per-file 500-line limit + SRP + a subfolder per domain (`CLAUDE.md`): split into mixins/packages rather than growing a file. Single-sentence docstrings, no dead code, no comment paragraphs.
 - A feature that needs a repo checkout or Claude is held with HTTP 503 and a "moving to agentra-loop" message, not partially implemented (`chat.py`, `standup.py`).
 - `_json_safe` coerces dataclasses/`Path` for anything returned over RPC.
+- Any orchestrator-authored comment posted on a GitHub issue (escalation text, markers, etc.) must have its prefix added to `_INTERNAL_COMMENT_PREFIXES` (`connectors/github_issue_lifecycle.py`) in the same change, or `find_unanswered_human_input_comment` can misread it as the human's answer to itself.
 
 ## Gotchas
 - `tests/conftest.py` pops `AGENTRA_ENGINE_URL`, `AGENTRA_DYNAMODB_TABLE_PREFIX`, `AGENTRA_AWS_*`, and GCP vars before anything imports `agentra` — running pytest with those set has previously written test fixtures straight into prod. Tests exercising those paths must monkeypatch and mock the transport themselves.
@@ -59,3 +60,5 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `agents/catalog.py` still describes the full agent pipeline (orchestrator, implementation, deployment, ...) that actually runs in agentra-loop — it is display metadata only.
 - Vercel function `maxDuration` is 30s; any endpoint doing real work must enqueue a job, not block.
 - Open issues still carrying the legacy `status:shipped` label (pre-#38) only get renamed onto `status:awaiting-testing` when `migrate_awaiting_testing_label` actually runs for that repo — via `agentra migrate-labels --repo <path>` or automatically on `POST /apps` registration. Until then they rely on every read path's back-compat matching, not an actual label change.
+- Label membership against a live GitHub issue must go through `_label_names()` — `github_issues.get_issue` returns real REST label objects (`{name: ...}`), not flat strings; only `github_fake` uses flat strings, so a bare `label in issue["labels"]` silently always fails against prod (confirmed live: the escalation-throttle guard reposted the same "Auto-escalated" comment every cycle instead of once, issues #38/#15).
+- `list_loops` sorts by `_recency()` (last_run_at, stamped only when `roll_up_loop` finishes a real run, else created_at) not `updated_at`; the DynamoDB `by-app-recency` GSI is keyed on `updated_at`, so `_query_loops_by_app` overfetches (`_RECENCY_OVERFETCH`=200 rows) off the index and re-sorts in Python — an administrative-only write like `set_loop_status` bumps `updated_at` without being real activity, and used to shove a days-old loop to the top of the list alongside one that just ran.

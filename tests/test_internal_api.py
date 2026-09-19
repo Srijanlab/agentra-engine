@@ -92,6 +92,41 @@ def test_git_token_calls_github_app(client, monkeypatch):
     assert r.json() == {"token": "tok-for-https://github.com/x/y"}
 
 
+def test_memory_mutation_rpc_invalidates_the_app_gh_cache(client, monkeypatch, tmp_path):
+    """A loop-originated write (e.g. record_code_complete) must bust the
+    dashboard's cached views for that app, the same as an engine-side write."""
+    import subprocess
+
+    from agentra.connectors import github_fake
+    from agentra.server import gh_cache
+
+    github_fake.install(monkeypatch=monkeypatch)
+
+    repo = tmp_path / "coord"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True, capture_output=True)
+    repo_url = "https://github.com/acme/coord.git"
+
+    _rpc(client, {"target": "registry", "method": "register_app",
+                 "args": ["demo", str(repo)], "kwargs": {"repo_url": repo_url}})
+
+    async def _producer():
+        return "cached-value"
+
+    import asyncio
+
+    asyncio.run(gh_cache.cached("backlog_board:demo", _producer, ttl=90))
+    assert gh_cache._local.get("backlog_board:demo") is not None
+
+    r = _rpc(client, {
+        "target": "memory", "method": "record_feature_request",
+        "args": ["a loop-recorded feature"], "repo_url": repo_url,
+    })
+    assert r.status_code == 200
+
+    assert gh_cache._local.get("backlog_board:demo") is None
+
+
 def test_run_log_writes_to_dynamodb(client, monkeypatch):
     import boto3
     from moto import mock_aws
