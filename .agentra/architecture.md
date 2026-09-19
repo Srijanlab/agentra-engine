@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: ca79d75e1feb876387f2edfa7dcd0039e1a14832 -->
+<!-- source-sha: 012e8fbec738381e22fcb997f1e064b4d7368ad4 -->
 # engine — Architecture
 
 ## Purpose
@@ -15,7 +15,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `agentra` console-script CLI (`agentra.cli:main`).
 
 ## Module map
-- `agentra/server/` — the FastAPI app. `__init__.py` wires middleware + all routers; `auth.py` (Firebase sign-in gate, CORS regex, public-path list); `routes/` (triggers, internal, apps, schedule, loops, systems, connectors, chat, standup, human_input, review); `state.py` (in-process `_active_runs`/`_app_locks`); `gh_cache.py`; `utils.py`.
+- `agentra/server/` — the FastAPI app. `__init__.py` wires middleware + all routers; `auth.py` (Firebase sign-in gate, CORS regex, public-path list); `routes/` (triggers, internal, apps, schedule, loops, systems, connectors, chat, standup, human_input, review); `state.py` (in-process `_active_runs`/`_app_locks`); `gh_cache/` (read-through TTL cache for dashboard GitHub-backed reads: `_inprocess` dict over a durable store — `_dynamo_store` in cloud mode, `_local_store` JSON under `AGENTRA_HOME/gh-cache/` otherwise; `_ttl`, `_entry.FetchResult` for ETag-aware producers); `utils.py`.
 - `agentra/registry/` — multi-app registry + durable work queue. `core.py` (apps, pause, llm-backend, `RepoSpec` resolution, DynamoDB init, Slack-thread map), `jobs.py` (`cycle|promote|prod_debug|human_resume` queue the loop drains), `runs.py`, `loops.py`, `inbox.py` (request submit/dispatch), `scheduler/` (read-only `compute_schedule_status` / `ScheduleStatus` — when an app is next due for a scheduled cycle), `_dynamo.py`, `_cache.py`. The module object is replaced by a proxy that delegates `_DELEGATED_NAMES` to `core`.
 - `agentra/memory/` — per-repo product state. `Memory` = 5 mixins (issues, issue_lifecycle, features, settings, specs); GitHub Issues/Projects-backed. `core.py` holds label constants (incl. the `status:awaiting-testing` label and its legacy `status:shipped` alias) + failure-triage regexes (transient / unfixable-by-agentra / login-required) + spec-header helpers + `pipeline_stages()` (the dashboard's single ordered list of pipeline columns).
 - `agentra/connectors/` — GitHub App (`github_app.py` mints a per-`owner/repo` installation token), issues/pulls/projects/variables/issue-lifecycle mutations (incl. `migrate_awaiting_testing_label`, the one-time label-rename migration), `github_fake.py`, Slack (`slack.py` + `slack_allowlist.py`).
@@ -24,7 +24,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `agentra/proxy/` — standalone FastAPI app translating the Anthropic Messages API to NVIDIA NIM chat-completions (the `nim` LLM backend).
 - `agentra/` root — `cli.py` (env / objective / apps / submit / dispatch / migrate-labels / serve), `environments.py` (per-app pipeline config stored in GitHub Actions Variables), `git_ops.py`, `artifacts.py`, `change_risk.py`, `ranking.py`, `chat_store.py`, `urls.py`, `langfuse_api.py`, `observability.py`, `dev_seed.py`.
 - `api/index.py` — Vercel entrypoint; serves a diagnostic fallback app if `agentra.server` import fails.
-- `tests/` — pytest suite; `conftest.py` strips prod-pointing env vars at import.
+- `tests/` — pytest suite; `conftest.py` strips prod-pointing env vars at import and clears the gh_cache in-process layer around every test.
 
 ## Invariants
 - The engine never executes a cycle / promotion / prod-debug / resume. Trigger endpoints call `registry.enqueue_job(...)`; agentra-loop claims and runs it. No `claude-agent-sdk` dependency.
@@ -36,6 +36,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - `/health` and `/healthz` are identical and must never fail on a backend blip (catch-all -> `{status: degraded}`). Both also return `commit` (deployed `VERCEL_GIT_COMMIT_SHA`, fallback `AGENTRA_BUILD_SHA`, else `""`) so the loop's `verify_pre_prod` can confirm a pre-prod deploy has caught up.
 - The pre-prod-merged-awaiting-verification status label was renamed `status:shipped` -> `status:awaiting-testing` (GitHub issue #38); every write path emits the new name and strips the old, but every read path (`_at_awaiting_testing_stage`, `issue_status`, `_items_at_stage`) still matches both, so a repo never carrying the new label doesn't silently lose items mid-pipeline.
 - A loop left `active`/`waiting_for_human`/`escalated` whose tracked issue is later closed by a human is otherwise orphaned forever: `_reconcile_closed_issue_loops` (run for every app on each `/trigger/cron` tick) marks it `released` with pipeline `terminal=True` so no later scheduled cycle re-binds to it (agentra#20/#25).
+- Dashboard GitHub-backed reads (`/apps`, `/apps/{name}`, backlog board, ready-to-review) go through `gh_cache.cached()`; if the producer raises and any prior entry exists (however stale), that value is served instead of a 5xx. A successful `/internal/rpc` memory call in `_MEMORY_MUTATION_METHODS` invalidates the owning app's entries via `invalidate_app`.
 
 ## Conventions
 - Every registry/memory storage function branches `if core._ddb is not None: <dynamo> else: <local JSON>`; new state follows the same dual-path shape with a local fallback for tests/dev.
@@ -48,6 +49,7 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - A feature that needs a repo checkout or Claude is held with HTTP 503 and a "moving to agentra-loop" message, not partially implemented (`chat.py`, `standup.py`).
 - `_json_safe` coerces dataclasses/`Path` for anything returned over RPC.
 - Any orchestrator-authored comment posted on a GitHub issue (escalation text, markers, etc.) must have its prefix added to `_INTERNAL_COMMENT_PREFIXES` (`connectors/github_issue_lifecycle.py`) in the same change, or `find_unanswered_human_input_comment` can misread it as the human's answer to itself.
+- New dashboard read endpoint over GitHub data: wrap the builder in `gh_cache.cached(key, producer)` with no explicit `ttl` (TTL is global via `AGENTRA_GH_CACHE_TTL_SECONDS`), and use a key `invalidate_app()` covers (`app_detail:{app}`, `backlog_board:{app}`, `ready_to_review:{app}`, `digest_batch`) or extend that list. Any write that changes what those views show must call `invalidate_app` (routes use the best-effort `_invalidate_app_cache`); a new mutating `Memory` method exposed to the loop must also be added to `_MEMORY_MUTATION_METHODS`.
 
 ## Gotchas
 - `tests/conftest.py` pops `AGENTRA_ENGINE_URL`, `AGENTRA_DYNAMODB_TABLE_PREFIX`, `AGENTRA_AWS_*`, and GCP vars before anything imports `agentra` — running pytest with those set has previously written test fixtures straight into prod. Tests exercising those paths must monkeypatch and mock the transport themselves.
@@ -62,3 +64,6 @@ agentra-engine is the API + state-authority service of the agentra autonomous pr
 - Open issues still carrying the legacy `status:shipped` label (pre-#38) only get renamed onto `status:awaiting-testing` when `migrate_awaiting_testing_label` actually runs for that repo — via `agentra migrate-labels --repo <path>` or automatically on `POST /apps` registration. Until then they rely on every read path's back-compat matching, not an actual label change.
 - Label membership against a live GitHub issue must go through `_label_names()` — `github_issues.get_issue` returns real REST label objects (`{name: ...}`), not flat strings; only `github_fake` uses flat strings, so a bare `label in issue["labels"]` silently always fails against prod (confirmed live: the escalation-throttle guard reposted the same "Auto-escalated" comment every cycle instead of once, issues #38/#15).
 - `list_loops` sorts by `_recency()` (last_run_at, stamped only when `roll_up_loop` finishes a real run, else created_at) not `updated_at`; the DynamoDB `by-app-recency` GSI is keyed on `updated_at`, so `_query_loops_by_app` overfetches (`_RECENCY_OVERFETCH`=200 rows) off the index and re-sorts in Python — an administrative-only write like `set_loop_status` bumps `updated_at` without being real activity, and used to shove a days-old loop to the top of the list alongside one that just ran.
+- `gh_cache` now caches off cloud mode too (local JSON under `AGENTRA_HOME/gh-cache/`), no longer a no-op without DynamoDB — dev/CLI/test reads can be stale for up to the TTL (default 45s, clamped to [10, 300]), and the in-process dict is a module singleton that tests must clear (`conftest.py` does it autouse). The old per-call `ttl=` args and hashed `digest_batch:<sha>` key are gone; `/apps` uses the single key `digest_batch`, so any app write busts the digest for all apps.
+- Stale-on-error masks GitHub outages: a raising producer returns the last cached value with only a logged warning, and durable-store read/write failures are swallowed. Only a key with no prior entry surfaces the error, so a route's own 404/validation must run before `cached()`.
+- Cache invalidation is best-effort and RPC-side is keyed by coordination `repo_url` -> app name; a mutation on an unregistered/mismatched repo URL, or a mutating memory method missing from `_MEMORY_MUTATION_METHODS`, leaves the dashboard stale until TTL expiry.
