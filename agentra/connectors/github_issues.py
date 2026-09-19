@@ -283,6 +283,31 @@ def _fetch_batch_for_token(token: str, repo_urls: list[str], closed_limit: int) 
     return result
 
 
+def open_sub_issue_count(repo_url: str, issue_number: int) -> int:
+    """How many of `issue_number`'s sub-issues (GitHub's native sub-issue relationship,
+    filed via create_sub_issue) are still open. 0 for an issue with no sub-issues at all.
+    Used to stop a multi-part feature's parent from being marked code-complete/shipped
+    while parts are still outstanding (issue #38: the parent reached status:awaiting-testing
+    while its own filed-but-unstarted sub-issues, #40/#41, sat untouched for days)."""
+    owner, name = _owner_repo_or_raise(repo_url).split("/", 1)
+    data = _graphql(
+        repo_url,
+        """
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            issue(number: $number) { subIssuesSummary { total completed } }
+          }
+        }
+        """,
+        {"owner": owner, "name": name, "number": issue_number},
+    )
+    issue = data["repository"].get("issue")
+    if issue is None:
+        return 0
+    summary = issue["subIssuesSummary"]
+    return summary["total"] - summary["completed"]
+
+
 def list_in_progress_features(repo_url: str, labels: list[str] | None = None) -> list[dict]:
     """Open issues that already have at least one sub-issue."""
     owner, name = _owner_repo_or_raise(repo_url).split("/", 1)
@@ -447,6 +472,7 @@ __all__ = [
     "list_closed_issues",
     "create_sub_issue",
     "list_in_progress_features",
+    "open_sub_issue_count",
     "ensure_labels",
     "add_labels",
     "remove_label",

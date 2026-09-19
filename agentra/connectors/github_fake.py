@@ -90,6 +90,15 @@ class FakeGitHubBackend:
         results.sort(key=lambda i: i.get("closed_at") or "", reverse=True)
         return [dict(i) for i in results[:limit]]
 
+    def open_sub_issue_count(self, repo_url: str, issue_number: int) -> int:
+        issue = self.issues[repo_url].get(issue_number)
+        if not issue or not issue.get("sub_issue_numbers"):
+            return 0
+        return sum(
+            1 for n in issue["sub_issue_numbers"]
+            if self.issues[repo_url].get(n, {}).get("state") != "closed"
+        )
+
     def list_in_progress_features(self, repo_url: str, labels: list[str] | None = None) -> list[dict]:
         results = [
             i
@@ -395,6 +404,7 @@ def install(backend: FakeGitHubBackend | None = None, monkeypatch=None, persist_
         (github_issues, "list_open_issues", backend.list_open_issues),
         (github_issues, "list_closed_issues", backend.list_closed_issues),
         (github_issues, "list_in_progress_features", backend.list_in_progress_features),
+        (github_issues, "open_sub_issue_count", backend.open_sub_issue_count),
         (github_issues, "close_issue", backend.close_issue),
         (github_issues, "mark_shipped", backend.mark_shipped),
         (github_issues, "mark_code_complete", backend.mark_code_complete),

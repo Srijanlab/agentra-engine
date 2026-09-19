@@ -14,8 +14,18 @@ HTTP calls monkeypatched.
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from agentra.connectors import github_issues
 from agentra.memory import Memory
+
+
+@pytest.fixture(autouse=True)
+def _no_open_sub_issues_by_default(monkeypatch):
+    """Every mark_code_complete call site now checks open_sub_issue_count first
+    (issue #38) -- default to "none open" so these pre-existing tests keep
+    exercising the happy path; the dedicated gating tests below override this."""
+    monkeypatch.setattr(github_issues, "open_sub_issue_count", lambda *a, **k: 0)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -188,7 +198,7 @@ def test_record_code_complete_creates_and_marks_shipped_a_fresh_issue_for_a_self
     assert "Shipped-Run-ID: run42" in marked["body_suffix"]
     assert "Shipped-Commit: abc1234" in marked["body_suffix"]
     assert "Shipped-Session-ID:" not in marked["body_suffix"]  # not passed for this call
-    assert result == {"issue_number": 99, "board_issue_number": 99}
+    assert result == {"issue_number": 99, "board_issue_number": 99, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_stamps_session_id_when_given(tmp_path, monkeypatch):
@@ -229,7 +239,24 @@ def test_record_code_complete_marks_shipped_the_originating_feature_queue_issue_
 
     assert marked["issue_number"] == 42
     assert "Shipped-Run-ID: run7" in marked["body_suffix"]
-    assert result == {"issue_number": 42, "board_issue_number": 42}
+    assert result == {"issue_number": 42, "board_issue_number": 42, "blocked_by_open_sub_issues": 0}
+
+
+def test_record_code_complete_resolves_id_with_open_sub_issues_does_not_mark_code_complete(tmp_path, monkeypatch):
+    """GitHub issue #38: resolves_id can name a parent tracking issue that already
+    has open sub-issues filed against it (e.g. a resumed cycle that forgot to pass
+    sub_feature_of) -- must not mark it code-complete out from under them."""
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(
+        github_issues, "mark_code_complete", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not mark code-complete while sub-issues are open"))
+    )
+    monkeypatch.setattr(github_issues, "open_sub_issue_count", lambda repo_url, issue_number: 2)
+
+    result = mem.record_code_complete("Engine part", commit_sha="def5678", run_id="run7", resolves_id="38")
+
+    assert result == {"issue_number": 38, "board_issue_number": 38, "blocked_by_open_sub_issues": 2}
 
 
 def test_record_code_complete_with_known_bug_issue_reuses_it_without_a_second_shipped_comment(tmp_path, monkeypatch):
@@ -255,7 +282,7 @@ def test_record_code_complete_with_known_bug_issue_reuses_it_without_a_second_sh
 
     result = mem.record_code_complete("Standup dedup fix", commit_sha="abc1234", run_id="run21", known_bug_issue="21")
 
-    assert result == {"issue_number": 21, "board_issue_number": 21}
+    assert result == {"issue_number": 21, "board_issue_number": 21, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_with_sub_feature_of_creates_a_linked_sub_issue(tmp_path, monkeypatch):
@@ -286,7 +313,7 @@ def test_record_code_complete_with_sub_feature_of_creates_a_linked_sub_issue(tmp
     # the whole feature.
     assert closed == [55]
     assert marked == [10]
-    assert result == {"issue_number": 55, "board_issue_number": 10}
+    assert result == {"issue_number": 55, "board_issue_number": 10, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_sub_feature_of_with_more_parts_expected_leaves_the_parent_open_and_unmarked(tmp_path, monkeypatch):
@@ -328,6 +355,27 @@ def test_record_code_complete_sub_feature_of_without_more_parts_marks_the_parent
     assert marked == [(10, "All parts code complete (run run9).")]
 
 
+def test_record_code_complete_sub_feature_of_without_more_parts_but_sibling_still_open_does_not_mark_the_parent(tmp_path, monkeypatch):
+    """GitHub issue #38: closing THIS part's sub-issue doesn't mean every OTHER
+    planned part is done -- if the parent still has an open sibling sub-issue,
+    more_parts_expected=False must NOT be trusted to advance the parent's status."""
+    repo = _init_repo(tmp_path / "repo")
+    mem = Memory(repo)
+
+    monkeypatch.setattr(github_issues, "create_sub_issue", lambda *a, **k: {"number": 55, "title": "Final part?"})
+    closed = []
+    monkeypatch.setattr(github_issues, "close_issue", lambda repo_url, issue_number, **k: closed.append(issue_number))
+    monkeypatch.setattr(
+        github_issues, "mark_code_complete", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not mark the parent while a sibling part is still open"))
+    )
+    monkeypatch.setattr(github_issues, "open_sub_issue_count", lambda repo_url, issue_number: 1 if issue_number == 10 else 0)
+
+    result = mem.record_code_complete("Final part?", run_id="run9", sub_feature_of="10", more_parts_expected=False)
+
+    assert closed == [55]  # this part's own sub-issue still closes
+    assert result == {"issue_number": 55, "board_issue_number": 10, "blocked_by_open_sub_issues": 1}
+
+
 def test_record_code_complete_starts_a_multi_part_feature_with_a_fresh_open_parent(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     mem = Memory(repo)
@@ -349,7 +397,7 @@ def test_record_code_complete_starts_a_multi_part_feature_with_a_fresh_open_pare
     assert created_issues == ["Big new feature"]  # the fresh parent, never closed
     assert closed == [21]  # only the first part's sub-issue
     assert marked == []  # parent not fully shipped yet
-    assert result == {"issue_number": 21, "board_issue_number": 20}
+    assert result == {"issue_number": 21, "board_issue_number": 20, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_reuses_the_existing_tracking_issue_for_the_branch(tmp_path, monkeypatch):
@@ -384,7 +432,7 @@ def test_record_code_complete_reuses_the_existing_tracking_issue_for_the_branch(
 
     assert sub_issue_calls == {"parent": 92}
     assert closed == [97]  # only the sub-issue -- #92 itself stays open, not orphaned
-    assert result == {"issue_number": 97, "board_issue_number": 92}
+    assert result == {"issue_number": 97, "board_issue_number": 92, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_creates_a_fresh_parent_when_the_branch_is_genuinely_untracked(tmp_path, monkeypatch):
@@ -410,7 +458,7 @@ def test_record_code_complete_creates_a_fresh_parent_when_the_branch_is_genuinel
 
     assert created_issues == ["Brand new multi-part feature"]
     assert closed == [31]
-    assert result == {"issue_number": 31, "board_issue_number": 30}
+    assert result == {"issue_number": 31, "board_issue_number": 30, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_starts_a_multi_part_feature_using_the_feature_queue_issue_as_parent(tmp_path, monkeypatch):
@@ -434,7 +482,7 @@ def test_record_code_complete_starts_a_multi_part_feature_using_the_feature_queu
 
     assert sub_issue_calls == {"parent": 7}
     assert closed == [21]  # the sub-issue only -- issue #7 (the feature_queue entry) stays open
-    assert result == {"issue_number": 21, "board_issue_number": 7}
+    assert result == {"issue_number": 21, "board_issue_number": 7, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_marks_a_similar_open_bug_shipped_instead_of_orphaning_a_fresh_issue(tmp_path, monkeypatch):
@@ -467,7 +515,7 @@ def test_record_code_complete_marks_a_similar_open_bug_shipped_instead_of_orphan
     result = mem.record_code_complete("Runs within a loop are listed oldest-first, not newest-first -- fixed", run_id="run1")
 
     assert marked["issue_number"] == 13
-    assert result == {"issue_number": 13, "board_issue_number": 13}
+    assert result == {"issue_number": 13, "board_issue_number": 13, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_still_creates_a_fresh_issue_when_nothing_similar_is_open(tmp_path, monkeypatch):
@@ -486,7 +534,7 @@ def test_record_code_complete_still_creates_a_fresh_issue_when_nothing_similar_i
     result = mem.record_code_complete("Brand new feature nobody asked for yet", run_id="run1")
 
     assert created["title"] == "Brand new feature nobody asked for yet"
-    assert result == {"issue_number": 99, "board_issue_number": 99}
+    assert result == {"issue_number": 99, "board_issue_number": 99, "blocked_by_open_sub_issues": 0}
 
 
 def test_record_code_complete_is_a_noop_without_a_github_remote(tmp_path, monkeypatch):

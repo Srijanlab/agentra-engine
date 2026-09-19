@@ -307,6 +307,40 @@ def test_list_in_progress_features_filters_to_issues_with_sub_issues(monkeypatch
     ]
 
 
+def test_open_sub_issue_count_returns_total_minus_completed(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(variables=json["variables"])
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = None
+        resp.json.return_value = {
+            "data": {"repository": {"issue": {"subIssuesSummary": {"total": 3, "completed": 1}}}}
+        }
+        return resp
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    result = github_issues.open_sub_issue_count("https://github.com/acme/app.git", 38)
+
+    assert captured["variables"] == {"owner": "acme", "name": "app", "number": 38}
+    assert result == 2
+
+
+def test_open_sub_issue_count_is_zero_for_an_issue_with_no_sub_issues(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = None
+        resp.json.return_value = {
+            "data": {"repository": {"issue": {"subIssuesSummary": {"total": 0, "completed": 0}}}}
+        }
+        return resp
+
+    monkeypatch.setattr(github_issues.httpx, "post", fake_post)
+
+    assert github_issues.open_sub_issue_count("https://github.com/acme/app.git", 1) == 0
+
+
 def test_ensure_labels_creates_only_the_missing_ones(monkeypatch):
     created = []
 

@@ -163,6 +163,7 @@ class MemoryFeaturesMixin:
             + (f"Shipped-Commit: {commit_sha}\n" if commit_sha else "")
             + (f"Shipped-Session-ID: {session_id}\n" if session_id else "")
         )
+        blocked_by_open_sub_issues = 0
         try:
             from agentra.connectors import github_issues
 
@@ -172,7 +173,16 @@ class MemoryFeaturesMixin:
                 issue_number = issue["number"]
                 github_issues.close_issue(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 if not more_parts_expected:
-                    github_issues.mark_code_complete(repo_url, parent_number, comment=f"All parts code complete (run {run_id})." if run_id else "All parts code complete.")
+                    # GitHub issue #38: closing the sub-issue filed just above doesn't mean
+                    # every OTHER planned part is done -- without this check, a feature with
+                    # N parts could be marked code-complete (and later shipped) the moment any
+                    # ONE call happened to say more_parts_expected=False, regardless of how
+                    # many sibling sub-issues were still open (confirmed live: #38 reached
+                    # status:awaiting-testing while its own filed sub-issues #40/#41 sat
+                    # untouched for days).
+                    blocked_by_open_sub_issues = github_issues.open_sub_issue_count(repo_url, parent_number)
+                    if not blocked_by_open_sub_issues:
+                        github_issues.mark_code_complete(repo_url, parent_number, comment=f"All parts code complete (run {run_id})." if run_id else "All parts code complete.")
                 board_issue_number = parent_number
 
             elif more_parts_expected:
@@ -196,7 +206,12 @@ class MemoryFeaturesMixin:
 
             elif resolves_id and resolves_id.isdigit():
                 issue_number = int(resolves_id)
-                github_issues.mark_code_complete(repo_url, issue_number, comment=note, body_suffix=body_suffix)
+                # Same guard as above: resolves_id can name a parent tracking issue that
+                # already has open sub-issues filed against it (e.g. a resumed cycle that
+                # forgot sub_feature_of) -- never mark it code-complete out from under them.
+                blocked_by_open_sub_issues = github_issues.open_sub_issue_count(repo_url, issue_number)
+                if not blocked_by_open_sub_issues:
+                    github_issues.mark_code_complete(repo_url, issue_number, comment=note, body_suffix=body_suffix)
                 board_issue_number = issue_number
 
             elif known_bug_issue and known_bug_issue.isdigit():
@@ -220,7 +235,13 @@ class MemoryFeaturesMixin:
             logger.error("record_code_complete: failed to record code-complete feature %r on %s", feature, repo_url, exc_info=True)
             return None
 
-        return {"issue_number": issue_number, "board_issue_number": board_issue_number}
+        return {
+            "issue_number": issue_number,
+            "board_issue_number": board_issue_number,
+            # >0 when board_issue_number has open sub-issues left and was therefore NOT
+            # marked status:code_complete despite this call otherwise being "the last part".
+            "blocked_by_open_sub_issues": blocked_by_open_sub_issues,
+        }
 
     def record_planned_sub_issues(self, parent_number: int, briefs: list[str]) -> list[int]:
         """File the not-yet-built parts of a multi-part feature as OPEN sub-issues of
