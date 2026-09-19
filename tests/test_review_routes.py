@@ -66,6 +66,11 @@ def test_backlog_board_buckets_not_started_in_progress_and_code_complete(tmp_pat
     code_complete_bug = github_issues.create_issue(repo_url, "A code-complete bug", "body", labels=["bug", "agentra"])
     github_issues.mark_code_complete(repo_url, code_complete_bug["number"])
 
+    awaiting_testing_feature = github_issues.create_issue(
+        repo_url, "A feature merged to pre-prod", "body", labels=["feature", "agentra"]
+    )
+    mem.record_shipped_to_preprod([str(awaiting_testing_feature["number"])])
+
     client = TestClient(server.app)
     response = client.get("/apps/myapp/backlog-board")
     assert response.status_code == 200
@@ -84,6 +89,9 @@ def test_backlog_board_buckets_not_started_in_progress_and_code_complete(tmp_pat
 
     code_complete_titles = {i["diagnosis"] for i in body["code_complete"]}
     assert "A code-complete bug" in code_complete_titles
+
+    awaiting_testing_titles = {i["description"] for i in body["awaiting_testing"]}
+    assert "A feature merged to pre-prod" in awaiting_testing_titles
 
     not_started_bug = next(b for b in body["not_started"]["bugs"] if b["diagnosis"] == "A fresh bug")
     assert not_started_bug["run_ids"] == []

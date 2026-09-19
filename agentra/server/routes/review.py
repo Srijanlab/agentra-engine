@@ -63,31 +63,38 @@ async def _build_backlog_board(name: str) -> dict:
     repo = _repo_or_404(name)
     mem = Memory(repo)
 
-    bugs, features, in_progress_single, in_progress_multi, code_complete = await asyncio.gather(
+    bugs, features, in_progress_single, in_progress_multi, code_complete, awaiting_testing = await asyncio.gather(
         asyncio.to_thread(mem.known_bugs),
         asyncio.to_thread(mem.feature_queue),
         asyncio.to_thread(mem.in_progress_items),
         asyncio.to_thread(mem.in_progress_features),
         asyncio.to_thread(mem.code_complete_items),
+        asyncio.to_thread(mem.shipped_pending_test_items),
     )
     in_progress_ids = {item["external_id"] for item in in_progress_single if item.get("external_id")}
     not_started_bugs = [b for b in bugs if not b.get("needs_human") and b.get("external_id") not in in_progress_ids]
     not_started_features = [f for f in features if f.get("external_id") not in in_progress_ids]
 
     (
-        not_started_bugs, not_started_features, in_progress_single, in_progress_multi, code_complete,
+        not_started_bugs, not_started_features, in_progress_single, in_progress_multi, code_complete, awaiting_testing,
     ) = await asyncio.gather(
         _attach_run_ids_to_all(mem, not_started_bugs),
         _attach_run_ids_to_all(mem, not_started_features),
         _attach_run_ids_to_all(mem, in_progress_single),
         _attach_run_ids_to_all(mem, in_progress_multi),
         _attach_run_ids_to_all(mem, code_complete),
+        _attach_run_ids_to_all(mem, awaiting_testing),
     )
 
     return {
         "not_started": {"bugs": not_started_bugs, "features": not_started_features},
         "in_progress": {"single_part": in_progress_single, "multi_part": in_progress_multi},
         "code_complete": code_complete,
+        # Merged to pre-prod, not yet live-verified (status:awaiting-testing,
+        # née status:shipped) -- without this bucket an item at this stage
+        # (e.g. issue #38 itself) was invisible on the board entirely, between
+        # code_complete and the separate /ready-to-review (status:tested) tab.
+        "awaiting_testing": awaiting_testing,
     }
 
 
