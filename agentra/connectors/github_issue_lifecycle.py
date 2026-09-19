@@ -17,6 +17,18 @@ _SPEC_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
 # Human-in-the-loop escalation (GitHub issue #34): resume-correlation data
 _HUMAN_INPUT_MARKER = "Human-Input-Required (agentra):"
+# escalate_existing_issue's own diagnosis comment -- distinct from _HUMAN_INPUT_MARKER
+# (the structured resume-correlation comment posted alongside it). Must be excluded
+# from find_unanswered_human_input_comment's scan same as every other internal
+# marker: it doesn't start with _HUMAN_INPUT_MARKER, so once *any* marker has ever
+# appeared earlier in the thread, every later escalation's own diagnosis comment
+# was being misread as the human's answer to itself -- an escalation would
+# "answer" itself with its own blocking diagnosis and immediately resume into the
+# same wall, forever (confirmed live on agentra#38: dozens of self-answered
+# escalate/resume bounces over many hours -- this is the engine-side reconcile
+# copy of the file; _reconcile_human_input_for_app runs here, not on the loop, so
+# fixing only the loop's copy of this file left the bug fully live in production).
+_ESCALATION_DIAGNOSIS_PREFIX = "Blocked, needs human input"
 _HUMAN_INPUT_APP_RE = re.compile(r"^App: (\S+)$", re.MULTILINE)
 _HUMAN_INPUT_RUN_ID_RE = re.compile(r"^Run-ID: (\S+)$", re.MULTILINE)
 _HUMAN_INPUT_BRANCH_RE = re.compile(r"^Branch: (\S+)$", re.MULTILINE)
@@ -194,6 +206,7 @@ _INTERNAL_COMMENT_PREFIXES = (
     _SPEC_MARKER,
     "Commit:",
     _HUMAN_INPUT_MARKER,
+    _ESCALATION_DIAGNOSIS_PREFIX,
     "Answered:",
 )
 
@@ -227,7 +240,7 @@ def record_human_answer(repo_url: str, issue_number: int, answer: str, resumed_r
 
 def escalate_existing_issue(repo_url: str, issue_number: int, run_id: str, full_diagnosis: str, labels: list[str]) -> None:
     """Escalates directly on the issue already tracking this work -- comments the blocking question and adds `labels` (typically just the needs_human label) -- instead of filing a separate needs_human issue for work that already has a home (confirmed live: issues #79, #80, #81, same interrupted item, three separate escalation issues, when the question should have just landed on the tracking issue itself)."""
-    add_comment(repo_url, issue_number, f"Blocked, needs human input (run {run_id}):\n\n{full_diagnosis}")
+    add_comment(repo_url, issue_number, f"{_ESCALATION_DIAGNOSIS_PREFIX} (run {run_id}):\n\n{full_diagnosis}")
     add_labels(repo_url, issue_number, labels)
 
 
