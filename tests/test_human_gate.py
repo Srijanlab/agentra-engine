@@ -183,6 +183,29 @@ def test_a_later_different_run_after_the_human_answers_raises_a_fresh_gate(tmp_p
     assert len(slack_calls) == 2
 
 
+def test_need_human_label_alone_is_not_treated_as_already_announced(tmp_path, monkeypatch):
+    """Confirmed live 2026-09-20: issue #50 carried need_human (set by an
+    unrelated throttle escalation that never touched loop state or Slack) with
+    no Slack thread recorded at all, and the loop's own status stayed "active".
+    The label alone must not suppress the actual announcement."""
+    mem = _setup(tmp_path, monkeypatch)
+    slack_calls = _slack_capture(monkeypatch)
+
+    issue_number = mem.record_known_bug("run0", "high", "thing", "tbd", needs_human=True)  # label set, no Slack ever
+    loop_id = registry.bind_loop("myapp", issue_number, kind="feature")
+    registry.record_run(
+        "run1", app="myapp", loop_id=loop_id, status="completed",
+        summary="HUMAN_INPUT_REQUIRED: someone needs to look at why it's stuck",
+    )
+
+    gate = human_gate.maybe_raise("run1")
+
+    assert gate is not None
+    assert gate["slack_posted"] is True
+    assert len(slack_calls) == 1
+    assert registry.slack_thread_for("myapp", issue_number) == "1234.5678"
+
+
 def test_slack_failure_is_retried_by_the_next_sweep_not_the_label(tmp_path, monkeypatch):
     mem = _setup(tmp_path, monkeypatch)
 

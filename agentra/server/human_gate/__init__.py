@@ -100,16 +100,28 @@ def _raise(app_name: str, run_key: str, run: dict, error: str) -> dict | None:
         label_set = True
         human_input = {}  # a brand-new gate -- nothing stale to carry over
     elif not same_run_retry:
-        if mem.human_input_pending(issue_number):
-            return None  # a different, still-unanswered gate is already open on this issue -- skip entirely
-        # A fresh gate on an issue with no still-open ask (never gated, or a
-        # prior gate was already answered and cleared): comment + label, and
-        # start human_input clean -- reusing the old dict here would leak a
-        # stale slack_thread_ts from an already-answered prior gate and wrongly
-        # suppress this new gate's own Slack post.
-        mem.escalate_existing_issue(issue_number, run_key, f"{TOKEN}: {question}")
+        pending = mem.human_input_pending(issue_number)
+        # The need_human label alone isn't proof this issue was ever actually
+        # announced -- confirmed live: issue #50 carried need_human (set by an
+        # unrelated throttle escalation that never touched loop state) with no
+        # Slack thread at all, and the loop's own status stayed "active", never
+        # "waiting_for_human". A recorded Slack thread is the one signal that
+        # proves the announcement actually happened.
+        already_announced = pending and registry.slack_thread_for(app_name, issue_number) is not None
+        if already_announced:
+            return None  # a different, already-announced gate is open on this issue -- skip entirely
+        if not pending:
+            # Fresh gate on an issue with no still-open ask (never gated, or a
+            # prior gate was already answered and cleared): comment + label,
+            # and start human_input clean -- reusing the old dict here would
+            # leak a stale slack_thread_ts from an already-answered prior gate
+            # and wrongly suppress this new gate's own Slack post.
+            mem.escalate_existing_issue(issue_number, run_key, f"{TOKEN}: {question}")
+            human_input = {}
+        # else: pending but never announced -- label's already there (don't
+        # re-comment), but keep any existing loop.human_input and fall through
+        # to actually post to Slack below, which is the part that never ran.
         label_set = True
-        human_input = {}
     # else: same_run_retry with no Slack post yet -- keep the existing
     # human_input as-is and only retry the Slack step below.
 
