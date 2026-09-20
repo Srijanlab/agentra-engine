@@ -34,7 +34,7 @@ Full list with placeholders: [`.env.example`](.env.example).
 | `AGENTRA_AWS_ACCESS_KEY_ID` / `AGENTRA_AWS_SECRET_ACCESS_KEY` | the DynamoDB IAM user's keys |
 | `FIREBASE_PROJECT_ID` | Firebase project id (for the Google sign-in check) |
 | `AGENTRA_ALLOWED_EMAILS` | your email(s), comma-separated |
-| `AGENTRA_INTERNAL_TOKEN` | shared bearer for `/internal/*` (same value in the loop's secret) |
+| `AGENTRA_INTERNAL_TOKEN` | shared bearer for `/internal/*` (same value in the loop's secret); on pre-prod use a distinct value, never the prod one (see `docs/deployment.md`) |
 | `GITHUB_APP_ID` | `agentra-orchestrator` App ID (`4545406`) |
 | `GITHUB_APP_PRIVATE_KEY` | the App's `.pem` contents (multi-line) |
 | `GITHUB_TOKEN` | optional PAT fallback (repo scope) |

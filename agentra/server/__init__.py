@@ -95,14 +95,17 @@ def _run_report_path(run_key: str) -> Path | None:
     return report_path(repo, run_key)
 
 
+def _build_commit() -> str:
+    """Deployed git SHA (Vercel-injected, else AGENTRA_BUILD_SHA), or "" when unknown."""
+    return os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("AGENTRA_BUILD_SHA") or ""
+
+
 @app.get("/", response_model=None)
 async def dashboard() -> FileResponse | dict:
+    """Serve the dashboard shell, or an API-only health payload when it is not built."""
     index = WEB_DIST / "index.html"
     if not index.exists():
-        return {
-            "error": "dashboard not built",
-            "hint": "run `npm install && npm run build` in agentra/web/, or set AGENTRA_WEB_DIST",
-        }
+        return {"status": "ok", "service": "agentra-engine", "commit": _build_commit()}
     return FileResponse(index)
 
 
@@ -122,7 +125,7 @@ async def health() -> dict:
     `commit` is the deployed build's git SHA (Vercel injects VERCEL_GIT_COMMIT_SHA) --
     the loop's verify_pre_prod uses it to confirm a pre-prod deploy has caught up
     before the Testing Agent runs."""
-    commit = os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("AGENTRA_BUILD_SHA") or ""
+    commit = _build_commit()
     try:
         return {"status": "ok", "apps_registered": len(registry.list_apps()), "commit": commit}
     except Exception as exc:  # never let a backend blip fail the liveness probe

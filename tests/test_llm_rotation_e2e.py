@@ -1,0 +1,84 @@
+"""In-process end-to-end checks of the LLM rotation RPCs and the API-only root route."""
+
+from collections import Counter
+
+import pytest
+from fastapi.testclient import TestClient
+
+from agentra import registry, server
+from agentra.registry import core, llm_pool
+
+TOKEN = "test-internal-token"
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(registry, "_ddb", None)
+    monkeypatch.setattr(registry, "AGENTRA_HOME", home)
+    monkeypatch.setattr(registry, "_LLM_BACKEND_PATH", home / "llm_backend.json")
+    monkeypatch.setattr(core, "_llm_backend_cache", None)
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", TOKEN)
+    monkeypatch.delenv("FIREBASE_PROJECT_ID", raising=False)
+    return TestClient(server.app)
+
+
+def _rpc(client, method, *args, token=TOKEN):
+    body = {"target": "registry", "method": method, "args": list(args), "kwargs": {}}
+    return client.post("/internal/rpc", json=body, headers={"Authorization": f"Bearer {token}"})
+
+
+def test_set_then_get_rotation_returns_backends_and_index(client):
+    assert _rpc(client, "set_llm_rotation", ["claude", "nim", "gemini"]).status_code == 200
+    got = _rpc(client, "get_llm_rotation").json()["result"]
+    assert set(got) == {"backends", "current_index"}
+    assert got == {"backends": ["claude", "nim", "gemini"], "current_index": 0}
+
+
+def test_unknown_provider_is_400_and_rotation_unchanged(client):
+    _rpc(client, "set_llm_rotation", ["claude", "nim"])
+    _rpc(client, "select_llm_provider")
+    before = _rpc(client, "get_llm_rotation").json()["result"]
+    assert _rpc(client, "set_llm_rotation", ["claude", "bogus"]).status_code == 400
+    assert _rpc(client, "get_llm_rotation").json()["result"] == before
+
+
+def test_wrong_or_missing_token_never_changes_rotation(client):
+    _rpc(client, "set_llm_rotation", ["claude", "nim"])
+    assert _rpc(client, "set_llm_rotation", ["claude", "bogus"], token="wrong").status_code == 401
+    body = {"target": "registry", "method": "get_llm_rotation", "args": [], "kwargs": {}}
+    assert client.post("/internal/rpc", json=body).status_code == 401
+    assert _rpc(client, "get_llm_rotation").json()["result"]["backends"] == ["claude", "nim"]
+
+
+def test_index_advances_per_selection_mod_pool_size(client):
+    _rpc(client, "set_llm_rotation", ["claude", "nim", "gemini"])
+    for expected in (1, 2, 0, 1):
+        _rpc(client, "select_llm_provider")
+        assert _rpc(client, "get_llm_rotation").json()["result"]["current_index"] == expected
+
+
+@pytest.mark.parametrize("pool", [["claude", "nim", "gemini"], ["claude", "nim"]])
+def test_simulated_24h_selects_each_backend_equally(client, monkeypatch, pool):
+    _rpc(client, "set_llm_rotation", *[pool])
+    start = llm_pool.time.time()
+    clock = {"now": start}
+    monkeypatch.setattr(llm_pool.time, "time", lambda: clock["now"])
+    picks = []
+    for hour in range(24):
+        clock["now"] = start + hour * 3600
+        picks.append(_rpc(client, "select_llm_provider").json()["result"]["backend"])
+    counts = Counter(picks)
+    assert set(counts) == set(pool)
+    assert set(counts.values()) == {24 // len(pool)}
+
+
+def test_root_without_dashboard_is_clean_health_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "WEB_DIST", tmp_path / "empty")
+    monkeypatch.delenv("VERCEL_GIT_COMMIT_SHA", raising=False)
+    monkeypatch.setenv("AGENTRA_BUILD_SHA", "abc123")
+    resp = TestClient(server.app).get("/")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "service": "agentra-engine", "commit": "abc123"}
+    assert "error" not in resp.json()
