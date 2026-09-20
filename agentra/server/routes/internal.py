@@ -198,6 +198,13 @@ async def rpc(req: RpcRequest) -> dict:
     if req.target == "memory" and req.method in _MEMORY_MUTATION_METHODS and req.repo_url:
         _invalidate_gh_cache_for_rpc(req.repo_url)
 
+    if req.target == "registry" and req.method == "record_run":
+        run_key = req.kwargs.get("run_key") or (req.args[0] if req.args else None)
+        if run_key:
+            from agentra.server import human_gate
+
+            human_gate.maybe_raise(run_key)
+
     return {"result": _json_safe(result)}
 
 

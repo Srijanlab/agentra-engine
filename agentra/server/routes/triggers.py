@@ -205,7 +205,14 @@ async def _tick() -> dict:
             logger.warning("tick: closed-issue loop reconciliation failed for app=%r", app_name, exc_info=True)
         results[app_name] = await _enqueue_cycle(app_name, "scheduled", None, None, False, enforce_schedule=True)
     _reconcile_human_input_timeouts()
-    return {"apps": results}
+    try:
+        from agentra.server import human_gate
+
+        human_gates = human_gate.sweep_recent_runs()
+    except Exception:
+        logger.warning("tick: human_gate.sweep_recent_runs failed", exc_info=True)
+        human_gates = []
+    return {"apps": results, "human_gates": human_gates}
 
 
 def _verify_tick_auth(authorization: str | None) -> None:
