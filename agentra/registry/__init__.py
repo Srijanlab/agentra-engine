@@ -62,6 +62,15 @@ from agentra.registry.loops import (
     set_loop_pipeline,
     set_loop_status,
 )
+from agentra.registry.llm_pool import (
+    InvalidLLMPool,
+    get_llm_provider_health,
+    get_llm_rotation,
+    report_llm_provider_failure,
+    report_llm_provider_success,
+    select_llm_provider,
+    set_llm_rotation,
+)
 from agentra.registry.jobs import (
     JOB_KINDS,
     claim_next_job,
@@ -109,6 +118,13 @@ sys.modules[__name__].__class__ = RegistryModule
 __all__ = [
     "DispatchSummary",
     "VALID_LLM_BACKENDS",
+    "InvalidLLMPool",
+    "get_llm_provider_health",
+    "get_llm_rotation",
+    "report_llm_provider_failure",
+    "report_llm_provider_success",
+    "select_llm_provider",
+    "set_llm_rotation",
     "RepoSpec",
     "cloud_mode",
     "dynamodb_resource",

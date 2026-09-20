@@ -57,6 +57,44 @@ async def set_llm_backend(payload: dict | None = None) -> dict:
     return {"backend": backend}
 
 
+@router.get("/system/llm-pool")
+async def get_llm_pool() -> dict:
+    return {**registry.get_llm_rotation(), "health": registry.get_llm_provider_health()}
+
+
+@router.put("/system/llm-pool")
+async def set_llm_pool(payload: dict | None = None) -> dict:
+    try:
+        pool = registry.set_llm_rotation((payload or {}).get("backends"))
+    except registry.InvalidLLMPool as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _server_log("llm-pool", f"llm pool set to {pool['backends']!r}")
+    return pool
+
+
+@router.post("/system/llm-pool/next")
+async def select_llm_pool_provider() -> dict:
+    return registry.select_llm_provider()
+
+
+@router.post("/system/llm-pool/{provider}/throttle")
+async def report_llm_provider_throttled(provider: str, payload: dict | None = None) -> dict:
+    try:
+        health = registry.report_llm_provider_failure(provider, (payload or {}).get("retry_after_seconds"))
+    except registry.InvalidLLMPool as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _server_log("llm-pool", f"llm provider {provider!r} throttled: failures={health['failures']}")
+    return health
+
+
+@router.post("/system/llm-pool/{provider}/success")
+async def report_llm_provider_ok(provider: str) -> dict:
+    try:
+        return registry.report_llm_provider_success(provider)
+    except registry.InvalidLLMPool as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/runs")
 async def get_runs(limit: int = 50) -> dict:
     registry.reconcile_stale_runs()
