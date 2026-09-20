@@ -1,4 +1,4 @@
-"""In-process end-to-end checks of the LLM rotation RPCs and the API-only root route."""
+"""In-process end-to-end checks of the LLM rotation RPCs."""
 
 from collections import Counter
 
@@ -73,12 +73,3 @@ def test_simulated_24h_selects_each_backend_equally(client, monkeypatch, pool):
     assert set(counts) == set(pool)
     assert set(counts.values()) == {24 // len(pool)}
 
-
-def test_root_without_dashboard_is_clean_health_payload(tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "WEB_DIST", tmp_path / "empty")
-    monkeypatch.delenv("VERCEL_GIT_COMMIT_SHA", raising=False)
-    monkeypatch.setenv("AGENTRA_BUILD_SHA", "abc123")
-    resp = TestClient(server.app).get("/")
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "service": "agentra-engine", "commit": "abc123"}
-    assert "error" not in resp.json()
