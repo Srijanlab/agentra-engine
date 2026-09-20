@@ -67,3 +67,35 @@ def test_a_second_escalation_after_the_first_is_also_excluded(monkeypatch):
     monkeypatch.setattr(lifecycle, "list_comments", lambda repo_url, n: comments)
 
     assert lifecycle.find_unanswered_human_input_comment("https://github.com/acme/app.git", 38) is None
+
+
+def test_an_old_answer_to_a_past_escalation_does_not_satisfy_a_later_one(monkeypatch):
+    """GitHub issue #54: a real answer that correctly resolved the FIRST escalation
+    must not keep being "found" as the answer to a SECOND, separate escalation raised
+    on the same issue later -- only a genuinely new comment after the latest marker
+    counts."""
+    comments = [
+        _comment("Human-Input-Required (agentra):\nApp: acme\nRun-ID: run1\nTracking-Issue: 15\nQuestion: what now?"),
+        _comment("Test the dashboard and report back."),  # answered the FIRST escalation
+        _comment("Human-Input-Required (agentra):\nApp: acme\nRun-ID: run2\nTracking-Issue: 15\nQuestion: still stuck, what now?"),
+        # no comment after this second marker yet -- nobody has answered it
+    ]
+    monkeypatch.setattr(lifecycle, "list_comments", lambda repo_url, n: comments)
+
+    assert lifecycle.find_unanswered_human_input_comment("https://github.com/acme/app.git", 15) is None
+
+
+def test_a_fresh_comment_after_a_later_escalation_is_still_detected(monkeypatch):
+    """Same setup as above, but this time a genuinely new reply lands after the
+    second marker -- that one must be found."""
+    comments = [
+        _comment("Human-Input-Required (agentra):\nApp: acme\nRun-ID: run1\nTracking-Issue: 15\nQuestion: what now?"),
+        _comment("Test the dashboard and report back."),
+        _comment("Human-Input-Required (agentra):\nApp: acme\nRun-ID: run2\nTracking-Issue: 15\nQuestion: still stuck, what now?"),
+        _comment("Checked -- latency is fine now, go ahead and promote."),
+    ]
+    monkeypatch.setattr(lifecycle, "list_comments", lambda repo_url, n: comments)
+
+    answer = lifecycle.find_unanswered_human_input_comment("https://github.com/acme/app.git", 15)
+
+    assert answer == "Checked -- latency is fine now, go ahead and promote."

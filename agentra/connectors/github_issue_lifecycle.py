@@ -212,16 +212,24 @@ _INTERNAL_COMMENT_PREFIXES = (
 
 
 def find_unanswered_human_input_comment(repo_url: str, issue_number: int) -> str | None:
-    """Polling-based half of the GitHub-issue-comment answer channel -- no inbound webhook (see connectors/slack.py's module docstring and design.md for why Slack-reply-driven resume is deferred to its own security review)."""
+    """Polling-based half of the GitHub-issue-comment answer channel -- no inbound webhook (see connectors/slack.py's module docstring and design.md for why Slack-reply-driven resume is deferred to its own security review).
+
+    Anchors to the MOST RECENT marker, not the first one ever posted on this issue.
+    An issue can be escalated, answered, and re-escalated many times over its life --
+    anchoring to the first marker let one old, already-consumed answer satisfy every
+    later escalation forever, since nothing marked it as used. Confirmed live
+    (agentra#54): a single real comment answered issue #15's first throttle escalation,
+    then kept being "found" as the answer to every subsequent one, days later, driving
+    an escalate -> false-resume -> re-throttle -> escalate bounce that ran unattended."""
     comments = list_comments(repo_url, issue_number)
-    marker_seen = False
-    for comment in comments:  # oldest-first: the marker must come before its answer
+    last_marker_index = None
+    for i, comment in enumerate(comments):  # oldest-first
+        if (comment.get("body") or "").startswith(_HUMAN_INPUT_MARKER):
+            last_marker_index = i
+    if last_marker_index is None:
+        return None
+    for comment in comments[last_marker_index + 1:]:
         body = comment.get("body") or ""
-        if body.startswith(_HUMAN_INPUT_MARKER):
-            marker_seen = True
-            continue
-        if not marker_seen:
-            continue
         if any(body.startswith(prefix) for prefix in _INTERNAL_COMMENT_PREFIXES):
             continue
         if not body.strip():
