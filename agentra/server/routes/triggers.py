@@ -164,15 +164,24 @@ def _reconcile_human_input_timeouts() -> None:
     for loop in escalated:
         human_input = loop.get("human_input") or {}
         ref = loop.get("last_run_key") or loop.get("loop_id") or ""
+        app_name = loop.get("app") or ""
+        issue_number = human_input.get("issue_number")
+        # GitHub issue #45: without these, a per-app-channel setup with no global
+        # SLACK_HUMAN_INPUT_CHANNEL silently dropped this reminder, and even when
+        # delivered it landed as a disconnected top-level message instead of
+        # threading onto the original escalation -- unlike _escalate_to_human's
+        # own notify call, which always passes both.
         slack.notify_human_input_required(
-            app=loop.get("app") or "",
+            app=app_name,
             run_id=ref,
             question=human_input.get("question") or "(question unavailable)",
             issue_url=human_input.get("issue_url"),
-            dashboard_url=urls.dashboard_run_url(ref, loop.get("app") or ""),
+            dashboard_url=urls.dashboard_run_url(ref, app_name),
             branch=human_input.get("branch"),
             session_id=human_input.get("session_id"),
             escalated=True,
+            channel=registry.get_slack_channel(app_name),
+            thread_ts=registry.slack_thread_for(app_name, issue_number) if issue_number is not None else None,
         )
         _server_log("scheduled", f"app={loop.get('app')!r} loop={loop.get('loop_id')} -- waiting_for_human past max-wait, escalated")
 

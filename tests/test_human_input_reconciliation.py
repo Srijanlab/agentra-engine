@@ -50,6 +50,7 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
     monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")
     monkeypatch.setattr(registry, "_AGENT_STEPS_PATH", home / "agent_steps.jsonl")
+    monkeypatch.setattr(registry.core, "_SLACK_THREADS_PATH", home / "slack_threads.json")
     server._active_runs.clear()
     server._app_locks.clear()
     github_fake.install(monkeypatch=monkeypatch)
@@ -161,6 +162,9 @@ def test_trigger_scheduled_calls_reconciliation_for_every_app(tmp_path, monkeypa
 def test_reconcile_human_input_timeouts_renotifies_slack_for_escalated_loops(tmp_path, monkeypatch):
     _isolate_registry(tmp_path, monkeypatch)
     monkeypatch.setattr(registry.core, "HUMAN_INPUT_MAX_WAIT_SECONDS", 1.0)
+    registry.register_app("myapp", "/tmp/fake-myapp", repo_url="https://github.com/acme/myapp.git", branch="main")
+    registry.set_slack_channel("myapp", "C_MYAPP")
+    registry.record_slack_thread("789.123", app="myapp", issue_number=17)
     lid = _park_loop("myapp", 17, waiting_since=time.time() - 1000)
     from agentra.connectors import slack
 
@@ -173,6 +177,27 @@ def test_reconcile_human_input_timeouts_renotifies_slack_for_escalated_loops(tmp
     assert len(slack_calls) == 1
     assert slack_calls[0]["escalated"] is True
     assert slack_calls[0]["question"] == "Should we use OAuth or magic links?"
+    # GitHub issue #45: must resolve the app's own channel and the original
+    # escalation's thread, not drop them and land as a disconnected top-level message.
+    assert slack_calls[0]["channel"] == "C_MYAPP"
+    assert slack_calls[0]["thread_ts"] == "789.123"
+
+
+def test_reconcile_human_input_timeouts_falls_back_cleanly_with_no_recorded_thread(tmp_path, monkeypatch):
+    """No prior escalation ever recorded a Slack thread for this issue -- must not
+    crash, just notify with thread_ts=None (posts a fresh top-level message)."""
+    _isolate_registry(tmp_path, monkeypatch)
+    monkeypatch.setattr(registry.core, "HUMAN_INPUT_MAX_WAIT_SECONDS", 1.0)
+    lid = _park_loop("myapp", 17, waiting_since=time.time() - 1000)
+    from agentra.connectors import slack
+
+    slack_calls = []
+    monkeypatch.setattr(slack, "notify_human_input_required", lambda **k: slack_calls.append(k) or True)
+
+    triggers._reconcile_human_input_timeouts()
+
+    assert slack_calls[0]["thread_ts"] is None
+    assert slack_calls[0]["channel"] is None
 
 
 def test_reconcile_human_input_timeouts_no_op_when_nothing_is_overdue(tmp_path, monkeypatch):

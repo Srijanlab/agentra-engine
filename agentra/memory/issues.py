@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -255,30 +256,68 @@ class MemoryIssuesMixin:
         first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
         diagnosis = f"{step_name} failed during an autonomous cycle: {first_line}" if first_line else f"{step_name} failed during an autonomous cycle"
         auth_failure = is_login_required_failure(text)
-        already_reported = auth_failure and self._find_similar_open_bug(diagnosis, text) is not None
+        # GitHub issue #47: this dedup used to gate only the auth-failure notification --
+        # extended to cover the generic unfixable-failure escalation below too, so a
+        # recurring identical blocker doesn't re-notify/re-escalate on every single run.
+        already_reported = self._find_similar_open_bug(diagnosis, text) is not None
         issue_number = self.record_known_bug(
             run_id, severity, diagnosis, text[:2000],
             source="autonomous-failure", needs_human=unfixable, blocking_agentra=unfixable,
         )
-        if auth_failure and not already_reported:
+        if already_reported:
+            return
+        if auth_failure:
             self._notify_claude_code_auth_failure(run_id, issue_number)
+        elif unfixable:
+            # GitHub issue #47: a non-auth unfixable failure used to hard-block future
+            # cycles (blocking_bugs()) while being invisible on both Slack and the
+            # dashboard's "Needs your input" tab -- now escalated the same way every
+            # other human-input block is.
+            self._escalate_blocking_failure(
+                run_id, issue_number, "unfixable",
+                f"{diagnosis}\n\nThis can't be fixed by agentra and is blocking further "
+                "autonomous progress on this app -- please advise.",
+            )
 
     def _notify_claude_code_auth_failure(self, run_id: str, issue_number: int | None) -> None:
-        """GitHub issue #42: best-effort outbound Slack notification for a..."""
+        """GitHub issue #42/#46: escalated the same way as every other human-input
+        block (thread-mapped Slack notify, human-input context, loop marked
+        waiting_for_human) -- it used to just post a "reply in this thread" Slack
+        message with none of that wiring, so a reply was silently dropped and the
+        dashboard's "Needs your input" tab never showed the block."""
+        self._escalate_blocking_failure(
+            run_id, issue_number, "auth_failure",
+            "Claude Code session is not authenticated on this runner -- run /login and re-trigger.",
+        )
+
+    def _escalate_blocking_failure(self, run_id: str, issue_number: int | None, category: str, question: str) -> None:
+        """Shared plumbing for record_failure's two escalation paths (auth failure,
+        generic unfixable failure): a thread-mapped Slack notify, recorded
+        human-input context, and the issue's loop marked waiting_for_human -- the
+        same treatment _escalate_to_human gives every mid-cycle escalation, so a
+        Slack/GitHub reply actually routes and the dashboard shows the block."""
+        if issue_number is None:
+            return
         try:
-            from agentra import urls
+            from agentra import registry, urls
             from agentra.connectors import slack
 
-            issue_url = self.issue_html_url(issue_number) if issue_number is not None else None
-            slack.notify_human_input_required(
-                app=self.repo.name,
-                run_id=run_id,
-                question=(
-                    "Claude Code session is not authenticated on this runner -- "
-                    "run /login and re-trigger."
-                ),
-                issue_url=issue_url,
-                dashboard_url=urls.dashboard_run_url(run_id, self.repo.name),
+            app_name = self.repo.name
+            issue_url = self.issue_html_url(issue_number)
+            existing_thread = registry.slack_thread_for(app_name, issue_number)
+            thread_ts = slack.notify_human_input_required(
+                app=app_name, run_id=run_id, question=question, issue_url=issue_url,
+                dashboard_url=urls.dashboard_run_url(run_id, app_name),
+                channel=registry.get_slack_channel(app_name), thread_ts=existing_thread,
             )
+            if thread_ts and not existing_thread:
+                registry.record_slack_thread(thread_ts, app=app_name, issue_number=issue_number)
+            self.record_human_input_context(issue_number, app=app_name, run_id=run_id, question=question)
+            loop_id = registry.bind_loop(app_name, issue_number, kind="bug", objective=self.get_objective())
+            registry.set_loop_human_input(loop_id, {
+                "issue_number": issue_number, "issue_url": issue_url, "question": question,
+                "branch": None, "category": category, "session_id": None,
+                "app": app_name, "waiting_since": time.time(),
+            })
         except Exception:
-            logger.warning("_notify_claude_code_auth_failure: failed to notify for run %s", run_id, exc_info=True)
+            logger.warning("_escalate_blocking_failure: failed to escalate issue #%s (run %s)", issue_number, run_id, exc_info=True)
