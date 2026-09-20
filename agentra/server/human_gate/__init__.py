@@ -56,13 +56,17 @@ def maybe_raise(run_key: str) -> dict | None:
         run = registry.get_run(run_key)
         if not run or run.get("status") not in _TERMINAL_STATUSES:
             return None
-        error = run.get("error") or ""
-        if TOKEN not in error:
+        # Confirmed live 2026-09-20 (#49/#50/#51): the loop's own orchestrator
+        # narrates a HUMAN_INPUT_REQUIRED note in the run's free-text `summary`,
+        # not `error` -- a crashed tool call ends the run as "completed" with no
+        # `error` set at all. Check both; prefer `error` when both are present.
+        text = run.get("error") or run.get("summary") or ""
+        if TOKEN not in text:
             return None
         app_name = run.get("app")
         if not app_name:
             return None
-        return _raise(app_name, run_key, run, error)
+        return _raise(app_name, run_key, run, text)
     except Exception:
         logger.warning("maybe_raise: failed for run_key=%r", run_key, exc_info=True)
         return None
@@ -148,13 +152,14 @@ def _raise(app_name: str, run_key: str, run: dict, error: str) -> dict | None:
 
 
 def sweep_recent_runs(limit: int = 50) -> list[dict]:
-    """Backstop for the /trigger/cron tick: re-check recent runs whose error
-    carries the token, so a missed or failed prompt-path attempt gets retried."""
+    """Backstop for the /trigger/cron tick: re-check recent runs whose error or
+    summary carries the token, so a missed or failed prompt-path attempt gets
+    retried."""
     gates: list[dict] = []
     for run in registry.list_runs(limit=limit):
         run_key = run.get("run_key")
-        error = run.get("error") or ""
-        if not run_key or run.get("status") not in _TERMINAL_STATUSES or TOKEN not in error:
+        text = run.get("error") or run.get("summary") or ""
+        if not run_key or run.get("status") not in _TERMINAL_STATUSES or TOKEN not in text:
             continue
         gate = maybe_raise(run_key)
         if gate:

@@ -104,6 +104,29 @@ def test_a_run_without_a_tracking_issue_files_one(tmp_path, monkeypatch):
     assert "need_human" in _labels(gate["issue_number"])
 
 
+def test_a_run_with_the_token_only_in_its_summary_still_raises(tmp_path, monkeypatch):
+    """Confirmed live 2026-09-20 (#49/#50/#51): the loop's orchestrator narrates
+    a HUMAN_INPUT_REQUIRED note in the run's free-text `summary`, not `error` --
+    a crashed tool call ends the run "completed" with no `error` set at all.
+    Three loops died silently on exactly this gap."""
+    mem = _setup(tmp_path, monkeypatch)
+    slack_calls = _slack_capture(monkeypatch)
+
+    issue_number = mem.record_known_bug("run1", "high", "thing", "tbd")
+    loop_id = registry.bind_loop("myapp", issue_number, kind="bug")
+    registry.record_run(
+        "run1", app="myapp", loop_id=loop_id, status="completed", error=None,
+        summary="implement_feature failed twice with the same error.\n\nHUMAN_INPUT_REQUIRED for #%d: "
+        "fix the agentra.agents.spec import error, then resume or close the loop." % issue_number,
+    )
+
+    gate = human_gate.maybe_raise("run1")
+
+    assert gate is not None
+    assert len(slack_calls) == 1
+    assert "import error" in slack_calls[0]["question"]
+
+
 def test_a_run_with_no_token_in_its_error_raises_nothing(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     slack_calls = _slack_capture(monkeypatch)
