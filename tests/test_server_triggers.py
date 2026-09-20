@@ -113,6 +113,61 @@ def test_cron_endpoint_requires_a_token_when_set(tmp_path, monkeypatch):
     assert {j["payload"]["app"] for j in registry.list_jobs()} == {"myapp"}
 
 
+def test_deploy_complete_enqueues_a_cycle_bypassing_the_schedule_gate(tmp_path, monkeypatch):
+    """GitHub issue #49 (Phase 3): a CI/CD deploy-complete callback must resume a
+    loop parked on deploy-freshness immediately, not wait for schedule_hours."""
+    _isolate(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    from agentra import environments
+    env = environments.load(repo) or environments.EnvironmentConfig()
+    env.schedule_hours = 24.0  # would refuse a normal /trigger/scheduled call
+    environments.save(repo, env)
+    registry.record_run("prev", app="myapp", source="scheduled", status="completed", started_at=__import__("time").time())
+
+    body = _client().post(
+        "/trigger/deploy-complete", json={"app": "myapp", "repo": "engine", "sha": "abc1234"}
+    ).json()
+
+    assert body["triggered"] is True
+    [job] = registry.list_jobs()
+    assert job["kind"] == "cycle" and job["payload"]["app"] == "myapp"
+
+
+def test_deploy_complete_requires_a_token_when_set(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "s3cr3t")
+
+    unauthorized = _client().post("/trigger/deploy-complete", json={"app": "myapp"})
+    assert unauthorized.status_code == 401
+
+    ok = _client().post(
+        "/trigger/deploy-complete", json={"app": "myapp"}, headers={"Authorization": "Bearer s3cr3t"}
+    )
+    assert ok.status_code == 200
+
+
+def test_deploy_complete_404s_for_an_unregistered_app(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    resp = _client().post("/trigger/deploy-complete", json={"app": "nope"})
+
+    assert resp.status_code == 404
+
+
+def test_deploy_complete_is_a_noop_when_a_cycle_is_already_queued(tmp_path, monkeypatch):
+    """Reuses the same dedup as every other on-demand trigger -- never queues a
+    second, concurrent cycle for the same app."""
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    _client().post("/apps/myapp/run")
+
+    body = _client().post("/trigger/deploy-complete", json={"app": "myapp"}).json()
+
+    assert body["triggered"] is False
+    assert len(registry.list_jobs()) == 1
+
+
 def test_cron_releases_a_loop_whose_tracked_issue_has_been_closed(tmp_path, monkeypatch):
     """A run that ends non-terminally leaves its loop `active`; if a human then
     closes the issue, the scheduler tick must release the loop so no later cycle

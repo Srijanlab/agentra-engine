@@ -230,6 +230,37 @@ async def trigger_cron(authorization: str | None = Header(default=None)) -> dict
     return await _tick()
 
 
+class DeployCompletePayload(BaseModel):
+    app: str
+    repo: str | None = None
+    sha: str | None = None
+
+
+@router.post("/trigger/deploy-complete")
+async def trigger_deploy_complete(
+    payload: DeployCompletePayload, authorization: str | None = Header(default=None)
+) -> dict:
+    """GitHub issue #49 (Phase 3): a code repo's own push-deploy CI/CD workflow calls
+    this as its LAST step once the deploy has actually landed, so a loop parked on
+    deploy-freshness (verify_pre_prod deferred because the live build hadn't caught
+    up yet) can resume within seconds instead of waiting for the next
+    backlog-driven or schedule-gated cycle to happen to re-poll. Reuses the same
+    dedup'd enqueue as every other on-demand trigger -- if a cycle for this app is
+    already queued or running, this is a harmless no-op. `repo`/`sha` are for
+    logging only; check_backlog/verify_pre_prod already compute their own expected
+    SHA from git history (see agents/deployment.py's last_deploy_relevant_sha), so
+    nothing here needs to trust the caller's claim of what shipped."""
+    _verify_tick_auth(authorization)
+    if payload.app not in registry.list_apps():
+        raise HTTPException(status_code=404, detail=f"app {payload.app!r} not registered")
+    result = await _enqueue_cycle(payload.app, "deploy-complete", None, None, False, enforce_schedule=False)
+    _server_log(
+        "deploy-complete",
+        f"app={payload.app!r} repo={payload.repo!r} sha={payload.sha!r} -- {result}",
+    )
+    return result
+
+
 @router.post("/trigger/scheduled")
 async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
     if payload.app is None:
