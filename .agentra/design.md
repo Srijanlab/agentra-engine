@@ -1,14 +1,11 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 462dc65f9f56af32a6dda9e7ff5072147469302d -->
-- Engine = state authority, loop = execution — a hard split. Trigger endpoints only `registry.enqueue_job({cycle|promote|prod_debug|human_resume})`; agentra-loop drains the queue and reports back. The engine carries no `claude-agent-sdk` and no docker/deploy code.
-- One RPC contract. `POST /internal/rpc` gated by `AGENTRA_INTERNAL_TOKEN` (+ optional Vercel-header IP allowlist), restricted to the `_REGISTRY_METHODS` / `_MEMORY_METHODS` frozensets, is the entire state surface the loop may touch. Credential-holding side doors are separate token-gated endpoints (`/internal/git-token`, `/internal/slack/message`, `/internal/runs/{id}/log`).
-- Dual-path persistence. Every registry/memory write is `if core._ddb: <DynamoDB> else: <local JSON under AGENTRA_HOME>`. DynamoDB (static prefixed `AGENTRA_AWS_*` IAM keys) backs prod; local JSON serves the CLI, tests, and the loop's own process. `cloud_mode()` gates all checkout-dependent behavior.
-- Module-proxy pattern for `registry`/`memory` so sub-modules can mutate shared `core` state through delegated names.
-- Memory modelled as GitHub Issues/Projects composed from 5 mixins; failure triage via regex classes (transient / unfixable / login-required).
-- SRP + 500-line file cap + domain subfolders enforced by CLAUDE.md; features needing a checkout return 503 rather than half-working.
-- Backward-compatible label rename (GitHub issue #38): `status:shipped` -> `status:awaiting-testing` is a write-forward, read-both migration — every write path emits/strips the new label, every read path matches both names via `_STATUS_AWAITING_TESTING_LABELS`/`_at_awaiting_testing_stage`, and a separate idempotent `migrate_awaiting_testing_label` call (CLI `migrate-labels`, or automatic on app registration) does the actual one-time GitHub-side move for a given repo.
-- Single source of truth for pipeline UI shape: `memory.core.pipeline_stages()` defines the dashboard's ordered columns once, exposed read-only at `GET /pipeline/stages` instead of each caller re-deriving stage names/order.
-- Loop lifecycle self-healing: `_reconcile_closed_issue_loops` releases any loop left `active`/`waiting_for_human`/`escalated` whose tracked GitHub issue was closed out-of-band, so a stale loop can't hijack a future scheduled cycle (agentra#20/#25).
-- Internal-comment allowlist: every orchestrator-authored comment prefix (markers, escalation diagnosis text, answers) is registered in `_INTERNAL_COMMENT_PREFIXES` so `find_unanswered_human_input_comment` can never mistake the orchestrator's own follow-up comment for a human's answer to itself (fixed live regression, agentra#38: an unregistered escalation-diagnosis prefix caused self-answered escalate/resume bounces).
-- Label comparisons against a live GitHub issue always go through `_label_names()`, never raw list membership — the real REST API returns `{name: ...}` label objects, `github_fake`'s test double uses flat strings, and the mismatch silently no-ops the check against prod.
-- Loop recency is a derived, real-activity-only sort key (`_recency()` = last_run_at from an actual finished run, else created_at), deliberately distinct from `updated_at` which also advances on administrative-only writes (e.g. `set_loop_status`); the DynamoDB `by-app-recency` GSI (keyed on updated_at) is used only as an overfetch source and re-sorted in Python.
+<!-- source-sha: 16d23bed47384db6d5c265be18bec707c233aeb0 -->
+• **SRP & Domain‑oriented folder layout** – every feature lives in a dedicated subfolder.
+• **File size constraint (≤500 lines)** – prevents cross‑cutting logic; encourages splitting.
+• **One‑sentence docstrings** – brief, self‑documenting; no large comments.
+• **No dead code** – unused blocks are removed.
+• **Memory mixin architecture** (`Memory` = 5 mixins) keeps state logic separate from transport.
+• **API router design** – routers under `agentra/server/routes/` wired in `__init__`, auth exemptions listed in `auth.py::_PUBLIC_PREFIXES`.
+• **Job enqueuing via `/trigger/*`** – bootstrap via `registry.enqueue_job`, loop consumes via `/internal/rpc`.
+• **Infrastructure invariants** – loop never touches DynamoDB/GitHub directly; engine holds secrets; state always persisted via DynamoDB or local JSON.
+• **Testing conventions** – `pytest + pytest‑xdist` with `moto[dynamodb]` mocks for DB; test fixtures strip prod env vars.
