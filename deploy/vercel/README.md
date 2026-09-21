@@ -18,8 +18,13 @@ unset (local dev, CI) the registry falls back to JSON files under `~/.agentra`.
 ## Sign-in gate
 
 `FIREBASE_PROJECT_ID` turns on the Google-identity check in `server/auth.py`
-(`id_token.verify_firebase_token`, from `google-auth`). Unset -> the API stays
-open (local dev). `AGENTRA_ALLOWED_EMAILS` is the allowlist.
+(`id_token.verify_firebase_token`, from `google-auth`). `AGENTRA_ALLOWED_EMAILS` is the allowlist.
+
+Both are **required whenever DynamoDB is configured** (`AGENTRA_DYNAMODB_TABLE_PREFIX`): the gate
+fails closed, and every non-public route returns `503 {"error": "auth_misconfigured", "missing": [...]}`
+until they are set. Only when neither DynamoDB nor Firebase is configured (local dev) does the API
+stay open, with a startup warning. `/health` reports `auth.mode` (`enforced`, `open` or
+`misconfigured`) without exposing secret values.
 
 ## Vercel env vars
 

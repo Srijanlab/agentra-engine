@@ -44,7 +44,9 @@ proxy (`agentra/proxy/main.py`), not the engine app. LLM rotation state can be r
 which returns only `{"backends": [...], "current_index": <int>}` (no health,
 cooldown or secrets; other methods return 405). It and `GET /debug/dynamodb`
 sit behind the Firebase sign-in gate (401 without a valid ID token whenever
-`FIREBASE_PROJECT_ID` is set); the loop reads rotation state through
+`FIREBASE_PROJECT_ID` is set; `FIREBASE_PROJECT_ID` and `AGENTRA_ALLOWED_EMAILS` are required
+whenever DynamoDB is configured, otherwise gated routes return 503 `auth_misconfigured`
+and `/health` reports `auth.mode: "misconfigured"`); the loop reads rotation state through
 `/internal/rpc` `get_llm_rotation`. State-changing calls (`set_llm_rotation`,
 `select_llm_provider`) still require the deployment's own
 `AGENTRA_INTERNAL_TOKEN`; rotation behaviour is covered by

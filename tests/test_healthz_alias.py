@@ -33,7 +33,7 @@ def test_healthz_is_a_pure_alias_of_health(tmp_path, monkeypatch):
     body = healthz.json()
     assert body["status"] == "ok"
     assert isinstance(body["apps_registered"], int)
-    assert set(body) == {"status", "apps_registered", "commit"}
+    assert set(body) == {"status", "apps_registered", "commit", "auth"}
 
 
 def test_health_body_unchanged(tmp_path, monkeypatch):
@@ -41,7 +41,20 @@ def test_health_body_unchanged(tmp_path, monkeypatch):
     monkeypatch.delenv("VERCEL_GIT_COMMIT_SHA", raising=False)
     monkeypatch.delenv("AGENTRA_BUILD_SHA", raising=False)
     client = TestClient(server.app)
-    assert client.get("/health").json() == {"status": "ok", "apps_registered": 0, "commit": ""}
+    monkeypatch.delenv("FIREBASE_PROJECT_ID", raising=False)
+    monkeypatch.delenv("AGENTRA_ALLOWED_EMAILS", raising=False)
+    assert client.get("/health").json() == {
+        "status": "ok",
+        "apps_registered": 0,
+        "commit": "",
+        "auth": {
+            "mode": "open",
+            "cloud_mode": False,
+            "firebase_configured": False,
+            "allowlist_configured": False,
+            "problems": ["FIREBASE_PROJECT_ID is not set"],
+        },
+    }
 
 
 def test_health_reports_the_deployed_commit(tmp_path, monkeypatch):

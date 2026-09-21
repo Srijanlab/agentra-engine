@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
-from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware
+from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware, auth_status, log_startup_warnings
 
 from agentra import registry
 from agentra.agents import catalog as agents_catalog
@@ -27,6 +27,7 @@ from agentra import observability  # noqa: E402
 observability.init_observability()
 
 app = FastAPI(title="agentra orchestrator")
+log_startup_warnings()
 
 
 # Order matters: CORS added last == outermost, so it answers preflight and
@@ -121,10 +122,11 @@ async def health() -> dict:
     the loop's verify_pre_prod uses it to confirm a pre-prod deploy has caught up
     before the Testing Agent runs."""
     commit = _build_commit()
+    auth = auth_status().as_dict()
     try:
-        return {"status": "ok", "apps_registered": len(registry.list_apps()), "commit": commit}
+        return {"status": "ok", "apps_registered": len(registry.list_apps()), "commit": commit, "auth": auth}
     except Exception as exc:  # never let a backend blip fail the liveness probe
-        return {"status": "degraded", "error": f"{type(exc).__name__}", "commit": commit}
+        return {"status": "degraded", "error": f"{type(exc).__name__}", "commit": commit, "auth": auth}
 
 
 @app.get("/debug/dynamodb")
