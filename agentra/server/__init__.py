@@ -10,8 +10,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
 from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware
 
@@ -53,14 +52,6 @@ async def _unhandled(request: Request, exc: Exception):
     return JSONResponse({"detail": f"internal error: {detail}"}, status_code=500)
 
 
-WEB_DIST = Path(os.environ.get("AGENTRA_WEB_DIST") or (Path(__file__).resolve().parent.parent / "web" / "dist"))
-
-if (WEB_DIST / "assets").is_dir():
-    app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="web-assets")
-
-FAVICON = WEB_DIST / "favicon.svg"
-
-
 def _run_log_path(run_key: str) -> Path | None:
     run = _active_runs.get(run_key) or registry.get_run(run_key)
     if run is None:
@@ -100,22 +91,26 @@ def _build_commit() -> str:
     return os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("AGENTRA_BUILD_SHA") or ""
 
 
+def _dashboard_url() -> str:
+    """The configured dashboard URL when it is an http(s) URL, else ""."""
+    url = (os.environ.get("AGENTRA_DASHBOARD_URL") or "").strip()
+    return url if url.lower().startswith(("http://", "https://")) else ""
+
+
 @app.get("/", response_model=None)
-async def dashboard() -> FileResponse | dict:
-    """Serve the dashboard shell, or an API-only health payload when it is not built."""
-    index = WEB_DIST / "index.html"
-    if not index.exists():
-        return {"status": "ok", "service": "agentra-engine", "commit": _build_commit()}
-    return FileResponse(index)
+async def root() -> Response | dict:
+    """Redirect to the configured dashboard, else return the API-service descriptor."""
+    dashboard_url = _dashboard_url()
+    if dashboard_url:
+        return RedirectResponse(dashboard_url, status_code=307)
+    return {"service": "agentra-engine", "status": "ok", "commit": _build_commit(), "health": "/health"}
 
 
 @app.get("/favicon.ico", response_model=None)
 @app.get("/favicon.svg", response_model=None)
-async def favicon() -> FileResponse:
-    """GitHub #127: serve the built dashboard favicon so browsers' /favicon.ico request does not 404."""
-    if not FAVICON.exists():
-        raise HTTPException(status_code=404, detail="favicon not built")
-    return FileResponse(FAVICON, media_type="image/svg+xml")
+async def favicon() -> Response:
+    """The engine ships no favicon, so answer browsers' probe with 204."""
+    return Response(status_code=204)
 
 
 @app.get("/health")

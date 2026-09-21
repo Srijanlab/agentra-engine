@@ -1,4 +1,4 @@
-"""Tests for the GET / route: API-only health payload versus the built dashboard."""
+"""Tests for the GET / route: API-service descriptor or dashboard redirect."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,62 +8,52 @@ from agentra import server
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.delenv("FIREBASE_PROJECT_ID", raising=False)
-    monkeypatch.delenv("VERCEL_GIT_COMMIT_SHA", raising=False)
-    monkeypatch.delenv("AGENTRA_BUILD_SHA", raising=False)
-    return TestClient(server.app)
+    for var in ("FIREBASE_PROJECT_ID", "VERCEL_GIT_COMMIT_SHA", "AGENTRA_BUILD_SHA", "AGENTRA_DASHBOARD_URL"):
+        monkeypatch.delenv(var, raising=False)
+    return TestClient(server.app, follow_redirects=False)
 
 
-def test_root_without_dist_is_clean_health_payload(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "WEB_DIST", tmp_path / "empty")
+def test_root_is_api_service_payload(client, monkeypatch):
     monkeypatch.setenv("AGENTRA_BUILD_SHA", "abc123")
     resp = client.get("/")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
-    assert resp.json() == {"status": "ok", "service": "agentra-engine", "commit": "abc123"}
+    assert resp.json() == {"service": "agentra-engine", "status": "ok", "commit": "abc123", "health": "/health"}
     assert "error" not in resp.json() and "hint" not in resp.json()
     assert "dashboard not built" not in resp.text
 
 
-def test_root_commit_prefers_vercel_sha(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "WEB_DIST", tmp_path / "empty")
+def test_root_commit_prefers_vercel_sha(client, monkeypatch):
     monkeypatch.setenv("AGENTRA_BUILD_SHA", "build")
     monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "vercel")
     assert client.get("/").json()["commit"] == "vercel"
+    assert client.get("/health").json()["commit"] == "vercel"
 
 
-def test_root_commit_falls_back_to_empty(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "WEB_DIST", tmp_path / "empty")
+def test_root_commit_falls_back_to_empty(client):
     assert client.get("/").json()["commit"] == ""
 
 
-def test_root_serves_index_html_when_dist_exists(client, tmp_path, monkeypatch):
-    (tmp_path / "index.html").write_text("<html>dash</html>")
-    monkeypatch.setattr(server, "WEB_DIST", tmp_path)
+def test_root_redirects_to_configured_dashboard(client, monkeypatch):
+    monkeypatch.setenv("AGENTRA_DASHBOARD_URL", "https://dash.example.com/app")
+    resp = client.get("/")
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "https://dash.example.com/app"
+
+
+@pytest.mark.parametrize("value", ["", "   ", "javascript:alert(1)", "dash.example.com", "ftp://x.example.com"])
+def test_root_ignores_invalid_dashboard_url(client, monkeypatch, value):
+    monkeypatch.setenv("AGENTRA_DASHBOARD_URL", value)
     resp = client.get("/")
     assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/html")
-    assert resp.text == "<html>dash</html>"
+    assert resp.json()["service"] == "agentra-engine"
 
 
-def test_web_dist_env_dir_is_served(tmp_path, monkeypatch):
-    (tmp_path / "index.html").write_text("<html>env</html>")
-    monkeypatch.setenv("AGENTRA_WEB_DIST", str(tmp_path))
-    import importlib
-
-    import agentra.server as mod
-
-    try:
-        reloaded = importlib.reload(mod)
-        resp = TestClient(reloaded.app).get("/")
-        assert resp.text == "<html>env</html>"
-    finally:
-        monkeypatch.delenv("AGENTRA_WEB_DIST")
-        importlib.reload(mod)
-
-
-def test_root_public_but_other_routes_gated_with_firebase(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "WEB_DIST", tmp_path / "empty")
+def test_root_public_but_other_routes_gated_with_firebase(client, monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
     assert client.get("/").status_code == 200
     assert client.get("/apps").status_code == 401
+
+
+def test_assets_path_is_404(client):
+    assert client.get("/assets/anything").status_code == 404

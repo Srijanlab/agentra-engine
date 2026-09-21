@@ -16,7 +16,6 @@ _PUBLIC_PREFIXES = (
     "/health",
     "/healthz",
     "/favicon",
-    "/assets/",
     "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
     "/trigger/queue",     # internal enqueue path (loop / SQS)
