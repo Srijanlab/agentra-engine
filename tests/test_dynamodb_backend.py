@@ -12,7 +12,7 @@ import pytest
 from moto import mock_aws
 
 from agentra import registry
-from agentra.registry import _cache, _dynamo, core
+from agentra.registry import _cache, _dynamo, core, llm_pool
 
 
 @pytest.fixture
@@ -574,3 +574,14 @@ def test_list_agent_steps_delegates_to_langfuse(ddb_env, monkeypatch):
 
     assert captured == {"app": "myapp", "limit": 50}
     assert steps == [{"app": "myapp", "agent": "implement_feature", "ok": True}]
+
+
+def test_llm_pool_round_trips_and_keeps_backend(ddb_env):
+    core.set_llm_backend("nim")
+    llm_pool.set_llm_rotation(["claude", "nim", "gemini"])
+    llm_pool.report_llm_provider_failure("claude", retry_after_seconds=300)
+
+    assert core.get_llm_backend() == "nim"
+    assert llm_pool.select_llm_provider()["backend"] == "nim"
+    assert llm_pool.get_llm_provider_health()["claude"]["failures"] == 1
+    assert llm_pool.get_llm_rotation() == {"backends": ["claude", "nim", "gemini"], "current_index": 2}

@@ -476,7 +476,7 @@ def slack_thread_for(app: str, issue_number: int) -> str | None:
     return None
 
 
-VALID_LLM_BACKENDS = ("claude", "claude_token", "nim")
+VALID_LLM_BACKENDS = ("claude", "claude_token", "nim", "auto", "gemini", "openai")
 _DEFAULT_LLM_BACKEND = "claude"
 _LLM_BACKEND_CACHE_TTL_SECONDS = 30
 _llm_backend_cache: tuple[float, str] | None = None
@@ -517,7 +517,8 @@ def set_llm_backend(backend: str) -> None:
         _dynamo.put_item(_dynamo.table("system"), {"key": "llm_backend", "backend": backend})
         return
     _LLM_BACKEND_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _LLM_BACKEND_PATH.write_text(json.dumps({"backend": backend}, indent=2))
+    on_disk = json.loads(_LLM_BACKEND_PATH.read_text()) if _LLM_BACKEND_PATH.exists() else {}
+    _LLM_BACKEND_PATH.write_text(json.dumps({**on_disk, "backend": backend}, indent=2))
 
 
 def persist_agentra_dir(repo: Path, branch: str, message: str) -> str | None:

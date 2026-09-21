@@ -170,3 +170,36 @@ def notify_human_input_required(
     # For a threaded reply Slack returns the reply's own ts; keep the original
     # thread anchor so every round of this conversation maps to the same run.
     return thread_ts or resp.get("ts")
+
+
+_DIGEST_MAX_ITEMS = 10
+
+
+def _format_age(age_hours: float) -> str:
+    return f"{age_hours / 24:.1f}d" if age_hours >= 48 else f"{age_hours:.0f}h"
+
+
+def _format_awaiting_testing_digest(*, app: str, items: list[dict], dashboard_url: str | None) -> str:
+    noun = "item" if len(items) == 1 else "items"
+    lines = [f":hourglass_flowing_sand: *{app}* has {len(items)} {noun} awaiting testing", ""]
+    for item in items[:_DIGEST_MAX_ITEMS]:
+        label = f"#{item['number']} {item['title']}"
+        ref = f"<{item['html_url']}|{label}>" if item.get("html_url") else label
+        lines.append(f"• {ref} — {_format_age(item['age_hours'])}")
+    if len(items) > _DIGEST_MAX_ITEMS:
+        lines.append(f"+{len(items) - _DIGEST_MAX_ITEMS} more")
+    if dashboard_url:
+        lines += ["", f"<{dashboard_url}|Promote / verify in the dashboard>"]
+    return "\n".join(lines)
+
+
+def notify_awaiting_testing_digest(*, app: str, items: list[dict], dashboard_url: str | None, channel: str | None) -> bool:
+    """Posts one digest of items stuck at awaiting-testing; False (never raises) if unconfigured, empty, or the post fails."""
+    if not is_configured() or not items:
+        return False
+    try:
+        text = _format_awaiting_testing_digest(app=app, items=items, dashboard_url=dashboard_url)
+        return _post_message(text, channel=channel) is not None
+    except Exception:
+        logger.warning("slack awaiting-testing digest failed for app=%r", app, exc_info=True)
+        return False

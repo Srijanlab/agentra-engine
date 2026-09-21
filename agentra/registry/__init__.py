@@ -32,6 +32,10 @@ from agentra.registry.core import (
     set_llm_backend,
     set_slack_channel,
 )
+from agentra.registry.digests import (
+    get_last_awaiting_digest_at,
+    record_awaiting_digest,
+)
 from agentra.registry.inbox import (
     DispatchSummary,
     dispatch_once,
@@ -61,6 +65,15 @@ from agentra.registry.loops import (
     set_loop_human_input,
     set_loop_pipeline,
     set_loop_status,
+)
+from agentra.registry.llm_pool import (
+    InvalidLLMPool,
+    get_llm_provider_health,
+    get_llm_rotation,
+    report_llm_provider_failure,
+    report_llm_provider_success,
+    select_llm_provider,
+    set_llm_rotation,
 )
 from agentra.registry.jobs import (
     JOB_KINDS,
@@ -109,6 +122,13 @@ sys.modules[__name__].__class__ = RegistryModule
 __all__ = [
     "DispatchSummary",
     "VALID_LLM_BACKENDS",
+    "InvalidLLMPool",
+    "get_llm_provider_health",
+    "get_llm_rotation",
+    "report_llm_provider_failure",
+    "report_llm_provider_success",
+    "select_llm_provider",
+    "set_llm_rotation",
     "RepoSpec",
     "cloud_mode",
     "dynamodb_resource",
@@ -116,6 +136,8 @@ __all__ = [
     "get_app_repos",
     "get_code_repos",
     "get_coordination_repo",
+    "get_last_awaiting_digest_at",
+    "record_awaiting_digest",
     "get_llm_backend",
     "get_run",
     "get_slack_channel",

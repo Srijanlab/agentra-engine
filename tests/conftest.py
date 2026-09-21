@@ -22,6 +22,8 @@ for _var in (
     "AGENTRA_FIRESTORE_PROJECT",
     "GCP_WORKLOAD_IDENTITY_CONFIG",
     "AGENTRA_GH_CACHE_TTL_SECONDS",
+    "AGENTRA_INTERNAL_TOKEN",
+    "CRON_SECRET",
 ):
     os.environ.pop(_var, None)
 

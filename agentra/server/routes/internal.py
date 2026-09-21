@@ -62,6 +62,8 @@ _REGISTRY_METHODS = frozenset({
     "get_slack_channel", "set_slack_channel",
     "is_paused", "pause", "resume",
     "get_llm_backend", "set_llm_backend",
+    "get_llm_rotation", "set_llm_rotation", "select_llm_provider",
+    "report_llm_provider_failure", "report_llm_provider_success", "get_llm_provider_health",
     "record_slack_thread", "resolve_slack_thread", "slack_thread_for",
     "get_run", "list_runs", "record_run", "last_run_at",
     "list_loops", "get_loop", "get_loop_pipeline", "bind_loop", "bind_loop_for_run", "bind_promote_loop",
@@ -191,6 +193,8 @@ async def rpc(req: RpcRequest) -> dict:
         result = fn(*req.args, **req.kwargs)
     except HTTPException:
         raise
+    except registry.InvalidLLMPool as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.warning("rpc %s.%s failed: %s", req.target, req.method, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
