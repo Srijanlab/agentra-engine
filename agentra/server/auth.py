@@ -18,10 +18,9 @@ _PUBLIC_PREFIXES = (
     "/favicon",
     "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
-    "/trigger/queue",     # internal enqueue path (loop / SQS)
+    "/trigger/queue",     # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/cron",      # own bearer token (AGENTRA_INTERNAL_TOKEN / CRON_SECRET)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible
-    "/debug/",            # temporary diagnostics
 )
 _PUBLIC_EXACT = {"", "/"}
 
@@ -71,7 +70,10 @@ async def auth_middleware(request: Request, call_next):
 
     email = (claims.get("email") or "").lower()
     allowed = _allowed_emails()
-    if allowed and email not in allowed:
+    if not allowed:
+        logger.warning("AGENTRA_ALLOWED_EMAILS is empty -- denying %s (deny-all); set it to admit users", email or "account")
+        return JSONResponse({"detail": "no accounts are authorized (AGENTRA_ALLOWED_EMAILS is empty)"}, status_code=403)
+    if email not in allowed:
         return JSONResponse({"detail": f"{email or 'this account'} is not authorized"}, status_code=403)
 
     request.state.user_email = email

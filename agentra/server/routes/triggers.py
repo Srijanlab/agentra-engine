@@ -8,13 +8,11 @@ prod-debug pass itself.
 from __future__ import annotations
 
 import base64
-import hmac
 import json
 import logging
-import os
 import time
 import uuid
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from agentra import environments, registry
@@ -23,6 +21,7 @@ from agentra.registry.scheduler import compute_schedule_status
 from agentra.server.digests.awaiting_testing import post_awaiting_testing_digest
 from agentra.server.routes.human_input import dispatch_human_answer
 from agentra.server.state import _active_runs
+from agentra.server.trigger_auth import verify_alarm_auth, verify_queue_auth, verify_tick_auth
 from agentra.server.utils import _paused_response, _server_log
 
 logger = logging.getLogger(__name__)
@@ -204,25 +203,12 @@ async def _tick() -> dict:
     return {"apps": results}
 
 
-def _verify_tick_auth(authorization: str | None) -> None:
-    """The loop's drain loop calls this on its idle tick (AGENTRA_INTERNAL_TOKEN);
-    an external cron may also use CRON_SECRET. Either satisfies it; if neither env
-    var is set the endpoint is open (local dev)."""
-    for var in ("AGENTRA_INTERNAL_TOKEN", "CRON_SECRET"):
-        secret = os.environ.get(var)
-        if secret and authorization == f"Bearer {secret}":
-            return
-    if os.environ.get("AGENTRA_INTERNAL_TOKEN") or os.environ.get("CRON_SECRET"):
-        raise HTTPException(status_code=401, detail="bad tick token")
-
-
-@router.get("/trigger/cron")
-async def trigger_cron(authorization: str | None = Header(default=None)) -> dict:
+@router.get("/trigger/cron", dependencies=[Depends(verify_tick_auth)])
+async def trigger_cron() -> dict:
     """The periodic scheduler tick: reconcile stale runs/loops, poll GitHub
     comments for human answers, enqueue every app due for a scheduled cycle,
     escalate stale waiting_for_human loops. Called by the loop's drain loop on
     its idle tick (and usable as an external cron target)."""
-    _verify_tick_auth(authorization)
     return await _tick()
 
 
@@ -280,22 +266,7 @@ async def promote_app(app_name: str, payload: PromoteTrigger | None = None) -> d
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
-def _verify_alarm_webhook_auth(authorization: str | None = Header(default=None)) -> None:
-    expected = os.environ.get("ALARM_WEBHOOK_PASSWORD")
-    if not expected:
-        return
-    if authorization is None or not authorization.startswith("Basic "):
-        raise HTTPException(status_code=401, detail="missing Basic auth")
-    try:
-        decoded = base64.b64decode(authorization.removeprefix("Basic ")).decode("utf-8")
-        _username, _, password = decoded.partition(":")
-    except Exception:
-        raise HTTPException(status_code=401, detail="malformed Basic auth")
-    if not hmac.compare_digest(password, expected):
-        raise HTTPException(status_code=401, detail="invalid credentials")
-
-
-@router.post("/trigger/alarm", dependencies=[Depends(_verify_alarm_webhook_auth)])
+@router.post("/trigger/alarm", dependencies=[Depends(verify_alarm_auth)])
 async def trigger_alarm(payload: dict) -> dict:
     if registry.is_paused():
         return _paused_response("alarm")
@@ -341,7 +312,7 @@ async def trigger_alarm(payload: dict) -> dict:
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
-@router.post("/trigger/queue")
+@router.post("/trigger/queue", dependencies=[Depends(verify_queue_auth)])
 async def trigger_queue(envelope: dict) -> dict:
     if registry.is_paused():
         _server_log("queue", "system is paused -- acking without processing")
