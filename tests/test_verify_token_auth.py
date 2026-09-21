@@ -1,0 +1,99 @@
+"""AGENTRA_VERIFY_TOKEN: scoped read-only pre-prod verification path in the auth gate."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from agentra import registry, server
+
+TOKEN = "verify-secret"
+HDR = {"X-Agentra-Verify-Token": TOKEN}
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(registry, "_ddb", None)
+    monkeypatch.setattr(registry, "AGENTRA_HOME", home)
+    monkeypatch.setattr(registry, "APPS_PATH", home / "apps.json")
+    monkeypatch.setattr(registry, "PAUSE_PATH", home / "paused.json")
+    monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
+    monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")
+    monkeypatch.setattr(registry, "_JOBS_PATH", home / "jobs.json")
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-test")
+    monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "a@example.com")
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", TOKEN)
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "internal")
+    for var in ("VERCEL_ENV", "AGENTRA_ENVIRONMENT", "AGENTRA_TICK_TOKEN", "CRON_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    registry.record_run("rk1", app="demo", status="completed")
+    return TestClient(server.app)
+
+
+def test_correct_token_reads_allowed_routes(client):
+    assert client.get("/apps", headers=HDR).status_code == 200
+    assert client.get("/runs/rk1", headers=HDR).json()["app"] == "demo"
+    missing = client.get("/runs/nope", headers=HDR)
+    assert missing.status_code == 404 and missing.json() == {"detail": "run 'nope' not found"}
+    assert client.get("/apps/demo/schedule", headers=HDR).status_code != 401
+
+
+@pytest.mark.parametrize("value", ["wrong", ""])
+@pytest.mark.parametrize("path", ["/apps", "/apps/demo/schedule", "/runs/rk1"])
+def test_wrong_or_empty_token_is_401(client, path, value):
+    assert client.get(path, headers={"X-Agentra-Verify-Token": value}).status_code == 401
+
+
+def test_token_unset_fails_closed(client, monkeypatch):
+    monkeypatch.delenv("AGENTRA_VERIFY_TOKEN")
+    for path in ("/apps", "/apps/demo/schedule", "/runs/rk1"):
+        assert client.get(path, headers=HDR).status_code == 401
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", "")
+    assert client.get("/apps", headers={"X-Agentra-Verify-Token": ""}).status_code == 401
+
+
+def test_authorization_header_does_not_carry_the_verify_token(client):
+    assert client.get("/apps", headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 401
+
+
+@pytest.mark.parametrize("path", [
+    "/apps/demo", "/runs", "/runs/rk1/logs", "/runs/rk1/screenshot", "/runs/rk1/trace",
+    "/loops", "/needs-human", "/system/llm-pool",
+])
+def test_token_is_route_scoped(client, path):
+    assert client.get(path, headers=HDR).status_code == 401
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/apps"), ("delete", "/apps/demo"), ("post", "/apps/demo/run"),
+    ("post", "/apps/demo/promote"), ("post", "/trigger/scheduled"), ("put", "/apps"),
+    ("patch", "/runs/rk1"), ("delete", "/runs/rk1"), ("post", "/apps/demo/schedule"),
+])
+def test_token_is_read_only(client, method, path):
+    assert getattr(client, method)(path, headers=HDR).status_code == 401
+    assert registry.get_run("rk1")["status"] == "completed"
+
+
+def test_token_never_authorizes_cron_or_internal(client, monkeypatch):
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    assert client.get("/trigger/cron", headers={**HDR, "Authorization": f"Bearer {TOKEN}"}).status_code == 401
+    assert client.get("/trigger/cron", headers=HDR).status_code == 401
+    rpc = client.post(
+        "/internal/rpc", json={"target": "registry", "method": "list_apps"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert rpc.status_code == 401
+
+
+@pytest.mark.parametrize("env", ["VERCEL_ENV", "AGENTRA_ENVIRONMENT"])
+def test_production_rejects_the_header(client, monkeypatch, env):
+    monkeypatch.setenv(env, "production")
+    assert client.get("/apps", headers=HDR).status_code == 403
+    assert client.get("/apps", headers={"X-Agentra-Verify-Token": "anything"}).status_code == 403
+    monkeypatch.delenv("AGENTRA_VERIFY_TOKEN")
+    assert client.get("/apps", headers=HDR).status_code == 403
+    assert client.get("/apps").status_code == 401
+
+
+def test_preview_deployment_allows_the_token(client, monkeypatch):
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    assert client.get("/apps", headers=HDR).status_code == 200

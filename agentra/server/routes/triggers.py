@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.memory import Memory
+from agentra.server import auth
 from agentra.registry.scheduler import compute_schedule_status
 from agentra.server.digests.awaiting_testing import post_awaiting_testing_digest
 from agentra.server.queue_auth import verify_queue_auth
@@ -209,15 +210,22 @@ async def _tick() -> dict:
     return {"apps": results}
 
 
+def _bearer_matches(authorization: str | None, secret: str | None) -> bool:
+    prefix = "Bearer "
+    if not secret or not authorization or not authorization.startswith(prefix):
+        return False
+    return hmac.compare_digest(authorization[len(prefix):].encode(), secret.encode())
+
+
 def _verify_tick_auth(authorization: str | None) -> None:
-    """The loop's drain loop calls this on its idle tick (AGENTRA_INTERNAL_TOKEN);
-    an external cron may also use CRON_SECRET. Either satisfies it; if neither env
-    var is set the endpoint is open (local dev)."""
-    for var in ("AGENTRA_INTERNAL_TOKEN", "CRON_SECRET"):
-        secret = os.environ.get(var)
-        if secret and authorization == f"Bearer {secret}":
-            return
-    if os.environ.get("AGENTRA_INTERNAL_TOKEN") or os.environ.get("CRON_SECRET"):
+    """Accept AGENTRA_TICK_TOKEN / CRON_SECRET (internal token only while no tick token is set); fail closed on cloud."""
+    tick = os.environ.get("AGENTRA_TICK_TOKEN")
+    internal = os.environ.get("AGENTRA_INTERNAL_TOKEN")
+    cron = os.environ.get("CRON_SECRET")
+    accepted = [tick, cron] + ([] if tick else [internal])
+    if any(_bearer_matches(authorization, secret) for secret in accepted):
+        return
+    if tick or internal or cron or auth._cloud_configured():
         raise HTTPException(status_code=401, detail="bad tick token")
 
 

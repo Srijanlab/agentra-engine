@@ -86,11 +86,14 @@ def touch_job(job_id: str, run_key: str | None = None) -> bool:
         return False
     if not _try_touch(job_id, now):
         return False
-    run_key = run_key or (job.get("payload") or {}).get("run_key")
-    if run_key:
+    payload_key = (job.get("payload") or {}).get("run_key")
+    if run_key and run_key != payload_key:
+        logger.debug("touch_job %s: ignoring supplied run_key that differs from the job's own", job_id)
+    if payload_key:
         from agentra.registry import runs
 
-        runs.record_run(run_key, updated_at=now)
+        if runs.get_run(payload_key) is not None:
+            runs.record_run(payload_key, updated_at=now)
     return True
 
 

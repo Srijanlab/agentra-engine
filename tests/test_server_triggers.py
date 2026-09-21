@@ -115,6 +115,60 @@ def test_cron_endpoint_requires_a_token_when_set(tmp_path, monkeypatch):
     assert {j["payload"]["app"] for j in registry.list_jobs()} == {"myapp"}
 
 
+def _cron(headers=None):
+    return _client().get("/trigger/cron", headers=headers)
+
+
+def _bearer(value):
+    return {"Authorization": f"Bearer {value}"}
+
+
+def test_cron_accepts_tick_token_and_cron_secret(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    monkeypatch.setenv("CRON_SECRET", "cronsecret")
+    ok = _cron(_bearer("tick"))
+    assert ok.status_code == 200 and "apps" in ok.json()
+    assert _cron(_bearer("cronsecret")).status_code == 200
+
+
+def test_cron_internal_token_only_while_tick_token_unset(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "internal")
+    monkeypatch.delenv("AGENTRA_TICK_TOKEN", raising=False)
+    assert _cron(_bearer("internal")).status_code == 200
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    assert _cron(_bearer("internal")).status_code == 401
+    assert _cron(_bearer("tick")).status_code == 200
+
+
+def test_cron_rejects_wrong_malformed_and_verify_tokens(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", "verify")
+    assert _cron().status_code == 401
+    assert _cron(_bearer("wrong")).status_code == 401
+    assert _cron({"Authorization": "tick"}).status_code == 401
+    assert _cron(_bearer("verify")).status_code == 401
+    assert _cron({"X-Agentra-Verify-Token": "verify"}).status_code == 401
+
+
+def test_cron_fails_closed_on_cloud_without_a_tick_credential(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "pre-")
+    for var in ("AGENTRA_TICK_TOKEN", "AGENTRA_INTERNAL_TOKEN", "CRON_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    assert _cron().status_code == 401
+    assert _cron(_bearer("anything")).status_code == 401
+
+
+def test_cron_open_in_local_dev_without_any_credential(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    for var in ("AGENTRA_TICK_TOKEN", "AGENTRA_INTERNAL_TOKEN", "CRON_SECRET", "FIREBASE_PROJECT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    assert _cron().status_code == 200
+
+
 def test_cron_releases_a_loop_whose_tracked_issue_has_been_closed(tmp_path, monkeypatch):
     """A run that ends non-terminally leaves its loop `active`; if a human then
     closes the issue, the scheduler tick must release the loop so no later cycle

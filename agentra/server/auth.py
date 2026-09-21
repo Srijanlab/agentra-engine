@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from agentra.server.verify_token import check_verify_token
+
 logger = logging.getLogger("agentra.server.auth")
 
 # Paths reachable without a signed-in user. Everything else needs a valid
@@ -20,7 +22,7 @@ _PUBLIC_PREFIXES = (
     "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
     "/trigger/queue",     # own bearer token or Pub/Sub OIDC (server/queue_auth.py)
-    "/trigger/cron",      # own bearer token (AGENTRA_INTERNAL_TOKEN / CRON_SECRET)
+    "/trigger/cron",      # own bearer token (AGENTRA_TICK_TOKEN / CRON_SECRET; internal token only as fallback)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible
 )
 _PUBLIC_EXACT = {"", "/"}
@@ -129,7 +131,12 @@ def _verify(token: str, project: str) -> dict | None:
 
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    if request.method == "OPTIONS" or path in _PUBLIC_EXACT or path.startswith(_PUBLIC_PREFIXES):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    verify = check_verify_token(request)
+    if isinstance(verify, JSONResponse):
+        return verify
+    if path in _PUBLIC_EXACT or path.startswith(_PUBLIC_PREFIXES) or verify is True:
         return await call_next(request)
 
     status = auth_status()

@@ -169,7 +169,7 @@ def test_attempt_cap_fails_a_poison_job_and_raises_a_gate(store, monkeypatch):
         assert run["status"] == "failed" and "HUMAN_INPUT_REQUIRED" in run["error"]
 
 
-def test_touch_job_stamps_the_runs_updated_at(tmp_path, monkeypatch):
+def test_touch_job_stamps_the_payload_run(tmp_path, monkeypatch):
     _local(tmp_path, monkeypatch)
     registry.record_run("rk", app="a", status="running", started_at=1.0, updated_at=1.0)
     jid = jobs.enqueue_job("cycle", {"app": "a", "run_key": "rk"})
@@ -177,9 +177,37 @@ def test_touch_job_stamps_the_runs_updated_at(tmp_path, monkeypatch):
     before = time.time()
     assert jobs.touch_job(jid) is True
     assert registry.get_run("rk")["updated_at"] >= before
+
+
+def test_touch_job_ignores_a_differing_supplied_run_key(tmp_path, monkeypatch):
+    _local(tmp_path, monkeypatch)
+    registry.record_run("rk", app="a", status="running", started_at=1.0, updated_at=1.0)
     registry.record_run("other", app="a", status="running", started_at=1.0, updated_at=1.0)
+    jid = jobs.enqueue_job("cycle", {"app": "a", "run_key": "rk"})
+    jobs.claim_next_job()
+    before = time.time()
     assert jobs.touch_job(jid, run_key="other") is True
-    assert registry.get_run("other")["updated_at"] >= before
+    assert registry.get_run("other")["updated_at"] == 1.0
+    assert registry.get_run("rk")["updated_at"] >= before
+
+
+def test_touch_job_ignores_supplied_run_key_without_payload_run_key(tmp_path, monkeypatch):
+    _local(tmp_path, monkeypatch)
+    registry.record_run("other", app="a", status="running", started_at=1.0, updated_at=1.0)
+    jid = jobs.enqueue_job("cycle", {"app": "a"})
+    jobs.claim_next_job()
+    assert jobs.touch_job(jid, run_key="other") is True
+    assert registry.get_run("other")["updated_at"] == 1.0
+
+
+def test_touch_job_never_creates_a_run(tmp_path, monkeypatch):
+    _local(tmp_path, monkeypatch)
+    jid = jobs.enqueue_job("cycle", {"app": "a", "run_key": "ghost"})
+    jobs.claim_next_job()
+    assert jobs.touch_job(jid, run_key="ghost") is True
+    assert jobs.touch_job(jid, run_key="phantom") is True
+    assert registry.get_run("ghost") is None
+    assert registry.get_run("phantom") is None
 
 
 def test_record_run_stamps_updated_at_unless_given(tmp_path, monkeypatch):
@@ -254,3 +282,15 @@ def test_heartbeat_endpoint(client):
     assert client.post(f"/internal/jobs/{jid}/heartbeat", headers=auth).json() == {"renewed": True}
     assert client.post("/internal/jobs/nope/heartbeat", headers=auth).json() == {"renewed": False}
     assert client.post(f"/internal/jobs/{jid}/heartbeat").status_code == 401
+
+
+def test_heartbeat_endpoint_never_creates_a_run(client):
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    r = client.post("/internal/jobs/nope/heartbeat", json={"run_key": "nonexistent-run-xyz"}, headers=auth)
+    assert r.status_code == 200 and r.json() == {"renewed": False}
+    assert registry.get_run("nonexistent-run-xyz") is None
+    jid = jobs.enqueue_job("cycle", {"app": "a"})
+    jobs.claim_next_job()
+    r = client.post(f"/internal/jobs/{jid}/heartbeat", json={"run_key": "nonexistent-run-xyz"}, headers=auth)
+    assert r.json() == {"renewed": True}
+    assert registry.get_run("nonexistent-run-xyz") is None
