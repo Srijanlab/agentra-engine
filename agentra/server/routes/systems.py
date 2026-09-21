@@ -62,6 +62,11 @@ async def get_llm_pool() -> dict:
     return {**registry.get_llm_rotation(), "health": registry.get_llm_provider_health()}
 
 
+@router.get("/debug/llm-rotation")
+async def debug_llm_rotation() -> dict:
+    return registry.get_llm_rotation()
+
+
 @router.put("/system/llm-pool")
 async def set_llm_pool(payload: dict | None = None) -> dict:
     try:

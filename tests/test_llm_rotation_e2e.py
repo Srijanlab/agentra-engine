@@ -73,3 +73,33 @@ def test_simulated_24h_selects_each_backend_equally(client, monkeypatch, pool):
     assert set(counts) == set(pool)
     assert set(counts.values()) == {24 // len(pool)}
 
+
+def test_debug_rotation_reflects_rpc_set_without_credentials(client):
+    assert _rpc(client, "set_llm_rotation", ["claude", "nim", "gemini"]).status_code == 200
+    expected = {"backends": ["claude", "nim", "gemini"], "current_index": 0}
+    resp = client.get("/debug/llm-rotation")
+    assert resp.status_code == 200
+    assert resp.json() == expected
+    assert _rpc(client, "get_llm_rotation").json()["result"] == expected
+
+
+def test_debug_rotation_is_read_only(client):
+    _rpc(client, "set_llm_rotation", ["claude", "nim", "gemini"])
+    bodies = [client.get("/debug/llm-rotation").json() for _ in range(3)]
+    assert bodies == [{"backends": ["claude", "nim", "gemini"], "current_index": 0}] * 3
+    for method in (client.post, client.put, client.delete):
+        assert method("/debug/llm-rotation").status_code == 405
+    assert client.get("/debug/llm-rotation").json() == bodies[0]
+
+
+def test_debug_rotation_public_while_llm_pool_needs_sign_in(client, monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    assert client.get("/debug/llm-rotation").status_code == 200
+    assert client.get("/system/llm-pool").status_code == 401
+
+
+def test_unauthenticated_set_rpc_leaves_debug_rotation_unchanged(client):
+    _rpc(client, "set_llm_rotation", ["claude", "nim"])
+    body = {"target": "registry", "method": "set_llm_rotation", "args": [["gemini"]], "kwargs": {}}
+    assert client.post("/internal/rpc", json=body).status_code == 401
+    assert client.get("/debug/llm-rotation").json()["backends"] == ["claude", "nim"]

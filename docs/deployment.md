@@ -40,9 +40,12 @@ accept `AGENTRA_PREPROD_INTERNAL_TOKEN`. A pre-prod-scoped token is a distinct
 only, and it must never equal the production value. The Testing Agent lives in
 agentra-loop, so where it reads a token named `AGENTRA_PREPROD_INTERNAL_TOKEN`
 is owned and configured there. `/v1/messages` is served by the separate NIM
-proxy (`agentra/proxy/main.py`), not the engine app. LLM rotation behaviour
-(`set_llm_rotation` / `get_llm_rotation` / `select_llm_provider`) is verified by
-the local tests in `tests/test_llm_rotation_e2e.py`, not by live calls.
+proxy (`agentra/proxy/main.py`), not the engine app. LLM rotation state can be checked live without any credential via the
+read-only `GET /debug/llm-rotation`, which returns only `{"backends": [...],
+"current_index": <int>}` (no health, cooldown or secrets; other methods return
+405). State-changing calls (`set_llm_rotation`, `select_llm_provider`) still
+require the deployment's own `AGENTRA_INTERNAL_TOKEN`; rotation behaviour is
+covered by `tests/test_llm_rotation_e2e.py`.
 `GET /` on an API-only deploy (no built dashboard) returns
 `{"status": "ok", "service": "agentra-engine", "commit": ...}`.
 
