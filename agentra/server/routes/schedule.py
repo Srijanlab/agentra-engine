@@ -26,6 +26,8 @@ async def get_app_schedule(app_name: str) -> dict:
     return {
         "app": app_name,
         "cadence_hours": status.cadence_hours,
+        "continuous": status.continuous,
+        "gap_seconds": status.gap_seconds,
         "last_scheduled_run_at": status.last_scheduled_run_at,
         "next_scheduled_run_at": status.next_scheduled_run_at,
         "due_now": status.due_now,

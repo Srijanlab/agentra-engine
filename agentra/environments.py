@@ -36,6 +36,8 @@ class EnvironmentConfig:
     deploy_strategy: str = "vercel_firebase"
     # Per-app schedule: how often a scheduled cycle should actually run this
     schedule_hours: float = 24.0
+    # Run cycles back to back (overrides schedule_hours, including 0).
+    schedule_continuous: bool = False
     # Per-app opt-out of the alarm-triggered prod-debug path.
     alarm_enabled: bool = True
 
@@ -57,10 +59,11 @@ _GITHUB_VARIABLE_NAMES = {
     "pre_prod_url": "AGENTRA_PRE_PROD_URL",
     "auto_remediate_prod": "AGENTRA_AUTO_REMEDIATE_PROD",
     "schedule_hours": "AGENTRA_SCHEDULE_HOURS",
+    "schedule_continuous": "AGENTRA_SCHEDULE_CONTINUOUS",
     "alarm_enabled": "AGENTRA_ALARM_ENABLED",
     "deploy_strategy": "AGENTRA_DEPLOY_STRATEGY",
 }
-_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled"}
+_BOOL_FIELDS = {"vercel", "firebase", "ci_cd_on_push", "auto_remediate_prod", "alarm_enabled", "schedule_continuous"}
 _FLOAT_FIELDS = {"schedule_hours"}
 
 

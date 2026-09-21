@@ -81,6 +81,7 @@ from agentra.registry.jobs import (
     enqueue_job,
     list_jobs,
     report_job,
+    touch_job,
 )
 
 _DELEGATED_NAMES = {
@@ -160,6 +161,7 @@ __all__ = [
     "enqueue_job",
     "claim_next_job",
     "report_job",
+    "touch_job",
     "list_jobs",
     "list_runs",
     "list_waiting_for_human",

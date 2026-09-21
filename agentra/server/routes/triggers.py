@@ -80,13 +80,17 @@ async def _enqueue_cycle(
         return {"triggered": False, "reason": "no objective set for this app"}
 
     if enforce_schedule:
-        due_in = compute_schedule_status(app_name, repo).due_in_seconds
-        if due_in is not None and due_in > 0:
-            _server_log(source, f"app={app_name!r} not due for {due_in / 3600:.1f}h more -- skipped")
+        status = compute_schedule_status(app_name, repo)
+        if not status.due_now:
+            _server_log(source, f"app={app_name!r} not due (due_in={status.due_in_seconds}) -- skipped")
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
 
-    # dedup: one open cycle job per app -- the loop runs one backlog item per run.
-    if any(j.get("payload", {}).get("app") == app_name for j in registry.list_jobs(status="pending")):
+    # dedup: one open cycle job per app (pending or claimed) -- the loop runs one backlog item per run.
+    if any(
+        j.get("kind") == "cycle" and j.get("payload", {}).get("app") == app_name
+        for status in ("pending", "claimed")
+        for j in registry.list_jobs(status=status)
+    ):
         return {"triggered": False, "reason": "a cycle for this app is already queued"}
 
     run_key = _new_run_key(app_name, source, objective, feature=feature)

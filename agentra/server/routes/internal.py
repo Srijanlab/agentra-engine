@@ -72,7 +72,7 @@ _REGISTRY_METHODS = frozenset({
     "list_agent_steps",
     "list_waiting_for_human", "reconcile_stale_runs", "reconcile_stale_loops", "reconcile_waiting_for_human",
     "submit_request", "dispatch_once",
-    "enqueue_job", "claim_next_job", "report_job", "list_jobs",
+    "enqueue_job", "claim_next_job", "report_job", "list_jobs", "touch_job",
 })
 
 _MEMORY_METHODS = frozenset({
@@ -203,6 +203,16 @@ async def rpc(req: RpcRequest) -> dict:
         _invalidate_gh_cache_for_rpc(req.repo_url)
 
     return {"result": _json_safe(result)}
+
+
+class HeartbeatRequest(BaseModel):
+    run_key: str | None = None
+
+
+@router.post("/jobs/{job_id}/heartbeat", dependencies=[Depends(_require_token)])
+async def job_heartbeat(job_id: str, req: HeartbeatRequest | None = None) -> dict:
+    """Renew a claimed job's lease; `renewed` is False once the loop has lost it."""
+    return {"renewed": registry.touch_job(job_id, req.run_key if req else None)}
 
 
 class RunLogRequest(BaseModel):
