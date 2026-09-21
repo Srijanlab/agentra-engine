@@ -19,3 +19,11 @@ def dashboard_run_url(run_id: str, app_name: str, *, tab: str = "needs-input") -
     if base is None:
         return None
     return f"{base}/?app={app_name}&run={run_id}&tab={tab}"
+
+
+def dashboard_app_url(app_name: str, tab: str = "awaiting-testing") -> str | None:
+    """Deep link into an app's dashboard tab, or None if AGENTRA_DASHBOARD_BASE_URL is unset."""
+    base = dashboard_base_url()
+    if base is None:
+        return None
+    return f"{base}/?app={app_name}&tab={tab}"

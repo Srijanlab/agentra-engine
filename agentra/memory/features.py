@@ -49,11 +49,13 @@ class MemoryFeaturesMixin:
                 if wanted & names and _NEED_HUMAN_LABEL not in names:
                     entry = _github_bug_to_dict(i)
                     entry["kind"] = "bug"
+                    entry["updated_at"] = i.get("updated_at")
                     result.append(entry)
             for i in features:
                 if wanted & _label_names(i):
                     entry = _github_feature_to_dict(i)
                     entry["kind"] = "feature"
+                    entry["updated_at"] = i.get("updated_at")
                     result.append(entry)
             return result
         except Exception:

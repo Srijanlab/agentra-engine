@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from agentra import environments, registry
 from agentra.memory import Memory
 from agentra.registry.scheduler import compute_schedule_status
+from agentra.server.digests.awaiting_testing import post_awaiting_testing_digest
 from agentra.server.routes.human_input import dispatch_human_answer
 from agentra.server.state import _active_runs
 from agentra.server.utils import _paused_response, _server_log
@@ -194,6 +195,10 @@ async def _tick() -> dict:
             _reconcile_closed_issue_loops(app_name)
         except Exception:
             logger.warning("tick: closed-issue loop reconciliation failed for app=%r", app_name, exc_info=True)
+        try:
+            post_awaiting_testing_digest(app_name)
+        except Exception:
+            logger.warning("tick: awaiting-testing digest failed for app=%r", app_name, exc_info=True)
         results[app_name] = await _enqueue_cycle(app_name, "scheduled", None, None, False, enforce_schedule=True)
     _reconcile_human_input_timeouts()
     return {"apps": results}

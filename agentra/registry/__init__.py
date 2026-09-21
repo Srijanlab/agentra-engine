@@ -32,6 +32,10 @@ from agentra.registry.core import (
     set_llm_backend,
     set_slack_channel,
 )
+from agentra.registry.digests import (
+    get_last_awaiting_digest_at,
+    record_awaiting_digest,
+)
 from agentra.registry.inbox import (
     DispatchSummary,
     dispatch_once,
@@ -132,6 +136,8 @@ __all__ = [
     "get_app_repos",
     "get_code_repos",
     "get_coordination_repo",
+    "get_last_awaiting_digest_at",
+    "record_awaiting_digest",
     "get_llm_backend",
     "get_run",
     "get_slack_channel",
