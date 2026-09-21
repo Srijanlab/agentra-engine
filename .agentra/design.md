@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 714fce8810aab61d2f1944770f46fec5258a6b5e -->
+<!-- source-sha: 3b510085b9233eb46647a0adf4147b90d569a2dd -->
 - Engine = state authority, loop = execution — a hard split. Trigger endpoints only `registry.enqueue_job({cycle|promote|prod_debug|human_resume})`; agentra-loop drains the queue and reports back. The engine carries no `claude-agent-sdk` and no docker/deploy code.
 - One RPC contract. `POST /internal/rpc` gated by `AGENTRA_INTERNAL_TOKEN` (+ optional Vercel-header IP allowlist), restricted to the `_REGISTRY_METHODS` / `_MEMORY_METHODS` frozensets, is the entire state surface the loop may touch. Credential-holding side doors are separate token-gated endpoints (`/internal/git-token`, `/internal/slack/message`, `/internal/runs/{id}/log`).
 - Dual-path persistence. Every registry/memory write is `if core._ddb: <DynamoDB> else: <local JSON under AGENTRA_HOME>`. DynamoDB (static prefixed `AGENTRA_AWS_*` IAM keys) backs prod; local JSON serves the CLI, tests, and the loop's own process. `cloud_mode()` gates all checkout-dependent behavior.
@@ -17,5 +17,3 @@
 - Silent-run gate (`server/human_gate/`, #55): a two-path, idempotent mechanism — a fast path right after each `record_run` RPC plus a `/trigger/cron` sweep backstop — so a run that asks for a human in its summary/error always gets the `need_human` label, loop human-input state, and a Slack thread.
 - Multi-part feature guard (#38): the parent issue is only marked code-complete when `open_sub_issue_count` is 0; `record_code_complete` reports `blocked_by_open_sub_issues` to the caller.
 - Failure escalation (#42/#46/#47): auth and unfixable failures share `_escalate_blocking_failure` (thread-mapped Slack notify + human-input context + loop `waiting_for_human`), deduped against similar open bugs.
-- LLM provider pool (`registry/llm_pool.py`): an ordered rotation of validated backends with round-robin selection, per-provider cooldown (the reported retry-after, else exponential backoff from 60s capped at 1h), and a fallback to the single `llm_backend` when no rotation is stored. The loop drives it through whitelisted RPC methods; the dashboard through `/system/llm-pool*`.
-- Awaiting-testing digest (`server/digests/`): a cron-tick side effect that posts one Slack digest per app per 24h listing items whose issue `updated_at` is older than a configurable threshold. The last-post time lives in the registry (`system` table or local JSON), is recorded only after a successful post, and all failures are swallowed.
