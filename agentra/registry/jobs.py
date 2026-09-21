@@ -98,10 +98,21 @@ def touch_job(job_id: str, run_key: str | None = None) -> bool:
 
 
 def _requeue_stale_claims(now: float) -> None:
+    """Re-queue stale claimed jobs based on app heartbeat ceiling.\n    Jobs are considered stale if the time since the most recent heartbeat\n    for their app exceeds the configured stale heartbeat threshold."""
     threshold = core.stale_heartbeat_seconds()
+    # Build max heartbeat per app across all claimed jobs
+    app_max_heartbeat: dict[str, float] = {}
     for job in _jobs_by_status("claimed"):
-        lease = float(job.get("heartbeat_at") or job.get("claimed_at") or 0)
-        if now - lease <= threshold:
+        heartbeat = float(job.get("heartbeat_at") or job.get("claimed_at") or 0)
+        app = job.get("payload", {}).get("app") or ""
+        current = app_max_heartbeat.get(app, 0)
+        if heartbeat > current:
+            app_max_heartbeat[app] = heartbeat
+    # Now re-evaluate each job using its app's max heartbeat
+    for job in _jobs_by_status("claimed"):
+        app = job.get("payload", {}).get("app") or ""
+        max_hb = app_max_heartbeat.get(app, 0)
+        if now - max_hb <= threshold:
             continue
         if int(job.get("attempts", 0)) >= max_job_attempts():
             _fail_poison_job(job)
