@@ -44,4 +44,6 @@ Full list with placeholders: [`.env.example`](.env.example).
 GitHub access is the `agentra-orchestrator` GitHub App (per-repo installation
 tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback.
 
-`/debug/dynamodb` reports which of these resolved (no secret values).
+`/debug/dynamodb` reports which of these resolved (no secret values); it requires a Firebase sign-in when `FIREBASE_PROJECT_ID` is set.
+
+`POST /trigger/queue` requires `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Pub/Sub OIDC token (set `AGENTRA_PUBSUB_AUDIENCE`, optionally `AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL`).

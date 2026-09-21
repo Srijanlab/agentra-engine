@@ -21,6 +21,7 @@ from agentra import environments, registry
 from agentra.memory import Memory
 from agentra.registry.scheduler import compute_schedule_status
 from agentra.server.digests.awaiting_testing import post_awaiting_testing_digest
+from agentra.server.queue_auth import verify_queue_auth
 from agentra.server.routes.human_input import dispatch_human_answer
 from agentra.server.state import _active_runs
 from agentra.server.utils import _paused_response, _server_log
@@ -341,7 +342,7 @@ async def trigger_alarm(payload: dict) -> dict:
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
-@router.post("/trigger/queue")
+@router.post("/trigger/queue", dependencies=[Depends(verify_queue_auth)])
 async def trigger_queue(envelope: dict) -> dict:
     if registry.is_paused():
         _server_log("queue", "system is paused -- acking without processing")

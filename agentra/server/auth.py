@@ -18,10 +18,9 @@ _PUBLIC_PREFIXES = (
     "/favicon",
     "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
-    "/trigger/queue",     # internal enqueue path (loop / SQS)
+    "/trigger/queue",     # own bearer token or Pub/Sub OIDC (server/queue_auth.py)
     "/trigger/cron",      # own bearer token (AGENTRA_INTERNAL_TOKEN / CRON_SECRET)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible
-    "/debug/",            # temporary diagnostics
 )
 _PUBLIC_EXACT = {"", "/"}
 

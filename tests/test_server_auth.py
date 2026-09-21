@@ -50,3 +50,31 @@ def test_token_via_query_param_for_eventsource(monkeypatch):
     client = TestClient(server.app)
     assert client.get("/agents/metadata?access_token=good").status_code == 200
     assert client.get("/agents/metadata?access_token=bad").status_code == 401
+
+
+def test_debug_endpoints_need_sign_in(monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    client = TestClient(server.app)
+    for path in ("/debug/dynamodb", "/debug/llm-rotation"):
+        r = client.get(path)
+        assert r.status_code == 401
+        assert "table_prefix" not in r.text and "region" not in r.text
+
+
+def test_debug_endpoints_pass_gate_with_valid_token(monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "allowed@example.com"})
+    client = TestClient(server.app)
+    headers = {"Authorization": "Bearer x"}
+    assert client.get("/debug/dynamodb", headers=headers).status_code == 200
+    body = client.get("/debug/llm-rotation", headers=headers)
+    assert body.status_code == 200 and {"backends", "current_index"} <= set(body.json())
+
+
+def test_cron_and_health_stay_public(monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "tok")
+    client = TestClient(server.app)
+    assert client.get("/health").status_code == 200
+    assert client.get("/trigger/cron", headers={"Authorization": "Bearer nope"}).status_code == 401
