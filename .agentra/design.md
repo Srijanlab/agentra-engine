@@ -1,11 +1,19 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: b3b818ce3cc00f2d894c9534521b1af05b45920d -->
-- Strict Single‑Responsibility Principle across modules.
-- Sub‑folder organization for domain concerns.
-- 500‑line file cap to enforce SRP.
-- Dual‑path storage: DynamoDB if configured, otherwise local JSON.
-- RPC whitelisting for internal engine governance.
-- Memoized GitHub caching with TTL and invalidation hooks.
-- Human‑gate flow on `HUMAN_INPUT_REQUIRED` via Slack thread tracking.
-- Test isolation via environment overrides in pytest `conftest.py`.
-- Vercel serverless deployment with ASGI entry (`api/index.py`).
+<!-- source-sha: 3b510085b9233eb46647a0adf4147b90d569a2dd -->
+- Engine = state authority, loop = execution — a hard split. Trigger endpoints only `registry.enqueue_job({cycle|promote|prod_debug|human_resume})`; agentra-loop drains the queue and reports back. The engine carries no `claude-agent-sdk` and no docker/deploy code.
+- One RPC contract. `POST /internal/rpc` gated by `AGENTRA_INTERNAL_TOKEN` (+ optional Vercel-header IP allowlist), restricted to the `_REGISTRY_METHODS` / `_MEMORY_METHODS` frozensets, is the entire state surface the loop may touch. Credential-holding side doors are separate token-gated endpoints (`/internal/git-token`, `/internal/slack/message`, `/internal/runs/{id}/log`).
+- Dual-path persistence. Every registry/memory write is `if core._ddb: <DynamoDB> else: <local JSON under AGENTRA_HOME>`. DynamoDB (static prefixed `AGENTRA_AWS_*` IAM keys) backs prod; local JSON serves the CLI, tests, and the loop's own process. `cloud_mode()` gates all checkout-dependent behavior.
+- Durable queue with self-healing: CAS claim on a `by-status` GSI, stale-claim requeue after 1h, native DynamoDB TTL on terminal jobs.
+- Module-proxy pattern for `registry`/`memory` so sub-modules can mutate shared `core` state through delegated names.
+- Memory modelled as GitHub Issues/Projects composed from 5 mixins; failure triage via regex classes (transient / unfixable / login-required).
+- SRP + 500-line file cap + domain subfolders enforced by CLAUDE.md; features needing a checkout return 503 rather than half-working.
+- Backward-compatible label rename (GitHub issue #38): `status:shipped` -> `status:awaiting-testing` is a write-forward, read-both migration — every write path emits/strips the new label, every read path matches both names, and an idempotent `migrate_awaiting_testing_label` (CLI `migrate-labels`, or automatic on app registration) does the one-time GitHub-side move per repo.
+- Single source of truth for pipeline UI shape: `memory.core.pipeline_stages()` defines the dashboard's ordered columns once, exposed read-only at `GET /pipeline/stages`.
+- Loop lifecycle self-healing: `_reconcile_closed_issue_loops` releases any loop left active/waiting/escalated whose tracked GitHub issue was closed out-of-band (agentra#20/#25).
+- Internal-comment allowlist: every orchestrator-authored comment prefix is registered in `_INTERNAL_COMMENT_PREFIXES`, and `find_unanswered_human_input_comment` anchors to the most recent human-input marker, so the orchestrator's own comments or an already-consumed answer are never read as a fresh human answer (agentra#38, #54).
+- Label comparisons against a live GitHub issue always go through `_label_names()`, never raw list membership — the REST API returns `{name: ...}` objects while `github_fake` uses flat strings.
+- Loop recency is a derived, real-activity-only sort key (`_recency()`), distinct from `updated_at`; the `by-app-recency` GSI is only an overfetch source, re-sorted in Python.
+- Read-through dashboard cache (`server/gh_cache/`): in-process dict over a durable layer (DynamoDB `gh-cache` table in cloud mode, local JSON otherwise), stale-on-error, with optional etag pass-through to producers. Mutating memory RPCs (`_MEMORY_MUTATION_METHODS`) invalidate the owning app's keys via `invalidate_app`.
+- Silent-run gate (`server/human_gate/`, #55): a two-path, idempotent mechanism — a fast path right after each `record_run` RPC plus a `/trigger/cron` sweep backstop — so a run that asks for a human in its summary/error always gets the `need_human` label, loop human-input state, and a Slack thread.
+- Multi-part feature guard (#38): the parent issue is only marked code-complete when `open_sub_issue_count` is 0; `record_code_complete` reports `blocked_by_open_sub_issues` to the caller.
+- Failure escalation (#42/#46/#47): auth and unfixable failures share `_escalate_blocking_failure` (thread-mapped Slack notify + human-input context + loop `waiting_for_human`), deduped against similar open bugs.

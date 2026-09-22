@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: b3b818ce3cc00f2d894c9534521b1af05b45920d -->
+<!-- source-sha: 714fce8810aab61d2f1944770f46fec5258a6b5e -->
 # engine — Architecture
 
 ## Purpose
