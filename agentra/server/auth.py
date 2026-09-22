@@ -1,5 +1,4 @@
-"""server/auth.py — Google (Firebase) sign-in gate for the dashboard API."""
-
+"""server/auth.py — Google (Firebase) sign-in gate for the dashboard API.""
 from __future__ import annotations
 
 import logging
@@ -19,15 +18,14 @@ _PUBLIC_PREFIXES = (
     "/health",
     "/healthz",
     "/favicon",
-    "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
+    // Removed "/internal/" to enforce access via AGENTRA_INTERNAL_TOKEN
     "/trigger/alarm",     # own Basic-auth password
     "/trigger/queue",     # own bearer token or Pub/Sub OIDC (server/queue_auth.py)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible
 )
 _PUBLIC_EXACT = {"", "/"}
 
-_ISSUER_PREFIX = "https://securetoken.google.com/"
-
+_ISSUER_PREFIX = "https://securetoken.google.com/
 
 def _allowed_emails() -> set[str]:
     raw = os.environ.get("AGENTRA_ALLOWED_EMAILS", "")
@@ -39,8 +37,7 @@ def _firebase_project() -> str:
 
 
 def _cloud_configured() -> bool:
-    """True when DynamoDB is live or its table prefix is set (init never raises, so creds can fail silently)."""
-    try:
+    """True when DynamoDB is live or its table prefix is set (init never raises, so creds can fail silently).""    try:
         from agentra import registry
 
         if registry.cloud_mode():
@@ -52,8 +49,7 @@ def _cloud_configured() -> bool:
 
 @dataclass(frozen=True)
 class AuthStatus:
-    """Snapshot of the auth gate's configuration; carries booleans only, never secret values."""
-
+    """Snapshot of the auth gate's configuration; carries booleans only, never secret values.""
     cloud_mode: bool
     firebase_configured: bool
     allowlist_configured: bool
@@ -65,16 +61,14 @@ class AuthStatus:
         out = [] if self.firebase_configured else ["FIREBASE_PROJECT_ID"]
         # Allowlist may be empty in the pre‑prod test harness; if it is empty we consider the mode "open" and do not flag a missing value.
         if not self.allowlist_configured:
-            # No allowlist, so missing is only Firebase config.
-            return out
+            # No allowlist, so missing is Firebase config and allowlist.
+            return out + ["AGENTRA_ALLOWED_EMAILS"]
         return out + ["AGENTRA_ALLOWED_EMAILS"]
 
     @property
     def mode(self) -> str:
         if self.missing:
-            return "misconfigured"
-        return "enforced" if self.firebase_configured else "open"
-
+            return "misconfigured        return "enforced" if self.firebase_configured else "open
     @property
     def problems(self) -> list[str]:
         if self.missing:
@@ -94,16 +88,14 @@ class AuthStatus:
 
 
 def auth_status() -> AuthStatus:
-    """Compute the current auth mode from env and registry state; never raises."""
-    try:
+    """Compute the current auth mode from env and registry state; never raises.""    try:
         return AuthStatus(_cloud_configured(), bool(_firebase_project()), bool(_allowed_emails()))
     except Exception:
         return AuthStatus(True, False, False)
 
 
 def log_startup_warnings() -> None:
-    """Warn once at startup when the API is unauthenticated or admits any Firebase account."""
-    status = auth_status()
+    """Warn once at startup when the API is unauthenticated or admits any Firebase account.""    status = auth_status()
     if status.mode == "open":
         logger.warning("API is unauthenticated: neither DynamoDB nor FIREBASE_PROJECT_ID is configured")
     elif status.mode == "misconfigured":
@@ -113,8 +105,7 @@ def log_startup_warnings() -> None:
 
 
 def _token_from(request: Request) -> str | None:
-    header = request.headers.get("authorization") or ""
-    if header[:7].lower() == "bearer ":
+    header = request.headers.get("authorization") or "    if header[:7].lower() == "bearer ":
         return header[7:].strip()
     # EventSource cannot set headers -> accept the ID token as a query param.
     token = request.query_params.get("access_token")
@@ -157,8 +148,7 @@ async def auth_middleware(request: Request, call_next):
             accepted.append(internal_token)
         # If a token is defined, require Authorization header
         if accepted:
-            auth_header = request.headers.get("authorization") or ""
-            if auth_header.lower().startswith("bearer "):
+            auth_header = request.headers.get("authorization") or "            if auth_header.lower().startswith("bearer "):
                 bearer = auth_header[7:].strip()
                 if bearer in accepted:
                     return await call_next(request)
@@ -197,7 +187,5 @@ async def auth_middleware(request: Request, call_next):
 
 CORS_ORIGIN_REGEX = os.environ.get(
     "AGENTRA_WEB_ORIGIN_REGEX",
-    r"^(https://([a-z0-9-]+\.)?srijanlab\.com"
-    r"|https://[a-z0-9-]+(--[a-z0-9-]+)?\.(web\.app|firebaseapp\.com)"
-    r"|http://localhost:5173)$",
+    r"^(https://([a-z0-9-]+\.)?srijanlab\.com    r"|https://[a-z0-9-]+(--[a-z0-9-]+)?\.(web\.app|firebaseapp\.com)    r"|http://localhost:5173)$",
 )
