@@ -129,6 +129,11 @@ def _looks_like_non_fast_forward_rejection(stderr: str) -> bool:
 
 
 def push_branch(repo: Path, branch: str) -> None:
+    """Push the local `branch` to origin. If origin/`branch` has moved since this checkout last synced with it (a concurrent push elsewhere -- GitHub issue #88), pulls the new remote tip into the local branch and retries the push once, rather than immediately failing on the first non-fast-forward rejection.
+    Additionally, if a push fails due to GitHub App lacking workflow permissions, the error message is augmented to mention the required "Workflows: write" permission.
+    """
+    auth = _extra_auth_args(_origin_url(repo))
+    try:
     """Push the local `branch` to origin. If origin/`branch` has moved since this checkout last synced with it (a concurrent push elsewhere -- GitHub issue #88), pulls the new remote tip into the local branch and retries the push once, rather than immediately failing on the first non-fast-forward rejection."""
     auth = _extra_auth_args(_origin_url(repo))
     try:
@@ -139,6 +144,11 @@ def push_branch(repo: Path, branch: str) -> None:
         return
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+        # Special case: GitHub App missing 'workflows' permission, provide actionable hint
+        if 'refusing to allow a GitHub App to' in stderr and 'workflows' in stderr and 'permission' in stderr:
+            full_message = f"push_branch({branch!r}) failed: {stderr}"
+            full_message += " (requires 'Workflows: write' permission)"
+            raise GitOpError(full_message) from exc
         if not _looks_like_non_fast_forward_rejection(stderr):
             raise GitOpError(f"push_branch({branch!r}) failed: {stderr}") from exc
 
