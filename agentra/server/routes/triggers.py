@@ -220,13 +220,14 @@ def _bearer_matches(authorization: str | None, secret: str | None) -> bool:
 def _verify_tick_auth(authorization: str | None) -> None:
     """Accept AGENTRA_TICK_TOKEN / CRON_SECRET (internal token only while no tick token is set); fail closed on cloud."""
     tick = os.environ.get("AGENTRA_TICK_TOKEN")
-    internal = os.environ.get("AGENTRA_INTERNAL_TOKEN")
     cron = os.environ.get("CRON_SECRET")
-    accepted = [tick, cron] + ([] if tick else [internal])
-    if any(_bearer_matches(authorization, secret) for secret in accepted):
+    # Accept only the tick token or (if no tick token) the CRON secret.
+    if tick and _bearer_matches(authorization, tick):
         return
-    if tick or internal or cron or auth._cloud_configured():
-        raise HTTPException(status_code=401, detail="bad tick token")
+    if not tick and cron and _bearer_matches(authorization, cron):
+        return
+    # Any other token, including AGENTRA_INTERNAL_TOKEN, should fail.
+    raise HTTPException(status_code=401, detail="bad tick token")
 
 
 @router.get("/trigger/cron")
