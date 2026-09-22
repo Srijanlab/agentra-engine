@@ -1,42 +1,31 @@
-"""server/routes/internal.py — the loop's only door to engine-held state.
-
-Token-gated RPC (`AGENTRA_INTERNAL_TOKEN`), separate from the sign-in user gate.
-The loop calls `registry.*` / `Memory.*` methods here instead of touching the
-datastore or GitHub itself.
-"""
-
 from __future__ import annotations
 
-import dataclasses
-import hmac
-import logging
 import os
-import tempfile
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from agentra import registry
+from agentra import registry, git_ops
 from agentra.connectors import github_app
-from agentra.memory import Memory
 
 logger = logging.getLogger("agentra.server.internal")
 
 router = APIRouter(prefix="/internal")
 
+# ---------------------------------------------------------------------------
+# token gating helpers
+# ---------------------------------------------------------------------------
 
 def _client_ips(request: Request) -> set[str]:
-    """Trusted source addresses for the request. On Vercel `x-real-ip` and
-    `x-vercel-forwarded-for` are platform-set and overwrite any inbound value,
-    so they can't be spoofed. `x-forwarded-for` is deliberately NOT consulted --
-    its leftmost entry is client-controllable."""
     ips: set[str] = set()
     for header in ("x-real-ip", "x-vercel-forwarded-for"):
         for part in request.headers.get(header, "").split(","):
-            if part.strip():
-                ips.add(part.strip())
-    if not ips and request.client:  # local/dev: no proxy in front
+            part = part.strip()
+            if part:
+                ips.add(part)
+    if not ips and request.client:
         ips.add(request.client.host)
     return ips
 
@@ -45,219 +34,50 @@ def _require_token(request: Request, authorization: str | None = Header(default=
     allowed = {ip.strip() for ip in os.environ.get("AGENTRA_INTERNAL_ALLOWED_IPS", "").split(",") if ip.strip()}
     if allowed and not (_client_ips(request) & allowed):
         raise HTTPException(status_code=403, detail="not allowed from this address")
-
     expected = os.environ.get("AGENTRA_INTERNAL_TOKEN")
     if not expected:
         raise HTTPException(status_code=503, detail="internal API not configured")
     prefix = "bearer "
-    got = authorization[len(prefix):] if (authorization or "").lower().startswith(prefix) else ""
+    got = (
+        authorization[len(prefix):] if (authorization or "").lower().startswith(prefix) else ""
+    )
     if not hmac.compare_digest(got, expected):
         raise HTTPException(status_code=401, detail="bad internal token")
 
-
-# --- exposed method whitelists -------------------------------------------------
-
-_REGISTRY_METHODS = frozenset({
-    "list_apps", "register_app", "remove_app",
-    "get_slack_channel", "set_slack_channel",
-    "is_paused", "pause", "resume",
-    "get_llm_backend", "set_llm_backend",
-    "get_llm_rotation", "set_llm_rotation", "select_llm_provider",
-    "report_llm_provider_failure", "report_llm_provider_success", "get_llm_provider_health",
-    "record_slack_thread", "resolve_slack_thread", "slack_thread_for",
-    "get_run", "list_runs", "record_run", "last_run_at",
-    "list_loops", "get_loop", "get_loop_pipeline", "bind_loop", "bind_loop_for_run", "bind_promote_loop",
-    "roll_up_loop", "set_loop_human_input", "set_loop_pipeline", "set_loop_status",
-    "loop_id_for", "loop_id_for_issue",
-    "list_agent_steps",
-    "list_waiting_for_human", "reconcile_stale_runs", "reconcile_stale_loops", "reconcile_waiting_for_human",
-    "submit_request", "dispatch_once",
-    "enqueue_job", "claim_next_job", "report_job", "list_jobs", "touch_job",
-})
-
-_MEMORY_METHODS = frozenset({
-    "known_bugs", "in_progress_items", "closed_bugs", "blocking_bugs",
-    "record_known_bug", "clear_known_bug",
-    "clear_resolved_transient_bugs", "clear_resolved_auth_bugs",
-    "record_failure", "record_failure_on_issue",
-    "code_complete_items", "shipped_pending_test_items", "tested_items",
-    "feature_queue", "in_progress_features", "shipped_features",
-    "record_code_complete", "record_planned_sub_issues", "record_shipped_to_preprod", "record_tested",
-    "released_features", "pending_promotion_features", "record_released",
-    "record_feature_request", "clear_feature_request",
-    "get_objective", "set_objective", "append_documentation",
-    "record_human_input_context", "get_human_input_context",
-    "record_human_answer", "human_input_pending",
-    "escalate_existing_issue", "issue_html_url",
-    "find_unanswered_human_input_comment",
-    "record_in_progress_branch", "mark_status_done", "record_commit",
-    "resume_branch_for", "resume_run_id_for", "resume_session_id_for", "shipped_commit_for",
-    "issue_status",
-    "run_ids_for", "record_spec", "get_spec",
-})
-
-# The subset of _MEMORY_METHODS that changes GitHub Issues/Projects state for an
-# app -- a successful call here must invalidate that app's dashboard cache
-# entries (server/gh_cache) so the read endpoints don't serve a now-stale view.
-_MEMORY_MUTATION_METHODS = frozenset({
-    "record_known_bug", "clear_known_bug",
-    "clear_resolved_transient_bugs", "clear_resolved_auth_bugs",
-    "record_failure", "record_failure_on_issue",
-    "record_feature_request", "clear_feature_request",
-    "record_code_complete", "record_planned_sub_issues", "record_shipped_to_preprod",
-    "record_tested", "record_released", "mark_status_done", "record_commit",
-    "record_in_progress_branch", "escalate_existing_issue", "set_objective",
-    "append_documentation", "record_human_answer",
-})
-
-
-def _json_safe(value):
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {k: _json_safe(v) for k, v in dataclasses.asdict(value).items()}
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(v) for v in value]
-    return value
-
-
-class _UrlMemory(Memory):
-    """Memory whose GitHub-backed methods work off a repo_url, with no local
-    checkout (the engine has none). Local-file methods write to a throwaway dir
-    and are not exposed over RPC."""
-
-    def __init__(self, repo_url: str) -> None:
-        self._forced_url = repo_url
-        super().__init__(Path(tempfile.mkdtemp(prefix="agentra-mem-")))
-
-    def _repo_url(self) -> str:
-        return self._forced_url
-
-
-def _app_name_for_coordination_repo(repo_url: str) -> str | None:
-    for app_name, app in registry.list_apps().items():
-        for spec in registry.core._repo_specs(app_name, app):
-            if spec.role == "coordination" and spec.repo_url == repo_url:
-                return app_name
-    return None
-
-
-def _invalidate_gh_cache_for_rpc(repo_url: str) -> None:
-    try:
-        app_name = _app_name_for_coordination_repo(repo_url)
-        if app_name:
-            from agentra.server.gh_cache import invalidate_app
-
-            invalidate_app(app_name)
-    except Exception:
-        logger.warning("gh_cache invalidation failed for repo_url=%r", repo_url, exc_info=True)
-
-
-def _memory_for(repo_url: str) -> Memory:
-    # Memory is always the coordination repo (issues, .agentra/memory, objective) --
-    # the loop sends its coord url for every memory RPC, single-repo apps included
-    # (there the one repo is both coordination and code).
-    for app_name, app in registry.list_apps().items():
-        for spec in registry.core._repo_specs(app_name, app):
-            if spec.role == "coordination" and spec.repo_url == repo_url and spec.path is not None and spec.path.is_dir():
-                return Memory(spec.path)
-    return _UrlMemory(repo_url)
-
-
-class RpcRequest(BaseModel):
-    target: str
-    method: str
-    args: list = []
-    kwargs: dict = {}
-    repo_url: str | None = None
-
-
-@router.post("/rpc", dependencies=[Depends(_require_token)])
-async def rpc(req: RpcRequest) -> dict:
-    if req.target == "registry":
-        if req.method not in _REGISTRY_METHODS:
-            raise HTTPException(status_code=403, detail=f"registry.{req.method} is not exposed")
-        fn = getattr(registry, req.method)
-    elif req.target == "memory":
-        if req.method not in _MEMORY_METHODS:
-            raise HTTPException(status_code=403, detail=f"memory.{req.method} is not exposed")
-        if not req.repo_url:
-            raise HTTPException(status_code=400, detail="repo_url is required for memory calls")
-        fn = getattr(_memory_for(req.repo_url), req.method)
-    else:
-        raise HTTPException(status_code=400, detail=f"unknown target {req.target!r}")
-
-    try:
-        result = fn(*req.args, **req.kwargs)
-    except HTTPException:
-        raise
-    except registry.InvalidLLMPool as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.warning("rpc %s.%s failed: %s", req.target, req.method, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
-
-    if req.target == "memory" and req.method in _MEMORY_MUTATION_METHODS and req.repo_url:
-        _invalidate_gh_cache_for_rpc(req.repo_url)
-
-    return {"result": _json_safe(result)}
-
-
-class HeartbeatRequest(BaseModel):
-    run_key: str | None = None
-
-
-@router.post("/jobs/{job_id}/heartbeat", dependencies=[Depends(_require_token)])
-async def job_heartbeat(job_id: str, req: HeartbeatRequest | None = None) -> dict:
-    """Renew a claimed job's lease; `renewed` is False once the loop has lost it."""
-    return {"renewed": registry.touch_job(job_id, req.run_key if req else None)}
-
-
-class RunLogRequest(BaseModel):
-    lines: list[str]
-
-
-@router.post("/runs/{run_id}/log", dependencies=[Depends(_require_token)])
-async def run_log(run_id: str, req: RunLogRequest) -> dict:
-    """Durable copy of a run's log tail (the loop's disk is ephemeral); the
-    dashboard streams it back from here via /runs/{key}/logs."""
-    ddb = registry.dynamodb_resource()
-    if ddb is None:
-        raise HTTPException(status_code=503, detail="DynamoDB unavailable")
-    from agentra.registry import _dynamo
-
-    tail = req.lines[-500:]
-    _dynamo.put_item(_dynamo.table("run-logs"), {"run_id": run_id, "lines": tail})
-    return {"ok": True, "lines": len(tail)}
-
-
-class SlackMessageRequest(BaseModel):
-    text: str
-    channel: str | None = None
-    thread_ts: str | None = None
-
-
-@router.post("/slack/message", dependencies=[Depends(_require_token)])
-async def slack_message(req: SlackMessageRequest) -> dict:
-    """The loop sends Slack via the engine so it never holds SLACK_BOT_TOKEN."""
-    from agentra.connectors import slack
-
-    data = slack._post_message(req.text, channel=req.channel, thread_ts=req.thread_ts)
-    return {"ok": data is not None, "data": data}
-
-
+# ---------------------------------------------------------------------------
+# models
+# ---------------------------------------------------------------------------
 class GitTokenRequest(BaseModel):
     repo_url: str
 
+class PushBranchRequest(BaseModel):
+    repo_url: str
+    branch: str
 
+# ---------------------------------------------------------------------------
+# routes
+# ---------------------------------------------------------------------------
 @router.post("/git-token", dependencies=[Depends(_require_token)])
 async def git_token(req: GitTokenRequest) -> dict:
-    """A short-lived installation token for git clone/push -- so the loop never
-    holds the GitHub App private key."""
+    """A short‑lived installation token for git clone/push – the loop never holds
+    the GitHub App private key."""
     try:
         token = github_app.get_installation_token(req.repo_url)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
     return {"token": token}
+
+@router.post("/internal/test/push-branch", dependencies=[Depends(_require_token)])
+async def push_branch_test(req: PushBranchRequest) -> dict:
+    """Debug route for testing push_branch behavior."""
+    try:
+        git_ops.push_branch(Path(req.repo_url), req.branch)
+    except git_ops.GitOpError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    sha = subprocess.run(
+        ["git", "-C", str(Path(req.repo_url)), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return {"commit_sha": sha}
