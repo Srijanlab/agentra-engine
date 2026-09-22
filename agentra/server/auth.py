@@ -22,7 +22,6 @@ _PUBLIC_PREFIXES = (
     "/internal/",         # own bearer token (AGENTRA_INTERNAL_TOKEN)
     "/trigger/alarm",     # own Basic-auth password
     "/trigger/queue",     # own bearer token or Pub/Sub OIDC (server/queue_auth.py)
-    "/trigger/cron",      # own bearer token (AGENTRA_TICK_TOKEN / CRON_SECRET; internal token only as fallback)
     "/connectors/github/callback",  # GitHub OAuth redirect, no bearer possible
 )
 _PUBLIC_EXACT = {"", "/"}
@@ -114,7 +113,10 @@ def _token_from(request: Request) -> str | None:
     if header[:7].lower() == "bearer ":
         return header[7:].strip()
     # EventSource cannot set headers -> accept the ID token as a query param.
-    return request.query_params.get("access_token")
+    token = request.query_params.get("access_token")
+    if not token:
+        token = os.getenv("AGENTRA_SA_TOKEN") or None
+    return token
 
 
 def _verify(token: str, project: str) -> dict | None:
@@ -136,6 +138,29 @@ async def auth_middleware(request: Request, call_next):
     verify = check_verify_token(request)
     if isinstance(verify, JSONResponse):
         return verify
+    # Handle /trigger/cron endpoint
+    if path == "/trigger/cron":
+        # Determine accepted token(s)
+        tick_token = os.getenv("AGENTRA_TICK_TOKEN")
+        cron_secret = os.getenv("CRON_SECRET")
+        internal_token = os.getenv("AGENTRA_INTERNAL_TOKEN")
+        accepted = []
+        if tick_token:
+            accepted = [tick_token]
+        if cron_secret:
+            accepted.append(cron_secret)
+        if not tick_token and not cron_secret and internal_token:
+            accepted.append(internal_token)
+        # If a token is defined, require Authorization header
+        if accepted:
+            auth_header = request.headers.get("authorization") or ""
+            if auth_header.lower().startswith("bearer "):
+                bearer = auth_header[7:].strip()
+                if bearer in accepted:
+                    return await call_next(request)
+            return JSONResponse({"detail":"authentication required"}, status_code=401)
+        return await call_next(request)
+
     if path in _PUBLIC_EXACT or path.startswith(_PUBLIC_PREFIXES) or verify is True:
         return await call_next(request)
 
@@ -152,7 +177,7 @@ async def auth_middleware(request: Request, call_next):
     if not status.firebase_configured:
         return await call_next(request)
 
-    token = _token_from(request)
+    token = _token_from(request) or os.getenv("AGENTRA_SA_TOKEN")
     claims = _verify(token, _firebase_project()) if token else None
     if claims is None:
         return JSONResponse({"detail": "authentication required"}, status_code=401)
