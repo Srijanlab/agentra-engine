@@ -98,7 +98,7 @@ _MEMORY_METHODS = frozenset({
 
 # The subset of _MEMORY_METHODS that changes GitHub Issues/Projects state for an
 # app -- a successful call here must invalidate that app's dashboard cache
-+from pydantic import BaseModel
+from pydantic import BaseModel
 +from pathlib import Path
 +import subprocess
 +from agentra.git_ops import push_branch, GitOpError
