@@ -35,9 +35,12 @@ def _set_run(run_key: str, **fields: Any) -> None:
 
 
 def _server_log(channel: str, message: str) -> None:
-    """Structured server-side event log -- stdout/CloudWatch plus a durable, persisted signal."""
+    """Logs a server event and persists it as a signal, never raising on storage errors."""
     logger.info("[server:%s] %s", channel, message)
-    registry.record_signal(channel, message)
+    try:
+        registry.record_signal(channel, message)
+    except Exception as exc:
+        logger.warning("[server:%s] failed to persist signal: %s", channel, exc)
 
 
 def _paused_response(source: str) -> dict:
