@@ -92,9 +92,9 @@ def test_debug_rotation_is_read_only(client):
     assert client.get("/debug/llm-rotation").json() == bodies[0]
 
 
-def test_debug_rotation_public_while_llm_pool_needs_sign_in(client, monkeypatch):
+def test_debug_rotation_and_llm_pool_need_sign_in(client, monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
-    assert client.get("/debug/llm-rotation").status_code == 200
+    assert client.get("/debug/llm-rotation").status_code == 401
     assert client.get("/system/llm-pool").status_code == 401
 
 

@@ -29,6 +29,7 @@ import agentra.memory as memory_module
 from agentra.registry import _dynamo
 from agentra.memory import Memory
 from agentra.server import _strip_log_timestamp
+from agentra.server import auth
 
 
 @pytest.fixture
@@ -202,6 +203,9 @@ def test_strip_log_timestamp_leaves_a_non_timestamp_line_unchanged():
     assert _strip_log_timestamp("[t1] cycle start") == "[t1] cycle start"
 
 
+_AUTH = {"Authorization": "Bearer x"}
+
+
 def _isolate_registry(tmp_path, monkeypatch):
     home = tmp_path / "agentra_home"
     monkeypatch.setattr(registry, "AGENTRA_HOME", home)
@@ -211,6 +215,9 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
     server._active_runs.clear()
     server._app_locks.clear()
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "test-project")
+    monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "me@example.com")
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "me@example.com"})
 
 
 def test_stream_run_logs_falls_back_to_the_registry_when_local_file_missing(tmp_path, ddb_run_logs, monkeypatch):
@@ -230,7 +237,7 @@ def test_stream_run_logs_falls_back_to_the_registry_when_local_file_missing(tmp_
     _dynamo.put_item(_dynamo.table("run-logs"), {"run_id": "run123", "lines": ["[t1] cycle start", "[t2] cycle complete"]})
 
     client = TestClient(server.app)
-    with client.stream("GET", "/runs/run123/logs") as response:
+    with client.stream("GET", "/runs/run123/logs", headers=_AUTH) as response:
         body = "".join(response.iter_text())
 
     assert "cycle start" in body
@@ -253,7 +260,7 @@ def test_stream_run_logs_strips_the_timestamp_from_a_locally_tailed_line(tmp_pat
     mem.log("run456", "[Orchestrator] assistant text: hello")
 
     client = TestClient(server.app)
-    with client.stream("GET", "/runs/run456/logs") as response:
+    with client.stream("GET", "/runs/run456/logs", headers=_AUTH) as response:
         body = "".join(response.iter_text())
 
     # The real bug: without stripping, this line would stream as

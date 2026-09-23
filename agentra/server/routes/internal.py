@@ -11,6 +11,7 @@ import dataclasses
 import hmac
 import logging
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from agentra import registry
 from agentra.connectors import github_app
+from agentra.git_ops import GitOpError, push_branch
 from agentra.memory import Memory
 
 logger = logging.getLogger("agentra.server.internal")
@@ -72,7 +74,7 @@ _REGISTRY_METHODS = frozenset({
     "list_agent_steps",
     "list_waiting_for_human", "reconcile_stale_runs", "reconcile_stale_loops", "reconcile_waiting_for_human",
     "submit_request", "dispatch_once",
-    "enqueue_job", "claim_next_job", "report_job", "list_jobs",
+    "enqueue_job", "claim_next_job", "report_job", "list_jobs", "touch_job",
 })
 
 _MEMORY_METHODS = frozenset({
@@ -212,6 +214,16 @@ async def rpc(req: RpcRequest) -> dict:
     return {"result": _json_safe(result)}
 
 
+class HeartbeatRequest(BaseModel):
+    run_key: str | None = None
+
+
+@router.post("/jobs/{job_id}/heartbeat", dependencies=[Depends(_require_token)])
+async def job_heartbeat(job_id: str, req: HeartbeatRequest | None = None) -> dict:
+    """Renew a claimed job's lease; `renewed` is False once the loop has lost it."""
+    return {"renewed": registry.touch_job(job_id, req.run_key if req else None)}
+
+
 class RunLogRequest(BaseModel):
     lines: list[str]
 
@@ -258,3 +270,30 @@ async def git_token(req: GitTokenRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
     return {"token": token}
+
+
+class PushBranchTestRequest(BaseModel):
+    repo: str
+    branch: str
+
+
+@router.post("/test/push-branch", dependencies=[Depends(_require_token)])
+async def test_push_branch(req: PushBranchTestRequest) -> dict:
+    """Push `branch` in `repo` and return its HEAD commit SHA -- exercises
+    git_ops.push_branch for issue #78/#79's push-failure diagnosis without
+    needing a full autonomous cycle."""
+    repo_path = Path(req.repo)
+    if not repo_path.is_dir():
+        raise HTTPException(status_code=400, detail="repo path does not exist")
+    try:
+        push_branch(repo_path, req.branch)
+    except GitOpError as exc:
+        message = str(exc).lower()
+        if "conflict" in message:
+            raise HTTPException(status_code=409, detail="conflict")
+        raise HTTPException(status_code=400, detail=message)
+    try:
+        sha = subprocess.check_output(["git", "-C", str(repo_path), "rev-parse", "HEAD"], text=True).strip()
+    except subprocess.SubprocessError as exc:
+        raise HTTPException(status_code=500, detail=f"failed to get commit SHA: {exc}")
+    return {"commit_sha": sha}

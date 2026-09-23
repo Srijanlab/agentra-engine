@@ -18,8 +18,13 @@ unset (local dev, CI) the registry falls back to JSON files under `~/.agentra`.
 ## Sign-in gate
 
 `FIREBASE_PROJECT_ID` turns on the Google-identity check in `server/auth.py`
-(`id_token.verify_firebase_token`, from `google-auth`). Unset -> the API stays
-open (local dev). `AGENTRA_ALLOWED_EMAILS` is the allowlist.
+(`id_token.verify_firebase_token`, from `google-auth`). `AGENTRA_ALLOWED_EMAILS` is the allowlist.
+
+Both are **required whenever DynamoDB is configured** (`AGENTRA_DYNAMODB_TABLE_PREFIX`): the gate
+fails closed, and every non-public route returns `503 {"error": "auth_misconfigured", "missing": [...]}`
+until they are set. Only when neither DynamoDB nor Firebase is configured (local dev) does the API
+stay open, with a startup warning. `/health` reports `auth.mode` (`enforced`, `open` or
+`misconfigured`) without exposing secret values.
 
 ## Vercel env vars
 
@@ -35,6 +40,8 @@ Full list with placeholders: [`.env.example`](.env.example).
 | `FIREBASE_PROJECT_ID` | Firebase project id (for the Google sign-in check) |
 | `AGENTRA_ALLOWED_EMAILS` | your email(s), comma-separated |
 | `AGENTRA_INTERNAL_TOKEN` | shared bearer for `/internal/*` (same value in the loop's secret); on pre-prod use a distinct value, never the prod one (see `docs/deployment.md`) |
+| `AGENTRA_TICK_TOKEN` | dedicated bearer for `GET /trigger/cron` (`CRON_SECRET` also works; the internal token is a fallback only while this is unset); on pre-prod use a distinct value |
+| `AGENTRA_VERIFY_TOKEN` | pre-prod ONLY: read-only `X-Agentra-Verify-Token` for `GET /apps`, `/apps/{name}/schedule`, `/runs/{key}`; never set on Production (refused there with 403); unset = disabled |
 | `GITHUB_APP_ID` | `agentra-orchestrator` App ID (`4545406`) |
 | `GITHUB_APP_PRIVATE_KEY` | the App's `.pem` contents (multi-line) |
 | `GITHUB_TOKEN` | optional PAT fallback (repo scope) |
@@ -44,4 +51,6 @@ Full list with placeholders: [`.env.example`](.env.example).
 GitHub access is the `agentra-orchestrator` GitHub App (per-repo installation
 tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback.
 
-`/debug/dynamodb` reports which of these resolved (no secret values).
+`/debug/dynamodb` reports which of these resolved (no secret values); it requires a Firebase sign-in when `FIREBASE_PROJECT_ID` is set.
+
+`POST /trigger/queue` requires `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Pub/Sub OIDC token (set `AGENTRA_PUBSUB_AUDIENCE`, optionally `AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL`).

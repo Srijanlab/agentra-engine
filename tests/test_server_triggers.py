@@ -2,6 +2,8 @@
 to claim -- the engine never executes a cycle / promotion / prod-debug itself.
 """
 
+import base64
+import json
 import subprocess
 from pathlib import Path
 
@@ -168,6 +170,60 @@ def test_deploy_complete_is_a_noop_when_a_cycle_is_already_queued(tmp_path, monk
     assert len(registry.list_jobs()) == 1
 
 
+def _cron(headers=None):
+    return _client().get("/trigger/cron", headers=headers)
+
+
+def _bearer(value):
+    return {"Authorization": f"Bearer {value}"}
+
+
+def test_cron_accepts_tick_token_and_cron_secret(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    monkeypatch.setenv("CRON_SECRET", "cronsecret")
+    ok = _cron(_bearer("tick"))
+    assert ok.status_code == 200 and "apps" in ok.json()
+    assert _cron(_bearer("cronsecret")).status_code == 200
+
+
+def test_cron_internal_token_only_while_tick_token_unset(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "internal")
+    monkeypatch.delenv("AGENTRA_TICK_TOKEN", raising=False)
+    assert _cron(_bearer("internal")).status_code == 200
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    assert _cron(_bearer("internal")).status_code == 401
+    assert _cron(_bearer("tick")).status_code == 200
+
+
+def test_cron_rejects_wrong_malformed_and_verify_tokens(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_TICK_TOKEN", "tick")
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", "verify")
+    assert _cron().status_code == 401
+    assert _cron(_bearer("wrong")).status_code == 401
+    assert _cron({"Authorization": "tick"}).status_code == 401
+    assert _cron(_bearer("verify")).status_code == 401
+    assert _cron({"X-Agentra-Verify-Token": "verify"}).status_code == 401
+
+
+def test_cron_fails_closed_on_cloud_without_a_tick_credential(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "pre-")
+    for var in ("AGENTRA_TICK_TOKEN", "AGENTRA_INTERNAL_TOKEN", "CRON_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    assert _cron().status_code == 401
+    assert _cron(_bearer("anything")).status_code == 401
+
+
+def test_cron_open_in_local_dev_without_any_credential(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    for var in ("AGENTRA_TICK_TOKEN", "AGENTRA_INTERNAL_TOKEN", "CRON_SECRET", "FIREBASE_PROJECT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    assert _cron().status_code == 200
+
+
 def test_cron_releases_a_loop_whose_tracked_issue_has_been_closed(tmp_path, monkeypatch):
     """A run that ends non-terminally leaves its loop `active`; if a human then
     closes the issue, the scheduler tick must release the loop so no later cycle
@@ -229,3 +285,127 @@ def test_paused_system_enqueues_nothing(tmp_path, monkeypatch):
     assert _client().post("/apps/myapp/run").json()["triggered"] is False
     assert _client().post("/apps/myapp/promote").json()["triggered"] is False
     assert registry.list_jobs() == []
+
+
+TOKEN = "queue-test-token"
+
+
+def _envelope(payload: dict) -> dict:
+    data = base64.b64encode(json.dumps(payload).encode()).decode()
+    return {"message": {"data": data}}
+
+
+def _valid_request() -> dict:
+    return {"app": "myapp", "type": "feature_request", "title": "t", "description": "d"}
+
+
+def _queue_env(monkeypatch):
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", TOKEN)
+    monkeypatch.delenv("AGENTRA_PUBSUB_AUDIENCE", raising=False)
+    monkeypatch.delenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", raising=False)
+
+
+def _no_submit(monkeypatch):
+    calls = []
+    monkeypatch.setattr(registry, "submit_request", lambda **kw: calls.append(kw))
+    return calls
+
+
+def test_queue_rejects_missing_wrong_or_non_bearer_credentials(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    calls = _no_submit(monkeypatch)
+    body = _envelope(_valid_request())
+    for headers in (
+        {},
+        {"Authorization": "Bearer wrong"},
+        {"Authorization": "Bearer "},
+        {"Authorization": "Basic abc"},
+        {"Authorization": TOKEN},
+    ):
+        r = _client().post("/trigger/queue", json=body, headers=headers)
+        assert r.status_code == 401 and "detail" in r.json()
+    assert calls == []
+
+
+def test_queue_rejects_everything_when_no_credential_is_configured(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.delenv("AGENTRA_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("AGENTRA_PUBSUB_AUDIENCE", raising=False)
+    calls = _no_submit(monkeypatch)
+    r = _client().post("/trigger/queue", json=_envelope(_valid_request()), headers={"Authorization": "Bearer "})
+    assert r.status_code == 401
+    assert _client().post("/trigger/queue", json=_envelope(_valid_request())).status_code == 401
+    assert calls == []
+
+
+def test_queue_401s_before_the_pause_check(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    registry.pause("maintenance")
+    calls = _no_submit(monkeypatch)
+    assert _client().post("/trigger/queue", json=_envelope(_valid_request())).status_code == 401
+    assert calls == []
+
+
+def test_queue_with_internal_token_processes_a_valid_request(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    _queue_env(monkeypatch)
+    r = _client().post(
+        "/trigger/queue",
+        json=_envelope(_valid_request()),
+        headers={"Authorization": f"bearer {TOKEN}"},
+    )
+    body = r.json()
+    assert r.status_code == 200 and body["processed"] is True
+    assert body["request_id"] and "dispatch" in body
+
+
+def test_queue_with_internal_token_acks_a_malformed_envelope(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert r.status_code == 200 and r.json()["processed"] is False
+
+
+def test_queue_accepts_a_valid_pubsub_oidc_token(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "https://engine.example/trigger/queue")
+    monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", "push@proj.iam.gserviceaccount.com")
+    seen = {}
+
+    def verify(token, request, audience=None):
+        seen["audience"] = audience
+        if token != "good-jwt":
+            raise ValueError("bad token")
+        return {"email": "push@proj.iam.gserviceaccount.com", "email_verified": True}
+
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", verify)
+    ok = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer good-jwt"})
+    assert ok.status_code == 200 and seen["audience"] == "https://engine.example/trigger/queue"
+    bad = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer other-jwt"})
+    assert bad.status_code == 401
+
+
+def test_queue_rejects_oidc_email_mismatch_or_unverified(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "aud")
+    monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", "push@proj.iam.gserviceaccount.com")
+    for claims in (
+        {"email": "evil@example.com", "email_verified": True},
+        {"email": "push@proj.iam.gserviceaccount.com", "email_verified": False},
+    ):
+        monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, _c=claims, **k: _c)
+        r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer jwt"})
+        assert r.status_code == 401
+
+
+def test_queue_ignores_oidc_when_audience_unset(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, **k: {"email": "x"})
+    r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer jwt"})
+    assert r.status_code == 401

@@ -19,8 +19,10 @@ from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.memory import Memory
+from agentra.server import auth
 from agentra.registry.scheduler import compute_schedule_status
 from agentra.server.digests.awaiting_testing import post_awaiting_testing_digest
+from agentra.server.queue_auth import verify_queue_auth
 from agentra.server.routes.human_input import dispatch_human_answer
 from agentra.server.state import _active_runs
 from agentra.server.utils import _paused_response, _server_log
@@ -79,13 +81,17 @@ async def _enqueue_cycle(
         return {"triggered": False, "reason": "no objective set for this app"}
 
     if enforce_schedule:
-        due_in = compute_schedule_status(app_name, repo).due_in_seconds
-        if due_in is not None and due_in > 0:
-            _server_log(source, f"app={app_name!r} not due for {due_in / 3600:.1f}h more -- skipped")
+        status = compute_schedule_status(app_name, repo)
+        if not status.due_now:
+            _server_log(source, f"app={app_name!r} not due (due_in={status.due_in_seconds}) -- skipped")
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
 
-    # dedup: one open cycle job per app -- the loop runs one backlog item per run.
-    if any(j.get("payload", {}).get("app") == app_name for j in registry.list_jobs(status="pending")):
+    # dedup: one open cycle job per app (pending or claimed) -- the loop runs one backlog item per run.
+    if any(
+        j.get("kind") == "cycle" and j.get("payload", {}).get("app") == app_name
+        for status in ("pending", "claimed")
+        for j in registry.list_jobs(status=status)
+    ):
         return {"triggered": False, "reason": "a cycle for this app is already queued"}
 
     run_key = _new_run_key(app_name, source, objective, feature=feature)
@@ -220,15 +226,38 @@ async def _tick() -> dict:
     return {"apps": results, "human_gates": human_gates}
 
 
+def _bearer_matches(authorization: str | None, secret: str | None) -> bool:
+    prefix = "Bearer "
+    if not secret or not authorization or not authorization.startswith(prefix):
+        return False
+    return hmac.compare_digest(authorization[len(prefix):].encode(), secret.encode())
+
+
 def _verify_tick_auth(authorization: str | None) -> None:
-    """The loop's drain loop calls this on its idle tick (AGENTRA_INTERNAL_TOKEN);
-    an external cron may also use CRON_SECRET. Either satisfies it; if neither env
-    var is set the endpoint is open (local dev)."""
-    for var in ("AGENTRA_INTERNAL_TOKEN", "CRON_SECRET"):
-        secret = os.environ.get(var)
-        if secret and authorization == f"Bearer {secret}":
-            return
-    if os.environ.get("AGENTRA_INTERNAL_TOKEN") or os.environ.get("CRON_SECRET"):
+    """Accept AGENTRA_TICK_TOKEN or CRON_SECRET; AGENTRA_INTERNAL_TOKEN is only
+    accepted while no tick token is configured yet.
+
+    GitHub issue #80: an RPC token holder can trigger scheduler ticks with side
+    effects -- the fix is a dedicated tick-only credential. The deployed loop
+    still authenticates its own /trigger/cron poll with AGENTRA_INTERNAL_TOKEN
+    (agentra-loop's engine_client.py), and no AGENTRA_TICK_TOKEN has been
+    provisioned in either the engine's environment or the loop's ECS task yet.
+    Rejecting AGENTRA_INTERNAL_TOKEN outright before that rollout lands would
+    401 the loop's own idle-tick poll in production -- breaking scheduled
+    cycles, the human-input backstop sweep, and the awaiting-testing digest.
+    This keeps the internal token working until AGENTRA_TICK_TOKEN is actually
+    set; setting it anywhere immediately closes the hole with no further code
+    change (see test_cron_internal_token_only_while_tick_token_unset)."""
+    tick = os.environ.get("AGENTRA_TICK_TOKEN")
+    cron = os.environ.get("CRON_SECRET")
+    internal = os.environ.get("AGENTRA_INTERNAL_TOKEN")
+    if tick and _bearer_matches(authorization, tick):
+        return
+    if cron and _bearer_matches(authorization, cron):
+        return
+    if not tick and internal and _bearer_matches(authorization, internal):
+        return
+    if tick or cron or internal or os.environ.get("AGENTRA_DYNAMODB_TABLE_PREFIX"):
         raise HTTPException(status_code=401, detail="bad tick token")
 
 
@@ -388,7 +417,7 @@ async def trigger_alarm(payload: dict) -> dict:
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
-@router.post("/trigger/queue")
+@router.post("/trigger/queue", dependencies=[Depends(verify_queue_auth)])
 async def trigger_queue(envelope: dict) -> dict:
     if registry.is_paused():
         _server_log("queue", "system is paused -- acking without processing")

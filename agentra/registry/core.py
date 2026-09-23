@@ -32,6 +32,17 @@ REPOS_ROOT = Path(_repos_env_value) if _repos_env_value else AGENTRA_HOME / "rep
 # A cycle is one long await (a sub-agent dispatch can itself run 10-20 min with
 # no orchestrator-level checkpoint), so the reaper only fires on a genuine hang.
 STALE_PROCESSING_SECONDS = 60 * 60
+
+
+def stale_heartbeat_seconds() -> float:
+    """Seconds without a heartbeat before a claimed job or running run counts as stale."""
+    try:
+        value = float(os.environ.get("AGENTRA_STALE_HEARTBEAT_SECONDS", ""))
+    except ValueError:
+        return STALE_PROCESSING_SECONDS
+    return value if value > 0 else STALE_PROCESSING_SECONDS
+
+
 REQUEST_TYPES = ("bug", "feature_request", "objective_change")
 
 # Human-in-the-loop escalation (GitHub issue #34): how long a run may sit in

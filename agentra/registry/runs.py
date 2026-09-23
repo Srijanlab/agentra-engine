@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def record_run(run_key: str, **fields: Any) -> None:
+    fields.setdefault("updated_at", time.time())
     _cache.clear()  # runs/loops summaries all shift
     if core._ddb is not None:
         from agentra.registry import _dynamo
@@ -105,17 +106,18 @@ def last_run_at(app: str, source: str | None = None) -> float | None:
 
 def reconcile_stale_runs() -> list[str]:
     now = time.time()
+    threshold = core.stale_heartbeat_seconds()
     marked: list[str] = []
     for run in list_runs(limit=200):
         if run.get("status") not in ("queued", "running"):
             continue
         run_key = run["run_key"]
         last_activity = run.get("updated_at") or run.get("started_at") or now
-        if now - last_activity > core.STALE_PROCESSING_SECONDS:
+        if now - last_activity > threshold:
             record_run(
                 run_key,
                 status="failed",
-                error=f"orphaned: no activity for over {core.STALE_PROCESSING_SECONDS // 60} minutes -- "
+                error=f"orphaned: no activity for over {int(threshold // 60)} minutes -- "
                 "the process running this cycle likely died (e.g. an OOM kill or revision rollout)",
             )
             marked.append(run_key)
@@ -131,6 +133,7 @@ def reconcile_stale_loops() -> list[str]:
     from agentra.registry import loops as _loops
 
     now = time.time()
+    threshold = core.stale_heartbeat_seconds()
     fixed: list[str] = []
     for loop in _loops.list_loops(limit=200):
         if loop.get("last_run_status") not in ("running", "queued"):
@@ -141,7 +144,10 @@ def reconcile_stale_loops() -> list[str]:
         if run_status in ("completed", "failed", "blocked", "waiting_for_human"):
             _loops.roll_up_loop(loop_id, last_key, run_status, 0.0)
             fixed.append(loop_id)
-        elif now - float(loop.get("updated_at") or 0) > core.STALE_PROCESSING_SECONDS:
+        elif (
+            now - float(loop.get("updated_at") or 0) > threshold
+            and now - float((run or {}).get("updated_at") or 0) > threshold
+        ):
             _loops.roll_up_loop(loop_id, last_key or "", "failed", 0.0)
             fixed.append(loop_id)
     return fixed

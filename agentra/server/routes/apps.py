@@ -10,54 +10,17 @@ from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.memory import Memory
+from agentra.server.routes.app_payloads import (
+    BacklogRequestPayload,
+    RegisterAppPayload,
+    RepoEntryPayload,
+    UpdateAppPayload,
+)
 from agentra.server.utils import _server_log
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-class RepoEntryPayload(BaseModel):
-    name: str
-    repo_url: str
-    branch: str = "main"
-    role: str = "code"
-    deploy_strategy: str | None = None
-
-
-class RegisterAppPayload(BaseModel):
-    name: str
-    repo_url: str | None = None
-    branch: str = "main"
-    objective: str | None = None
-    vercel: bool | None = None
-    firebase: bool | None = None
-    ci_cd_on_push: bool | None = None
-    pre_prod_branch: str | None = None
-    prod_branch: str | None = None
-    schedule_hours: float | None = None
-    alarm_enabled: bool | None = None
-    slack_channel_id: str | None = None
-    repos: list[RepoEntryPayload] | None = None
-
-
-class UpdateAppPayload(BaseModel):
-    objective: str | None = None
-    vercel: bool | None = None
-    firebase: bool | None = None
-    ci_cd_on_push: bool | None = None
-    pre_prod_branch: str | None = None
-    prod_branch: str | None = None
-    schedule_hours: float | None = None
-    alarm_enabled: bool | None = None
-    slack_channel_id: str | None = None
-
-
-class BacklogRequestPayload(BaseModel):
-    type: str = "feature_request"
-    title: str | None = None
-    description: str
-    severity: str | None = None
 
 
 def _apply_app_config(
@@ -71,6 +34,7 @@ def _apply_app_config(
     pre_prod_branch: str | None,
     prod_branch: str | None,
     schedule_hours: float | None,
+    schedule_continuous: bool | None,
     alarm_enabled: bool | None,
     detect_defaults: bool,
     commit_message: str,
@@ -87,6 +51,7 @@ def _apply_app_config(
         ("pre_prod_branch", pre_prod_branch),
         ("prod_branch", prod_branch),
         ("schedule_hours", schedule_hours),
+        ("schedule_continuous", schedule_continuous),
         ("alarm_enabled", alarm_enabled),
     ):
         if value is not None:
@@ -138,7 +103,7 @@ async def _app_digest(name: str, info: dict, github_data: dict | None = None) ->
             "repo_path": info.get("repo_path"), "objective": None,
             "shipped_count": 0, "released_count": 0, "known_bugs": 0,
             "pre_prod_branch": d.pre_prod_branch, "prod_branch": d.prod_branch,
-            "schedule_hours": d.schedule_hours, "alarm_enabled": d.alarm_enabled,
+            "schedule_hours": d.schedule_hours, "schedule_continuous": d.schedule_continuous, "alarm_enabled": d.alarm_enabled,
             "digest_error": True,
         }
 
@@ -166,6 +131,7 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
             "pre_prod_branch": defaults.pre_prod_branch,
             "prod_branch": defaults.prod_branch,
             "schedule_hours": defaults.schedule_hours,
+            "schedule_continuous": defaults.schedule_continuous,
             "alarm_enabled": defaults.alarm_enabled,
         }
     mem = Memory(repo)
@@ -204,6 +170,7 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
         "pre_prod_branch": env_config.pre_prod_branch,
         "prod_branch": env_config.prod_branch,
         "schedule_hours": env_config.schedule_hours,
+        "schedule_continuous": env_config.schedule_continuous,
         "alarm_enabled": env_config.alarm_enabled,
     }
 
@@ -288,6 +255,7 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
         pre_prod_branch=None,
         prod_branch=None,
         schedule_hours=payload.schedule_hours,
+        schedule_continuous=payload.schedule_continuous,
         alarm_enabled=payload.alarm_enabled,
         detect_defaults=False,
         commit_message="agentra: register multi-repo app (objective/schedule)",
@@ -350,6 +318,7 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         pre_prod_branch=payload.pre_prod_branch,
         prod_branch=payload.prod_branch,
         schedule_hours=payload.schedule_hours,
+        schedule_continuous=payload.schedule_continuous,
         alarm_enabled=payload.alarm_enabled,
         detect_defaults=True,
         commit_message="agentra: register app (objective/environment/notes)",
@@ -423,6 +392,7 @@ async def _build_app_detail(name: str, info: dict) -> dict:
         "pre_prod_branch": env_config.pre_prod_branch,
         "prod_branch": env_config.prod_branch,
         "schedule_hours": env_config.schedule_hours,
+        "schedule_continuous": env_config.schedule_continuous,
         "alarm_enabled": env_config.alarm_enabled,
         # The Testing Agent's per-run summary moved to each code repo's own
         # .agentra/testing.md '## Last run' (docs/agentra-spec.md); the engine has no
@@ -452,14 +422,14 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
         pre_prod_branch=payload.pre_prod_branch,
         prod_branch=payload.prod_branch,
         schedule_hours=payload.schedule_hours,
+        schedule_continuous=payload.schedule_continuous,
         alarm_enabled=payload.alarm_enabled,
         detect_defaults=False,
         commit_message="agentra: update app configuration",
     )
     if payload.slack_channel_id is not None:
         registry.set_slack_channel(name, payload.slack_channel_id)
-    if payload.objective is not None:
-        _invalidate_app_cache(name)
+    _invalidate_app_cache(name)
     _server_log("update", f"app={name!r} configuration updated" + (f" -- push failed: {push_warning}" if push_warning else ""))
     result = {"updated": True, "name": name}
     if push_warning:

@@ -24,6 +24,8 @@ for _var in (
     "AGENTRA_GH_CACHE_TTL_SECONDS",
     "AGENTRA_INTERNAL_TOKEN",
     "CRON_SECRET",
+    "AGENTRA_TICK_TOKEN",
+    "AGENTRA_VERIFY_TOKEN",
 ):
     os.environ.pop(_var, None)
 

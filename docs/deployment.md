@@ -30,22 +30,31 @@ memory, `system`) live in **DynamoDB**, one table per collection, prefixed by
 
 All `/internal/*` routes require the shared `AGENTRA_INTERNAL_TOKEN` bearer.
 
-## Pre-prod verification of token-guarded endpoints
+## Pre-prod verification
 
-`/internal/*` (including `POST /internal/rpc`) is guarded solely by the
-`AGENTRA_INTERNAL_TOKEN` bearer of the deployment being tested; it returns 401
-without or with a wrong token (503 if unset). The engine does **not** read or
-accept `AGENTRA_PREPROD_INTERNAL_TOKEN`. A pre-prod-scoped token is a distinct
-`AGENTRA_INTERNAL_TOKEN` value set on the pre-prod (beta) Vercel deployment
-only, and it must never equal the production value. The Testing Agent lives in
-agentra-loop, so where it reads a token named `AGENTRA_PREPROD_INTERNAL_TOKEN`
-is owned and configured there. `/v1/messages` is served by the separate NIM
-proxy (`agentra/proxy/main.py`), not the engine app. LLM rotation state can be checked live without any credential via the
-read-only `GET /debug/llm-rotation`, which returns only `{"backends": [...],
-"current_index": <int>}` (no health, cooldown or secrets; other methods return
-405). State-changing calls (`set_llm_rotation`, `select_llm_provider`) still
-require the deployment's own `AGENTRA_INTERNAL_TOKEN`; rotation behaviour is
-covered by `tests/test_llm_rotation_e2e.py`.
+Pre-prod (beta, a Vercel Preview) must be isolated from production and the live loop:
+
+- Its own `AGENTRA_DYNAMODB_TABLE_PREFIX` — never the prod/live-loop prefix — so verification traffic cannot touch live registry state.
+- Its own distinct `AGENTRA_INTERNAL_TOKEN`, `AGENTRA_TICK_TOKEN` and `AGENTRA_VERIFY_TOKEN` values, never equal to production's.
+
+`/internal/*` (including `POST /internal/rpc`) is guarded solely by the deployment's `AGENTRA_INTERNAL_TOKEN` bearer (401 without or wrong, 503 if unset). The engine does **not** read `AGENTRA_PREPROD_INTERNAL_TOKEN`; the Testing Agent (agentra-loop) owns where it stores the pre-prod token.
+
+`GET /trigger/cron` accepts `Authorization: Bearer <AGENTRA_TICK_TOKEN>` or `CRON_SECRET`. `AGENTRA_INTERNAL_TOKEN` is accepted only as a backward-compat fallback while `AGENTRA_TICK_TOKEN` is unset. It fails closed (401) on a DynamoDB-configured deployment with no tick credential.
+
+`AGENTRA_VERIFY_TOKEN` (unset = disabled) enables a read-only user-facing path for black-box checks: send `X-Agentra-Verify-Token: <token>` (constant-time compared) with no Firebase token. It is honored only for `GET /apps`, `GET /apps/{name}/schedule` and `GET /runs/{run_key}`; any other route or method, and a wrong or empty value, returns 401. It never authorizes `/trigger/cron` or `/internal/*`. It must NOT be set on Production: when `VERCEL_ENV` or `AGENTRA_ENVIRONMENT` is `production`, any request carrying the header gets 403.
+
+`/v1/messages` is served by the separate NIM
+proxy (`agentra/proxy/main.py`), not the engine app. LLM rotation state can be read with the read-only `GET /debug/llm-rotation`,
+which returns only `{"backends": [...], "current_index": <int>}` (no health,
+cooldown or secrets; other methods return 405). It and `GET /debug/dynamodb`
+sit behind the Firebase sign-in gate (401 without a valid ID token whenever
+`FIREBASE_PROJECT_ID` is set; `FIREBASE_PROJECT_ID` and `AGENTRA_ALLOWED_EMAILS` are required
+whenever DynamoDB is configured, otherwise gated routes return 503 `auth_misconfigured`
+and `/health` reports `auth.mode: "misconfigured"`); the loop reads rotation state through
+`/internal/rpc` `get_llm_rotation`. State-changing calls (`set_llm_rotation`,
+`select_llm_provider`) still require the deployment's own
+`AGENTRA_INTERNAL_TOKEN`; rotation behaviour is covered by
+`tests/test_llm_rotation_e2e.py`.
 `GET /` on an API-only deploy (no built dashboard) returns
 `{"status": "ok", "service": "agentra-engine", "commit": ...}`.
 
@@ -54,6 +63,16 @@ covered by `tests/test_llm_rotation_e2e.py`.
 `POST /trigger/scheduled`, `/trigger/alarm` (HTTP Basic, `ALARM_WEBHOOK_PASSWORD`),
 `/trigger/queue`, and `POST /apps/{name}/run`. Each checks the durable pause
 marker (`registry.PAUSE_PATH` / the `system` table) first and no-ops while paused.
+
+`POST /trigger/queue` is fail-closed: every request returns 401 unless it
+carries `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Google-signed
+Pub/Sub push OIDC token. The OIDC path is only tried when
+`AGENTRA_PUBSUB_AUDIENCE` is set (the token's audience); if
+`AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL` is also set, the token's verified `email`
+claim must equal it. With neither `AGENTRA_INTERNAL_TOKEN` nor
+`AGENTRA_PUBSUB_AUDIENCE` configured, the endpoint rejects everything. Queue
+senders (SQS forwarders, Pub/Sub push subscriptions) must send the bearer token
+or configure the subscription's OIDC authentication accordingly.
 
 ## Slack
 
