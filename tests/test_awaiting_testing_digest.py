@@ -57,7 +57,7 @@ def _cron():
     resp = _client().get("/trigger/cron")
     assert resp.status_code == 200
     body = resp.json()
-    assert list(body) == ["apps"]
+    assert "apps" in body  # the tick's other additive keys (e.g. human_gates) are out of scope here
     return body
 
 
