@@ -62,6 +62,7 @@ def _require_token(request: Request, authorization: str | None = Header(default=
 _REGISTRY_METHODS = frozenset({
     "list_apps", "register_app", "remove_app",
     "get_slack_channel", "set_slack_channel",
+    "get_app_llm_backend", "get_app_llm_backends", "set_app_llm_backend", "set_app_llm_backends",
     "is_paused", "pause", "resume",
     "get_llm_backend", "set_llm_backend",
     "get_llm_rotation", "set_llm_rotation", "select_llm_provider",

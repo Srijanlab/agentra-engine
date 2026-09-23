@@ -80,6 +80,24 @@ def _invalidate_app_cache(name: str) -> None:
         logger.warning("gh_cache invalidation failed for app=%r", name, exc_info=True)
 
 
+def _set_app_backend_or_400(name: str, backend: str | None) -> None:
+    if backend is None:
+        return
+    try:
+        registry.set_app_llm_backend(name, backend)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _set_app_backends_or_400(name: str, backends: dict[str, str] | None) -> None:
+    if backends is None:
+        return
+    try:
+        registry.set_app_llm_backends(name, backends)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _coord_view(name: str, info: dict) -> dict:
     """{"repo_path", "repo_url", "branch"} sourced from the coordination repo --
     a legacy single-repo entry has these at the top level already; a multi-repo
@@ -104,6 +122,8 @@ async def _app_digest(name: str, info: dict, github_data: dict | None = None) ->
             "shipped_count": 0, "released_count": 0, "known_bugs": 0,
             "pre_prod_branch": d.pre_prod_branch, "prod_branch": d.prod_branch,
             "schedule_hours": d.schedule_hours, "schedule_continuous": d.schedule_continuous, "alarm_enabled": d.alarm_enabled,
+            "llm_backend": registry.get_app_llm_backend(name),
+            "llm_backends": registry.get_app_llm_backends(name),
             "digest_error": True,
         }
 
@@ -133,6 +153,8 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
             "schedule_hours": defaults.schedule_hours,
             "schedule_continuous": defaults.schedule_continuous,
             "alarm_enabled": defaults.alarm_enabled,
+            "llm_backend": registry.get_app_llm_backend(name),
+            "llm_backends": registry.get_app_llm_backends(name),
         }
     mem = Memory(repo)
     env_config = environments.load(repo) or environments.EnvironmentConfig()
@@ -172,6 +194,8 @@ async def _app_digest_inner(name: str, info: dict, github_data: dict | None = No
         "schedule_hours": env_config.schedule_hours,
         "schedule_continuous": env_config.schedule_continuous,
         "alarm_enabled": env_config.alarm_enabled,
+        "llm_backend": registry.get_app_llm_backend(name),
+        "llm_backends": registry.get_app_llm_backends(name),
     }
 
 
@@ -235,6 +259,8 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
     registry.register_app(payload.name, repos=[r.model_dump() for r in payload.repos])
     if payload.slack_channel_id is not None:
         registry.set_slack_channel(payload.name, payload.slack_channel_id)
+    _set_app_backends_or_400(payload.name, payload.llm_backends)
+    _set_app_backend_or_400(payload.name, payload.llm_backend)
 
     try:
         from agentra.connectors import github_issues
@@ -299,6 +325,8 @@ async def register_app(payload: RegisterAppPayload) -> dict:
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
     if payload.slack_channel_id is not None:
         registry.set_slack_channel(payload.name, payload.slack_channel_id)
+    _set_app_backends_or_400(payload.name, payload.llm_backends)
+    _set_app_backend_or_400(payload.name, payload.llm_backend)
 
     try:
         from agentra.connectors import github_issues
@@ -394,6 +422,8 @@ async def _build_app_detail(name: str, info: dict) -> dict:
         "schedule_hours": env_config.schedule_hours,
         "schedule_continuous": env_config.schedule_continuous,
         "alarm_enabled": env_config.alarm_enabled,
+        "llm_backend": registry.get_app_llm_backend(name),
+        "llm_backends": registry.get_app_llm_backends(name),
         # The Testing Agent's per-run summary moved to each code repo's own
         # .agentra/testing.md '## Last run' (docs/agentra-spec.md); the engine has no
         # code-repo checkout to read it from. Re-surfacing it here is a follow-up.
@@ -429,6 +459,8 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
     )
     if payload.slack_channel_id is not None:
         registry.set_slack_channel(name, payload.slack_channel_id)
+    _set_app_backends_or_400(name, payload.llm_backends)
+    _set_app_backend_or_400(name, payload.llm_backend)
     _invalidate_app_cache(name)
     _server_log("update", f"app={name!r} configuration updated" + (f" -- push failed: {push_warning}" if push_warning else ""))
     result = {"updated": True, "name": name}

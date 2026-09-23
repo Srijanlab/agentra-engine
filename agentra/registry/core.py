@@ -191,6 +191,79 @@ def get_slack_channel(name: str) -> str | None:
     return (list_apps().get(name) or {}).get("slack_channel_id")
 
 
+VALID_APP_LLM_BACKENDS = ("claude", "codex", "gemini", "kiro")
+VALID_SDLC_AGENT_IDS = (
+    "orchestrator",
+    "codebase",
+    "discovery",
+    "architecture_review",
+    "human_answer_judge",
+    "requirements",
+    "implementation",
+    "testing",
+    "deployment",
+    "feedback",
+    "prod_debug",
+    "custom",
+)
+_DEFAULT_APP_LLM_BACKEND = "claude"
+
+
+def _validate_agent_backend_map(backends: dict) -> dict[str, str]:
+    if not isinstance(backends, dict):
+        raise ValueError("llm_backends must be an object keyed by SDLC agent id")
+    out: dict[str, str] = {}
+    for agent_id, backend in backends.items():
+        if agent_id not in VALID_SDLC_AGENT_IDS:
+            raise ValueError(f"unknown SDLC agent {agent_id!r} -- expected one of {VALID_SDLC_AGENT_IDS}")
+        if backend not in VALID_APP_LLM_BACKENDS:
+            raise ValueError(f"unknown app llm backend {backend!r} -- expected one of {VALID_APP_LLM_BACKENDS}")
+        out[agent_id] = backend
+    return out
+
+
+def get_app_llm_backends(name: str) -> dict[str, str]:
+    """Per-app runtime-agent map keyed by SDLC agent id."""
+    app = list_apps().get(name) or {}
+    configured = app.get("llm_backends") if isinstance(app.get("llm_backends"), dict) else {}
+    legacy = app.get("llm_backend")
+    merged = {agent_id: _DEFAULT_APP_LLM_BACKEND for agent_id in VALID_SDLC_AGENT_IDS}
+    merged.update({k: v for k, v in configured.items() if k in VALID_SDLC_AGENT_IDS and v in VALID_APP_LLM_BACKENDS})
+    if legacy in VALID_APP_LLM_BACKENDS:
+        merged["implementation"] = legacy
+    return merged
+
+
+def get_app_llm_backend(name: str, agent_id: str = "implementation") -> str:
+    """The runtime backend for one SDLC agent in an app."""
+    backend = get_app_llm_backends(name).get(agent_id)
+    return backend if backend in VALID_APP_LLM_BACKENDS else _DEFAULT_APP_LLM_BACKEND
+
+
+def set_app_llm_backends(name: str, backends: dict) -> None:
+    validated = _validate_agent_backend_map(backends)
+    _cache.drop("apps")
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.merge_update(_dynamo.table("apps"), {"name": name}, {"llm_backends": validated})
+        return
+    apps = _local_apps()
+    if name in apps:
+        apps[name]["llm_backends"] = validated
+        _local_save_apps(apps)
+
+
+def set_app_llm_backend(name: str, backend: str, agent_id: str = "implementation") -> None:
+    if backend not in VALID_APP_LLM_BACKENDS:
+        raise ValueError(f"unknown app llm backend {backend!r} -- expected one of {VALID_APP_LLM_BACKENDS}")
+    if agent_id not in VALID_SDLC_AGENT_IDS:
+        raise ValueError(f"unknown SDLC agent {agent_id!r} -- expected one of {VALID_SDLC_AGENT_IDS}")
+    current = get_app_llm_backends(name)
+    current[agent_id] = backend
+    set_app_llm_backends(name, current)
+
+
 def _remote_head_sha(repo_url: str, branch: str) -> str | None:
     # git_ops.remote_head_sha, not a bare `git ls-remote` -- this used to run
     from agentra.git_ops import remote_head_sha

@@ -9,9 +9,13 @@ from typing import Any
 from agentra.registry import core
 from agentra.registry.core import (
     VALID_LLM_BACKENDS,
+    VALID_APP_LLM_BACKENDS,
+    VALID_SDLC_AGENT_IDS,
     RepoSpec,
     cloud_mode,
     dynamodb_resource,
+    get_app_llm_backend,
+    get_app_llm_backends,
     get_app_repo,
     get_app_repos,
     get_code_repos,
@@ -30,6 +34,8 @@ from agentra.registry.core import (
     slack_thread_for,
     resume,
     set_llm_backend,
+    set_app_llm_backend,
+    set_app_llm_backends,
     set_slack_channel,
 )
 from agentra.registry.digests import (
@@ -123,6 +129,8 @@ sys.modules[__name__].__class__ = RegistryModule
 __all__ = [
     "DispatchSummary",
     "VALID_LLM_BACKENDS",
+    "VALID_APP_LLM_BACKENDS",
+    "VALID_SDLC_AGENT_IDS",
     "InvalidLLMPool",
     "get_llm_provider_health",
     "get_llm_rotation",
@@ -133,6 +141,8 @@ __all__ = [
     "RepoSpec",
     "cloud_mode",
     "dynamodb_resource",
+    "get_app_llm_backend",
+    "get_app_llm_backends",
     "get_app_repo",
     "get_app_repos",
     "get_code_repos",
@@ -180,6 +190,8 @@ __all__ = [
     "remove_app",
     "resume",
     "set_llm_backend",
+    "set_app_llm_backend",
+    "set_app_llm_backends",
     "set_slack_channel",
     "dispatch_once",
     "submit_request",

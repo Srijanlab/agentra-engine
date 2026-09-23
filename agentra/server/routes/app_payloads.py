@@ -27,6 +27,8 @@ class RegisterAppPayload(BaseModel):
     schedule_continuous: bool | None = None
     alarm_enabled: bool | None = None
     slack_channel_id: str | None = None
+    llm_backend: str | None = None
+    llm_backends: dict[str, str] | None = None
     repos: list[RepoEntryPayload] | None = None
 
 
@@ -41,6 +43,8 @@ class UpdateAppPayload(BaseModel):
     schedule_continuous: bool | None = None
     alarm_enabled: bool | None = None
     slack_channel_id: str | None = None
+    llm_backend: str | None = None
+    llm_backends: dict[str, str] | None = None
 
 
 class BacklogRequestPayload(BaseModel):

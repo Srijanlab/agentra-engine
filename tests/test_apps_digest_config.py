@@ -108,3 +108,45 @@ def test_list_apps_stays_200_when_one_app_digest_fails(tmp_path, monkeypatch):
     assert entry["digest_error"] is True
     for field in ("schedule_hours", "alarm_enabled", "pre_prod_branch", "prod_branch"):
         assert field in entry
+
+
+def test_app_detail_and_patch_round_trip_sdlc_agent_runtime_map(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    client = TestClient(server.app)
+
+    origin = _init_origin(tmp_path / "runtime-origin")
+    resp = client.post(
+        "/apps",
+        json={
+            "name": "runtime",
+            "repo_url": str(origin),
+            "branch": "main",
+            "llm_backends": {"implementation": "codex", "testing": "gemini"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    detail = client.get("/apps/runtime").json()
+    assert detail["llm_backends"]["implementation"] == "codex"
+    assert detail["llm_backends"]["testing"] == "gemini"
+    assert detail["llm_backends"]["codebase"] == "claude"
+    assert detail["llm_backend"] == "codex"
+    assert client.get("/apps").json()["apps"]["runtime"]["llm_backends"]["testing"] == "gemini"
+
+    patch = client.patch("/apps/runtime", json={"llm_backends": {"codebase": "kiro", "implementation": "claude"}})
+    assert patch.status_code == 200, patch.text
+    updated = client.get("/apps/runtime").json()
+    assert updated["llm_backends"]["codebase"] == "kiro"
+    assert updated["llm_backends"]["implementation"] == "claude"
+    assert updated["llm_backends"]["testing"] == "claude"
+
+
+def test_app_runtime_map_rejects_unknown_agent_or_backend(tmp_path, monkeypatch):
+    _isolate_registry(tmp_path, monkeypatch)
+    client = TestClient(server.app)
+
+    origin = _init_origin(tmp_path / "invalid-runtime-origin")
+    assert client.post("/apps", json={"name": "invalid-runtime", "repo_url": str(origin), "branch": "main"}).status_code == 200
+
+    assert client.patch("/apps/invalid-runtime", json={"llm_backends": {"nope": "claude"}}).status_code == 400
+    assert client.patch("/apps/invalid-runtime", json={"llm_backends": {"testing": "wat"}}).status_code == 400
