@@ -40,7 +40,13 @@ def test_correct_token_reads_allowed_routes(client):
 @pytest.mark.parametrize("value", ["wrong", ""])
 @pytest.mark.parametrize("path", ["/apps", "/apps/demo/schedule", "/runs/rk1"])
 def test_wrong_or_empty_token_is_401(client, path, value):
-    assert client.get(path, headers={"X-Agentra-Verify-Token": value}).status_code == 401
+    r = client.get(path, headers={"X-Agentra-Verify-Token": value})
+    assert r.status_code == 401
+    body = r.json()
+    assert body["error"] == "authentication_required"
+    assert "hint" in body
+    assert TOKEN not in r.text
+    assert "a@example.com" not in r.text
 
 
 def test_token_unset_fails_closed(client, monkeypatch):

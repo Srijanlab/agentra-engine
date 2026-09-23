@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from agentra.server.verify_token import check_verify_token
+from agentra.server.verify_token import check_verify_token, unauthenticated_body
 
 logger = logging.getLogger("agentra.server.auth")
 
@@ -156,7 +156,7 @@ async def auth_middleware(request: Request, call_next):
     token = _token_from(request)
     claims = _verify(token, _firebase_project()) if token else None
     if claims is None:
-        return JSONResponse({"detail": "authentication required"}, status_code=401)
+        return JSONResponse(unauthenticated_body(), status_code=401)
 
     email = (claims.get("email") or "").lower()
     allowed = _allowed_emails()
