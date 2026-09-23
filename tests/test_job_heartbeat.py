@@ -107,6 +107,63 @@ def test_touch_job_refuses_unknown_terminal_and_requeued_jobs(store):
     assert not _job(stale).get("heartbeat_at")
 
 
+def test_release_job_frees_a_claimed_job_immediately(store):
+    """Graceful shutdown: a container about to be replaced releases its
+    in-flight job back to pending instead of leaving it claimed with no owner
+    until the lease ceiling reclaims it."""
+    jid = jobs.enqueue_job("cycle", {"app": "a"}, dedup_key="cycle:a")
+    jobs.claim_next_job()
+    assert jobs.release_job(jid) is True
+    job = _job(jid)
+    assert job["status"] == "pending"
+    assert job["claimed_at"] is None
+    # A fresh claim (a replacement container) picks it up right away, no
+    # dependency on the lease ceiling having elapsed.
+    reclaimed = jobs.claim_next_job()
+    assert reclaimed["job_id"] == jid
+
+
+def test_release_job_does_not_touch_the_attempt_count(store):
+    jid = jobs.enqueue_job("cycle", {"app": "a"})
+    jobs.claim_next_job()
+    before = _job(jid)["attempts"]
+    jobs.release_job(jid)
+    jobs.claim_next_job()
+    assert _job(jid)["attempts"] == before + 1
+
+
+def test_release_job_is_a_noop_for_terminal_or_unknown_jobs(store):
+    assert jobs.release_job("nope") is False
+    done = jobs.enqueue_job("cycle", {"app": "a"})
+    jobs.claim_next_job()
+    jobs.report_job(done, "done")
+    assert jobs.release_job(done) is False
+    assert _job(done)["status"] == "done"
+
+
+def test_release_job_is_a_noop_once_already_reclaimed(store):
+    """A late release call (the old container finally unwinding after the
+    lease ceiling already reclaimed and a new container started working it)
+    must not stomp on the new attempt -- the caller passes the claimed_at it
+    observed when it first claimed the job, so a mismatch (a newer claim)
+    correctly leaves the fresh attempt alone."""
+    jid = jobs.enqueue_job("cycle", {"app": "a"})
+    original = jobs.claim_next_job()
+    _age_lease(jid, 7200)
+    jobs.claim_next_job()  # a different worker reclaims the stale lease
+    assert jobs.release_job(jid, claimed_at=original["claimed_at"]) is False
+    assert _job(jid)["status"] == "claimed"
+
+
+def test_release_job_without_claimed_at_releases_unconditionally(store):
+    """Backward-compatible bare call (no CAS guard) still releases whatever is
+    currently claimed -- used when the caller has no prior claimed_at to check."""
+    jid = jobs.enqueue_job("cycle", {"app": "a"})
+    jobs.claim_next_job()
+    assert jobs.release_job(jid) is True
+    assert _job(jid)["status"] == "pending"
+
+
 def test_stale_lease_is_requeued_and_reclaimable(store):
     jid = jobs.enqueue_job("cycle", {"app": "a"})
     jobs.claim_next_job()

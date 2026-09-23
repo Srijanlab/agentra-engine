@@ -78,6 +78,33 @@ def claim_next_job() -> dict | None:
     return None
 
 
+def release_job(job_id: str, *, claimed_at: float | None = None) -> bool:
+    """Release a claimed job back to pending immediately, without touching its
+    attempt count. For graceful shutdown: a container about to be replaced (a
+    deploy, an ECS task-definition update) releases whatever job it's mid-way
+    through so the replacement container can claim and retry it within
+    seconds, instead of the job sitting claimed with no owner until the lease
+    ceiling reclaims it (confirmed live 2026-09-23: over an hour of nothing
+    running after a task-definition update replaced the container mid-cycle).
+
+    `claimed_at`, when given, must match the job's current claimed_at or this
+    is a no-op -- a compare-and-swap guard against a late release call landing
+    after the lease ceiling already reclaimed this job and a different worker
+    has since started a fresh attempt on it (that attempt's own claimed_at
+    won't match, so this correctly leaves it alone instead of stomping it back
+    to pending out from under the new owner).
+
+    No-op (returns False) if the job is already terminal, already reclaimed
+    (by lease or by this guard), or unknown."""
+    job = _get_job(job_id)
+    if job is None or job.get("status") != "claimed":
+        return False
+    if claimed_at is not None and job.get("claimed_at") != claimed_at:
+        return False
+    _write_job(job_id, {"status": "pending", "claimed_at": None, "heartbeat_at": None})
+    return True
+
+
 def touch_job(job_id: str, run_key: str | None = None) -> bool:
     """Renew a claimed job's lease; False (never raises) once it is unknown, terminal, or re-queued."""
     now = time.time()

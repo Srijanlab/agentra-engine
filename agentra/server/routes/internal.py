@@ -74,7 +74,7 @@ _REGISTRY_METHODS = frozenset({
     "list_agent_steps",
     "list_waiting_for_human", "reconcile_stale_runs", "reconcile_stale_loops", "reconcile_waiting_for_human",
     "submit_request", "dispatch_once",
-    "enqueue_job", "claim_next_job", "report_job", "list_jobs", "touch_job",
+    "enqueue_job", "claim_next_job", "report_job", "list_jobs", "touch_job", "release_job",
 })
 
 _MEMORY_METHODS = frozenset({
