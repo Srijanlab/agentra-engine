@@ -42,6 +42,10 @@ from agentra.registry.digests import (
     get_last_awaiting_digest_at,
     record_awaiting_digest,
 )
+from agentra.registry.signals import (
+    list_signals,
+    record_signal,
+)
 from agentra.registry.inbox import (
     DispatchSummary,
     dispatch_once,
@@ -149,6 +153,8 @@ __all__ = [
     "get_coordination_repo",
     "get_last_awaiting_digest_at",
     "record_awaiting_digest",
+    "list_signals",
+    "record_signal",
     "get_llm_backend",
     "get_run",
     "get_slack_channel",

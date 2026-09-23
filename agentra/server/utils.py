@@ -35,8 +35,9 @@ def _set_run(run_key: str, **fields: Any) -> None:
 
 
 def _server_log(channel: str, message: str) -> None:
-    """Structured server-side event log -- stdout / CloudWatch only."""
+    """Structured server-side event log -- stdout/CloudWatch plus a durable, persisted signal."""
     logger.info("[server:%s] %s", channel, message)
+    registry.record_signal(channel, message)
 
 
 def _paused_response(source: str) -> dict:

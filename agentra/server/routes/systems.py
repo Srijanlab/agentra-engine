@@ -121,39 +121,6 @@ async def get_agent_steps(app: str | None = None, limit: int = 100) -> dict:
 
 @router.get("/signals")
 async def get_signals(limit: int = 100) -> dict:
-    """Returns recent system events (signals) from server.log."""
-    import re
-    from pathlib import Path
-    
-    signals_path = registry.AGENTRA_HOME / "server.log"
-    if not signals_path.exists():
-        return {"signals": []}
-    
-    lines = signals_path.read_text().strip().split("\n")
-    signals = []
-    
-    # Parse each log line: [timestamp] source=X message...
-    ts_pattern = re.compile(r'^\[(.*?)\]')
-    source_pattern = re.compile(r'source=(\S+)')
-    
-    for line in reversed(lines[-limit:]):  # Most recent first
-        if not line.strip():
-            continue
-        
-        ts_match = ts_pattern.search(line)
-        source_match = source_pattern.search(line)
-        
-        ts = ts_match.group(1) if ts_match else None
-        source = source_match.group(1) if source_match else None
-        
-        # Remove timestamp prefix for message
-        message = ts_pattern.sub('', line).strip()
-        
-        signals.append({
-            "ts": ts,
-            "source": source,
-            "message": message
-        })
-    
-    return {"signals": signals}
+    """Returns recent, durably persisted system events (signals), most-recent-first."""
+    return {"signals": registry.list_signals(limit=limit)}
 

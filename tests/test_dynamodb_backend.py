@@ -12,7 +12,7 @@ import pytest
 from moto import mock_aws
 
 from agentra import registry
-from agentra.registry import _cache, _dynamo, core, llm_pool
+from agentra.registry import _cache, _dynamo, core, llm_pool, signals
 
 
 @pytest.fixture
@@ -142,6 +142,27 @@ def test_pause_resume_round_trip(ddb_env):
 
     core.resume()
     assert core.is_paused() is None
+
+
+def test_signals_round_trip_and_order_over_dynamodb(ddb_env):
+    assert signals.list_signals() == []
+
+    signals.record_signal("pause", "first", ts=1.0)
+    signals.record_signal("resume", "second", ts=2.0)
+
+    result = signals.list_signals()
+    assert [e["source"] for e in result] == ["resume", "pause"]
+    assert result[0]["message"] == "second"
+
+
+def test_signals_cap_at_200_over_dynamodb(ddb_env):
+    for i in range(210):
+        signals.record_signal("scheduled", f"event {i}", ts=float(i))
+
+    result = signals.list_signals(limit=1000)
+    assert len(result) == 200
+    assert result[0]["message"] == "event 209"
+    assert result[-1]["message"] == "event 10"
 
 
 def test_llm_backend_defaults_and_round_trips(ddb_env):
