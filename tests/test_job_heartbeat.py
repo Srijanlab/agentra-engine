@@ -351,3 +351,64 @@ def test_heartbeat_endpoint_never_creates_a_run(client):
     r = client.post(f"/internal/jobs/{jid}/heartbeat", json={"run_key": "nonexistent-run-xyz"}, headers=auth)
     assert r.json() == {"renewed": True}
     assert registry.get_run("nonexistent-run-xyz") is None
+
+
+def _claim_two(app="a"):
+    first = jobs.enqueue_job("cycle", {"app": app})
+    second = jobs.enqueue_job("cycle", {"app": app})
+    assert jobs.claim_next_job()["job_id"] == first
+    assert jobs.claim_next_job()["job_id"] == second
+    return first, second
+
+
+def test_stale_job_is_requeued_despite_fresh_sibling_on_same_app(store):
+    stale, fresh = _claim_two()
+    _age_lease(stale, 7200)
+    jobs._requeue_stale_claims(time.time())
+    assert _job(stale)["status"] == "pending"
+    assert _job(stale)["claimed_at"] is None
+    assert _job(fresh)["status"] == "claimed"
+
+
+def test_fresh_job_is_left_alone_by_requeue(store):
+    fresh, other = _claim_two()
+    before = _job(fresh)
+    jobs._requeue_stale_claims(time.time())
+    after = _job(fresh)
+    assert after["status"] == "claimed"
+    assert after["claimed_at"] == before["claimed_at"] and after["attempts"] == before["attempts"]
+    assert _job(other)["status"] == "claimed"
+
+
+def test_stale_claim_falls_back_to_claimed_at_without_heartbeat(store):
+    jid = jobs.enqueue_job("cycle", {"app": "a"})
+    jobs.claim_next_job()
+    jobs._write_job(jid, {"claimed_at": time.time() - 7200, "heartbeat_at": None})
+    jobs._requeue_stale_claims(time.time())
+    assert _job(jid)["status"] == "pending"
+
+
+def test_exhausted_stale_job_is_poison_failed_despite_fresh_sibling(store, monkeypatch):
+    monkeypatch.setenv("AGENTRA_JOB_MAX_ATTEMPTS", "1")
+    poisoned = []
+    monkeypatch.setattr(jobs, "_fail_poison_job", lambda job: poisoned.append(job["job_id"]))
+    stale, fresh = _claim_two()
+    _age_lease(stale, 7200)
+    jobs._requeue_stale_claims(time.time())
+    assert poisoned == [stale]
+    assert _job(stale)["status"] == "claimed"
+    assert _job(fresh)["status"] == "claimed"
+
+
+def test_exhausted_stale_job_ends_failed_with_human_gate(store, monkeypatch):
+    monkeypatch.setenv("AGENTRA_JOB_MAX_ATTEMPTS", "1")
+    from agentra.connectors import slack
+
+    monkeypatch.setattr(slack, "notify_human_input_required", lambda **kw: None)
+    monkeypatch.setattr(core, "get_slack_channel", lambda app: None)
+    stale, fresh = _claim_two()
+    _age_lease(stale, 7200)
+    jobs._requeue_stale_claims(time.time())
+    job = _job(stale)
+    assert job["status"] == "failed" and "HUMAN_INPUT_REQUIRED" in job["result"]["error"]
+    assert _job(fresh)["status"] == "claimed"
