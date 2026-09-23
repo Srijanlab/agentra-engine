@@ -13,6 +13,16 @@ VERIFY_HEADER = "x-agentra-verify-token"
 
 _ELIGIBLE = re.compile(r"^/(apps|apps/[^/]+/schedule|runs/[^/]+)$")
 
+_AUTH_HINT = (
+    "Provide a Firebase ID token via 'Authorization: Bearer <token>', or, for "
+    "eligible read-only GET endpoints, the 'X-Agentra-Verify-Token' header."
+)
+
+
+def unauthenticated_body(detail: str = "authentication required") -> dict:
+    """Shared 401 body shape: a detail string plus a non-sensitive error code and auth-flow hint."""
+    return {"detail": detail, "error": "authentication_required", "hint": _AUTH_HINT}
+
 
 def _is_production() -> bool:
     return any(
@@ -33,4 +43,4 @@ def check_verify_token(request: Request) -> JSONResponse | bool | None:
     eligible = request.method == "GET" and bool(_ELIGIBLE.match(request.url.path))
     if supplied and eligible and hmac.compare_digest(supplied.encode(), expected.encode()):
         return True
-    return JSONResponse({"detail": "authentication required"}, status_code=401)
+    return JSONResponse(unauthenticated_body(), status_code=401)

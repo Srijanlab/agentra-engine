@@ -158,7 +158,11 @@ def test_cloud_mode_via_registry_ddb_also_fails_closed(monkeypatch):
 def test_cloud_fully_configured_keeps_401_403_200(monkeypatch):
     client = _configure(monkeypatch, cloud=True, firebase=True, allowlist=True)
     r = client.get("/apps")
-    assert r.status_code == 401 and r.json() == {"detail": "authentication required"}
+    body = r.json()
+    assert r.status_code == 401
+    assert body["detail"] == "authentication required"
+    assert body["error"] == "authentication_required"
+    assert "Firebase" in body["hint"] and "X-Agentra-Verify-Token" in body["hint"]
     assert client.get("/apps", headers={"Authorization": "Bearer bad"}).status_code == 401
     assert client.get("/apps?access_token=bad").status_code == 401
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "other@example.com")
@@ -220,6 +224,19 @@ def test_503_carries_cors_headers(monkeypatch):
     r = client.get("/apps", headers={"Origin": "http://localhost:5173"})
     assert r.status_code == 503
     assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_401_carries_cors_headers_and_auth_hint(monkeypatch):
+    client = _configure(monkeypatch, cloud=True, firebase=True, allowlist=True)
+    origin = "https://agentra-dashboard.web.app"
+    r = client.get("/apps", headers={"Origin": origin})
+    assert r.status_code == 401
+    assert r.headers["access-control-allow-origin"] == origin
+    body = r.json()
+    assert body["error"] == "authentication_required"
+    assert "Firebase" in body["hint"] and "X-Agentra-Verify-Token" in body["hint"]
+    for secret in (PROJECT, EMAIL, "secretprefix"):
+        assert secret not in r.text
 
 
 def test_health_auth_block_per_mode_leaks_no_secrets(monkeypatch):

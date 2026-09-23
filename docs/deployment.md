@@ -30,6 +30,20 @@ memory, `system`) live in **DynamoDB**, one table per collection, prefixed by
 
 All `/internal/*` routes require the shared `AGENTRA_INTERNAL_TOKEN` bearer.
 
+## Pre-prod domain
+
+The `beta` branch deploys to a Vercel **Preview** deployment, which Vercel gives
+an auto-generated, personal-looking URL of the form
+`agentra-engine-git-beta-<vercel-account>.vercel.app` (e.g.
+`agentra-engine-git-beta-roshan-sharma-s-sentinel.vercel.app`). That URL, tied
+to whichever account owns the Vercel project, *is* the intended pre-prod
+backend address today — it is not a stray personal deploy, and the loop's
+Testing Agent and any pre-prod dashboard are expected to point at it. A stable,
+branded custom domain for pre-prod (aliased the way `main` -> Production
+already has one) is a tracked follow-up to do before promoting the engine out
+of pre-prod; until then, the Preview URL changing if the underlying Vercel
+project or account changes is expected, not a bug (issue #83).
+
 ## Pre-prod verification
 
 Pre-prod (beta, a Vercel Preview) must be isolated from production and the live loop:
@@ -42,6 +56,8 @@ Pre-prod (beta, a Vercel Preview) must be isolated from production and the live 
 `GET /trigger/cron` accepts `Authorization: Bearer <AGENTRA_TICK_TOKEN>` or `CRON_SECRET`. `AGENTRA_INTERNAL_TOKEN` is accepted only as a backward-compat fallback while `AGENTRA_TICK_TOKEN` is unset. It fails closed (401) on a DynamoDB-configured deployment with no tick credential.
 
 `AGENTRA_VERIFY_TOKEN` (unset = disabled) enables a read-only user-facing path for black-box checks: send `X-Agentra-Verify-Token: <token>` (constant-time compared) with no Firebase token. It is honored only for `GET /apps`, `GET /apps/{name}/schedule` and `GET /runs/{run_key}`; any other route or method, and a wrong or empty value, returns 401. It never authorizes `/trigger/cron` or `/internal/*`. It must NOT be set on Production: when `VERCEL_ENV` or `AGENTRA_ENVIRONMENT` is `production`, any request carrying the header gets 403.
+
+Every 401 from the Firebase gate or the verify-token gate (missing credentials, an invalid/expired Firebase token, or a wrong/ineligible verify token) returns the same JSON shape: `{"detail": ..., "error": "authentication_required", "hint": ...}`, where `hint` names both accepted auth flows (a Firebase ID token via `Authorization: Bearer <token>`, or `X-Agentra-Verify-Token` on eligible read-only GET routes) without leaking any secret value, allowlisted email, or other config (issue #83).
 
 `/v1/messages` is served by the separate NIM
 proxy (`agentra/proxy/main.py`), not the engine app. LLM rotation state can be read with the read-only `GET /debug/llm-rotation`,
