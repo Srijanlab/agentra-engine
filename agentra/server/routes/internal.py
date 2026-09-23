@@ -11,6 +11,7 @@ import dataclasses
 import hmac
 import logging
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from agentra import registry
 from agentra.connectors import github_app
+from agentra.git_ops import GitOpError, push_branch
 from agentra.memory import Memory
 
 logger = logging.getLogger("agentra.server.internal")
@@ -98,40 +100,6 @@ _MEMORY_METHODS = frozenset({
 
 # The subset of _MEMORY_METHODS that changes GitHub Issues/Projects state for an
 # app -- a successful call here must invalidate that app's dashboard cache
-+from pydantic import BaseModel
-+from pathlib import Path
-+import subprocess
-+from agentra.git_ops import push_branch, GitOpError
-+from agentra.connectors import github_app
-+import logging
-+
-+logger = logging.getLogger("agentra.server.internal")
-+
-+class _PushBranchTestRequest(BaseModel):
-+    repo: str
-+    branch: str
-+
-+@router.post("/test/push-branch")
-+async def test_push_branch(req: _PushBranchTestRequest) -> dict:
-+    """Internal test route to push a branch and return its commit SHA.
-+    Used by CI/tests to validate push_branch logic.
-+    """
-+    repo_path = Path(req.repo)
-+    if not repo_path.is_dir():
-+        raise HTTPException(status_code=400, detail="repo path does not exist")
-+    try:
-+        push_branch(repo_path, req.branch)
-+    except GitOpError as exc:
-+        message = str(exc).lower()
-+        if "conflict" in message:
-+            raise HTTPException(status_code=409, detail="conflict")
-+        raise HTTPException(status_code=400, detail=message)
-+    # After successful push, get the HEAD commit SHA
-+    try:
-+        sha = subprocess.check_output(["git", "-C", str(repo_path), "rev-parse", "HEAD"], text=True).strip()
-+    except subprocess.SubprocessError as exc:
-+        raise HTTPException(status_code=500, detail=f"failed to get commit SHA: {exc}")
-+    return {"commit_sha": sha}
 # entries (server/gh_cache) so the read endpoints don't serve a now-stale view.
 _MEMORY_MUTATION_METHODS = frozenset({
     "record_known_bug", "clear_known_bug",
@@ -295,3 +263,30 @@ async def git_token(req: GitTokenRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
     return {"token": token}
+
+
+class PushBranchTestRequest(BaseModel):
+    repo: str
+    branch: str
+
+
+@router.post("/test/push-branch", dependencies=[Depends(_require_token)])
+async def test_push_branch(req: PushBranchTestRequest) -> dict:
+    """Push `branch` in `repo` and return its HEAD commit SHA -- exercises
+    git_ops.push_branch for issue #78/#79's push-failure diagnosis without
+    needing a full autonomous cycle."""
+    repo_path = Path(req.repo)
+    if not repo_path.is_dir():
+        raise HTTPException(status_code=400, detail="repo path does not exist")
+    try:
+        push_branch(repo_path, req.branch)
+    except GitOpError as exc:
+        message = str(exc).lower()
+        if "conflict" in message:
+            raise HTTPException(status_code=409, detail="conflict")
+        raise HTTPException(status_code=400, detail=message)
+    try:
+        sha = subprocess.check_output(["git", "-C", str(repo_path), "rev-parse", "HEAD"], text=True).strip()
+    except subprocess.SubprocessError as exc:
+        raise HTTPException(status_code=500, detail=f"failed to get commit SHA: {exc}")
+    return {"commit_sha": sha}

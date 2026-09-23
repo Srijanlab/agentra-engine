@@ -134,9 +134,6 @@ def push_branch(repo: Path, branch: str) -> None:
     """
     auth = _extra_auth_args(_origin_url(repo))
     try:
-    """Push the local `branch` to origin. If origin/`branch` has moved since this checkout last synced with it (a concurrent push elsewhere -- GitHub issue #88), pulls the new remote tip into the local branch and retries the push once, rather than immediately failing on the first non-fast-forward rejection."""
-    auth = _extra_auth_args(_origin_url(repo))
-    try:
         subprocess.run(
             ["git", "-C", str(repo), *auth, "push", "origin", branch],
             check=True, capture_output=True, text=True,

@@ -218,16 +218,31 @@ def _bearer_matches(authorization: str | None, secret: str | None) -> bool:
 
 
 def _verify_tick_auth(authorization: str | None) -> None:
-    """Accept AGENTRA_TICK_TOKEN / CRON_SECRET (internal token only while no tick token is set); fail closed on cloud."""
+    """Accept AGENTRA_TICK_TOKEN or CRON_SECRET; AGENTRA_INTERNAL_TOKEN is only
+    accepted while no tick token is configured yet.
+
+    GitHub issue #80: an RPC token holder can trigger scheduler ticks with side
+    effects -- the fix is a dedicated tick-only credential. The deployed loop
+    still authenticates its own /trigger/cron poll with AGENTRA_INTERNAL_TOKEN
+    (agentra-loop's engine_client.py), and no AGENTRA_TICK_TOKEN has been
+    provisioned in either the engine's environment or the loop's ECS task yet.
+    Rejecting AGENTRA_INTERNAL_TOKEN outright before that rollout lands would
+    401 the loop's own idle-tick poll in production -- breaking scheduled
+    cycles, the human-input backstop sweep, and the awaiting-testing digest.
+    This keeps the internal token working until AGENTRA_TICK_TOKEN is actually
+    set; setting it anywhere immediately closes the hole with no further code
+    change (see test_cron_internal_token_only_while_tick_token_unset)."""
     tick = os.environ.get("AGENTRA_TICK_TOKEN")
     cron = os.environ.get("CRON_SECRET")
-    # Accept only the tick token or (if no tick token) the CRON secret.
+    internal = os.environ.get("AGENTRA_INTERNAL_TOKEN")
     if tick and _bearer_matches(authorization, tick):
         return
-    if not tick and cron and _bearer_matches(authorization, cron):
+    if cron and _bearer_matches(authorization, cron):
         return
-    # Any other token, including AGENTRA_INTERNAL_TOKEN, should fail.
-    raise HTTPException(status_code=401, detail="bad tick token")
+    if not tick and internal and _bearer_matches(authorization, internal):
+        return
+    if tick or cron or internal or os.environ.get("AGENTRA_DYNAMODB_TABLE_PREFIX"):
+        raise HTTPException(status_code=401, detail="bad tick token")
 
 
 @router.get("/trigger/cron")
