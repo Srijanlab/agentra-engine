@@ -91,7 +91,7 @@ async def _enqueue_cycle(
     if any(
         j.get("kind") == "cycle" and j.get("payload", {}).get("app") == app_name
         for status in ("pending", "claimed")
-        for j in registry.list_jobs(status=status)
+        for j in registry.list_jobs(status=status, limit=None)
     ):
         return {"triggered": False, "reason": "a cycle for this app is already queued"}
 

@@ -84,24 +84,41 @@ def loop_id_for_issue(app: str, issue_number: int | str) -> str:
 
 
 def last_run_at(app: str, source: str | None = None) -> float | None:
+    runs = list_app_runs(app, sources=(source,) if source else None, limit=1)
+    return runs[0]["started_at"] if runs else None
+
+
+def list_app_runs(app: str, sources: tuple[str, ...] | list[str] | None = None, limit: int = 50) -> list[dict]:
+    """The app's own runs (optionally only from `sources`), newest first by started_at, at most `limit`."""
     if core._ddb is not None:
-        from boto3.dynamodb.conditions import Key
+        return _query_app_runs(app, sources, limit)
+    matches = [
+        {"run_key": key, **info}
+        for key, info in _local_runs().items()
+        if info.get("app") == app and info.get("started_at") is not None and (not sources or info.get("source") in sources)
+    ]
+    matches.sort(key=lambda r: r["started_at"], reverse=True)
+    return matches[:limit]
 
-        from agentra.registry import _dynamo
 
-        resp = _dynamo.table("runs").query(
-            IndexName="by-app-recency", KeyConditionExpression=Key("app").eq(app), ScanIndexForward=False, Limit=100
-        )
-        matches = [
-            r for r in (_strip_internal(_dynamo.from_item(i)) for i in resp.get("Items", []))
-            if source is None or r.get("source") == source
-        ]
-        return max((r["started_at"] for r in matches), default=None)
+def _query_app_runs(app: str, sources: tuple[str, ...] | list[str] | None, limit: int) -> list[dict]:
+    from boto3.dynamodb.conditions import Attr, Key
 
-    matches = [r for r in list_runs(limit=200) if r.get("app") == app and (source is None or r.get("source") == source)]
-    if not matches:
-        return None
-    return max(r["started_at"] for r in matches)
+    from agentra.registry import _dynamo
+
+    kwargs: dict[str, Any] = {
+        "IndexName": "by-app-recency", "KeyConditionExpression": Key("app").eq(app), "ScanIndexForward": False,
+    }
+    if sources:
+        kwargs["FilterExpression"] = Attr("source").is_in(list(sources))
+    found: list[dict] = []
+    while len(found) < limit:
+        resp = _dynamo.table("runs").query(**kwargs)
+        found.extend(_strip_internal(_dynamo.from_item(i)) for i in resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return found[:limit]
 
 
 def reconcile_stale_runs() -> list[str]:

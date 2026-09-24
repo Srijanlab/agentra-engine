@@ -179,12 +179,12 @@ def report_job(job_id: str, status: str, result: dict | None = None) -> None:
     })
 
 
-def list_jobs(status: str | None = None, limit: int = 50) -> list[dict]:
+def list_jobs(status: str | None = None, limit: int | None = 50) -> list[dict]:
     jobs = _all_jobs()
     if status is not None:
         jobs = [j for j in jobs if j.get("status") == status]
     jobs.sort(key=lambda j: j.get("enqueued_at") or 0, reverse=True)
-    return jobs[:limit]
+    return jobs if limit is None else jobs[:limit]
 
 
 def _open_jobs() -> list[dict]:
