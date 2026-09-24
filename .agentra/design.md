@@ -1,5 +1,5 @@
 <!-- owner: agent:codebase -->
-<!-- source-sha: 097ec93b289ecdf4f67fe41d0ffe04d89724ad23 -->
+<!-- source-sha: a48c0343c41e9dc245d32786ee171fc7b49de478 -->
 - Engine = state authority, loop = execution — a hard split. Trigger endpoints only `registry.enqueue_job({cycle|promote|prod_debug|human_resume})`; agentra-loop drains the queue and reports back. The engine carries no `claude-agent-sdk` and no docker/deploy code.
 - One RPC contract. `POST /internal/rpc` gated by `AGENTRA_INTERNAL_TOKEN` (+ optional Vercel-header IP allowlist), restricted to the `_REGISTRY_METHODS` / `_MEMORY_METHODS` frozensets, is the entire state surface the loop may touch. Credential-holding side doors are separate token-gated endpoints (`/internal/git-token`, `/internal/slack/message`, `/internal/runs/{id}/log`).
 - Dual-path persistence. Every registry/memory write is `if core._ddb: <DynamoDB> else: <local JSON under AGENTRA_HOME>`. DynamoDB (static prefixed `AGENTRA_AWS_*` IAM keys) backs prod; local JSON serves the CLI, tests, and the loop's own process. `cloud_mode()` gates all checkout-dependent behavior.
@@ -18,3 +18,4 @@
 - Multi-part feature guard (#38): the parent issue is only marked code-complete when `open_sub_issue_count` is 0; `record_code_complete` reports `blocked_by_open_sub_issues` to the caller.
 - Failure escalation (#42/#46/#47): auth and unfixable failures share `_escalate_blocking_failure` (thread-mapped Slack notify + human-input context + loop `waiting_for_human`), deduped against similar open bugs.
 - Unified 401 shape (issue #83): both the Firebase gate (`auth.py`) and the verify-token gate (`verify_token.py`) return the same `{detail, error: "authentication_required", hint}` body via a single `verify_token.unauthenticated_body()`/`_AUTH_HINT` helper, so callers get one consistent 401 contract regardless of which gate rejected the request, and the hint never leaks secret values.
+- Durable signals feed: `GET /signals` is backed by `registry/signals.py` (dual-path: single DynamoDB `system` item `key="signals"` or local `signals.json`), a bounded ring of the newest 200 events. `server.utils._server_log` writes to it alongside the logger, replacing a `server.log` file reader that nothing ever wrote to (and that couldn't persist on serverless hosts).

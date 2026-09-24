@@ -359,6 +359,8 @@ async def promote_app(app_name: str, payload: PromoteTrigger | None = None) -> d
 def _verify_alarm_webhook_auth(authorization: str | None = Header(default=None)) -> None:
     expected = os.environ.get("ALARM_WEBHOOK_PASSWORD")
     if not expected:
+        if registry.cloud_mode() or os.environ.get("AGENTRA_DYNAMODB_TABLE_PREFIX"):
+            raise HTTPException(status_code=401, detail="alarm webhook password not configured")
         return
     if authorization is None or not authorization.startswith("Basic "):
         raise HTTPException(status_code=401, detail="missing Basic auth")
@@ -371,6 +373,19 @@ def _verify_alarm_webhook_auth(authorization: str | None = Header(default=None))
         raise HTTPException(status_code=401, detail="invalid credentials")
 
 
+def _app_from_incident_doc(incident: dict) -> str | None:
+    doc = incident.get("documentation")
+    content = doc.get("content") if isinstance(doc, dict) else None
+    if not isinstance(content, str):
+        return None
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    app = parsed.get("app") if isinstance(parsed, dict) else None
+    return app if isinstance(app, str) and app else None
+
+
 @router.post("/trigger/alarm", dependencies=[Depends(_verify_alarm_webhook_auth)])
 async def trigger_alarm(payload: dict) -> dict:
     if registry.is_paused():
@@ -378,14 +393,13 @@ async def trigger_alarm(payload: dict) -> dict:
 
     incident = payload.get("incident")
     if incident is not None:
+        if not isinstance(incident, dict):
+            _server_log("alarm", "incident payload was not an object -- no-op")
+            return {"triggered": False, "reason": "incident payload must be an object"}
         app_name = payload.get("app")
-        symptom = incident.get("summary") or incident.get("documentation", {}).get("content")
+        symptom = incident.get("summary") or None
         if not app_name:
-            doc_content = (incident.get("documentation") or {}).get("content", "")
-            try:
-                app_name = json.loads(doc_content).get("app")
-            except (json.JSONDecodeError, AttributeError):
-                app_name = None
+            app_name = _app_from_incident_doc(incident)
         if not app_name:
             _server_log("alarm", "incident payload had no resolvable app name -- no-op")
             return {"triggered": False, "reason": "could not resolve app from incident payload"}

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
 from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware, auth_status, log_startup_warnings
+from agentra.server.queue_auth import QueueAuthError, queue_auth_error_handler
 
 from agentra import registry
 from agentra.agents import catalog as agents_catalog
@@ -27,6 +28,7 @@ from agentra import observability  # noqa: E402
 observability.init_observability()
 
 app = FastAPI(title="agentra orchestrator")
+app.add_exception_handler(QueueAuthError, queue_auth_error_handler)
 log_startup_warnings()
 
 

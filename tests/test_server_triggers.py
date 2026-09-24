@@ -3,6 +3,7 @@ to claim -- the engine never executes a cycle / promotion / prod-debug itself.
 """
 
 import base64
+import logging
 import json
 import subprocess
 from pathlib import Path
@@ -277,6 +278,97 @@ def test_alarm_enqueues_a_prod_debug_job_and_respects_the_alarm_toggle(tmp_path,
     assert off["triggered"] is False
 
 
+def _basic(password: str) -> dict:
+    return {"Authorization": "Basic " + base64.b64encode(f"user:{password}".encode()).decode()}
+
+
+def test_alarm_unset_password_is_rejected_in_cloud_mode(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.delenv("ALARM_WEBHOOK_PASSWORD", raising=False)
+    monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "test-")
+
+    resp = _client().post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "alarm webhook password not configured"
+    assert registry.list_jobs() == []
+
+
+def test_alarm_unset_password_is_rejected_when_cloud_mode_patched(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.delenv("ALARM_WEBHOOK_PASSWORD", raising=False)
+    monkeypatch.setattr(registry, "cloud_mode", lambda: True)
+
+    assert _client().post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"}).status_code == 401
+    assert registry.list_jobs() == []
+
+
+def test_alarm_wrong_or_missing_credentials_return_401(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.setenv("ALARM_WEBHOOK_PASSWORD", "s3cret")
+    body = {"app": "myapp", "symptom": "500s"}
+
+    wrong = _client().post("/trigger/alarm", json=body, headers=_basic("nope"))
+    assert wrong.status_code == 401
+    assert "s3cret" not in wrong.text
+    assert _client().post("/trigger/alarm", json=body).status_code == 401
+    assert _client().post("/trigger/alarm", json=body, headers={"Authorization": "Bearer abc"}).status_code == 401
+    assert _client().post("/trigger/alarm", json=body, headers={"Authorization": "Basic !!!notbase64"}).status_code == 401
+    assert registry.list_jobs() == []
+
+
+def test_alarm_correct_password_enqueues_prod_debug(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.setenv("ALARM_WEBHOOK_PASSWORD", "s3cret")
+
+    resp = _client().post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"}, headers=_basic("s3cret"))
+    assert resp.status_code == 200
+    assert resp.json()["queued"] is True
+    assert registry.list_jobs()[0]["kind"] == "prod_debug"
+
+
+def test_alarm_null_documentation_does_not_500(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    resp = _client().post("/trigger/alarm", json={"incident": {"summary": "boom", "documentation": None}})
+    assert resp.status_code == 200
+    assert resp.json() == {"triggered": False, "reason": "could not resolve app from incident payload"}
+    assert registry.list_jobs() == []
+
+    with_app = _client().post(
+        "/trigger/alarm", json={"app": "myapp", "incident": {"summary": "boom", "documentation": None}}
+    )
+    assert with_app.status_code == 200
+    assert with_app.json()["triggered"] is True
+    assert registry.list_jobs()[0]["payload"]["symptom"] == "boom"
+
+
+def test_alarm_malformed_incident_documentation_is_a_no_op(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    for doc in ({"content": None}, {"content": "not json"}, {"content": "[1]"}, "str", []):
+        resp = _client().post("/trigger/alarm", json={"incident": {"documentation": doc}})
+        assert resp.status_code == 200
+        assert resp.json()["triggered"] is False
+    assert registry.list_jobs() == []
+
+
+def test_alarm_non_dict_incident_is_a_no_op(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    for incident in ("not-an-object", [1, 2], 7, True):
+        resp = _client().post("/trigger/alarm", json={"app": "myapp", "incident": incident})
+        assert resp.status_code == 200
+        assert resp.json()["triggered"] is False
+    assert registry.list_jobs() == []
+
+
 def test_paused_system_enqueues_nothing(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path)
@@ -397,6 +489,7 @@ def test_queue_rejects_oidc_email_mismatch_or_unverified(tmp_path, monkeypatch):
     for claims in (
         {"email": "evil@example.com", "email_verified": True},
         {"email": "push@proj.iam.gserviceaccount.com", "email_verified": False},
+        {"email": "push@proj.iam.gserviceaccount.com"},
     ):
         monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, _c=claims, **k: _c)
         r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer jwt"})
@@ -409,3 +502,47 @@ def test_queue_ignores_oidc_when_audience_unset(tmp_path, monkeypatch):
     monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, **k: {"email": "x"})
     r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer jwt"})
     assert r.status_code == 401
+
+
+def test_queue_rejects_oidc_when_service_account_email_unset_or_empty(tmp_path, monkeypatch, caplog):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    calls = _no_submit(monkeypatch)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "aud")
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        lambda *a, **k: {"email": "any@other.iam.gserviceaccount.com", "email_verified": True},
+    )
+    for email in (None, ""):
+        if email is None:
+            monkeypatch.delenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", raising=False)
+        else:
+            monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", email)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="agentra.server.queue_auth"):
+            r = _client().post(
+                "/trigger/queue", json=_envelope(_valid_request()), headers={"Authorization": "Bearer jwt"}
+            )
+        assert r.status_code == 401
+        assert "AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL" in caplog.text
+    assert calls == []
+
+
+def test_queue_401_body_has_error_and_static_hint_without_secrets(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "secret-audience")
+    monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", "push@proj.iam.gserviceaccount.com")
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    hints = set()
+    for headers in ({}, {"Authorization": "Basic abc"}, {"Authorization": "Bearer garbage"}):
+        r = _client().post("/trigger/queue", json=_envelope(_valid_request()), headers=headers)
+        body = r.json()
+        assert r.status_code == 401
+        assert body["detail"] == "authentication required" and body["error"] == "authentication_required"
+        assert "AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL" in body["hint"] and "AGENTRA_INTERNAL_TOKEN" in body["hint"]
+        blob = r.text + str(dict(r.headers))
+        for secret in (TOKEN, "secret-audience", "push@proj.iam.gserviceaccount.com"):
+            assert secret not in blob
+        hints.add(body["hint"])
+    assert len(hints) == 1
