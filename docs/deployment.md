@@ -84,9 +84,10 @@ marker (`registry.PAUSE_PATH` / the `system` table) first and no-ops while pause
 `POST /trigger/queue` is fail-closed: every request returns 401 unless it
 carries `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Google-signed
 Pub/Sub push OIDC token. The OIDC path is only tried when
-`AGENTRA_PUBSUB_AUDIENCE` is set (the token's audience); if
-`AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL` is also set, the token's verified `email`
-claim must equal it. With neither `AGENTRA_INTERNAL_TOKEN` nor
+`AGENTRA_PUBSUB_AUDIENCE` is set (the token's audience).
+`AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL` is **required** whenever the audience is
+set: the token's verified `email` claim must equal it. Without it, every OIDC
+request is rejected with 401 and a startup warning is logged. With neither `AGENTRA_INTERNAL_TOKEN` nor
 `AGENTRA_PUBSUB_AUDIENCE` configured, the endpoint rejects everything. Queue
 senders (SQS forwarders, Pub/Sub push subscriptions) must send the bearer token
 or configure the subscription's OIDC authentication accordingly.

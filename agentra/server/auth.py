@@ -102,8 +102,17 @@ def auth_status() -> AuthStatus:
         return AuthStatus(True, False, False)
 
 
+def _warn_pubsub_email_missing() -> None:
+    if os.environ.get("AGENTRA_PUBSUB_AUDIENCE") and not os.environ.get("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL"):
+        logger.warning(
+            "AGENTRA_PUBSUB_AUDIENCE is set but AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL is not: "
+            "Pub/Sub OIDC requests to /trigger/queue will be rejected until the email is set"
+        )
+
+
 def log_startup_warnings() -> None:
     """Warn once at startup when the API is unauthenticated or admits any Firebase account."""
+    _warn_pubsub_email_missing()
     status = auth_status()
     if status.mode == "open":
         logger.warning("API is unauthenticated: neither DynamoDB nor FIREBASE_PROJECT_ID is configured")

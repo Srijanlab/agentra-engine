@@ -53,4 +53,4 @@ tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback
 
 `/debug/dynamodb` reports which of these resolved (no secret values); it requires a Firebase sign-in when `FIREBASE_PROJECT_ID` is set.
 
-`POST /trigger/queue` requires `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Pub/Sub OIDC token (set `AGENTRA_PUBSUB_AUDIENCE`, optionally `AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL`).
+`POST /trigger/queue` requires `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Pub/Sub OIDC token (set `AGENTRA_PUBSUB_AUDIENCE` and `AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL` — the email is required whenever the audience is set, otherwise all OIDC requests get 401 and a startup warning is logged).

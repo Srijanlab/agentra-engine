@@ -3,6 +3,7 @@ to claim -- the engine never executes a cycle / promotion / prod-debug itself.
 """
 
 import base64
+import logging
 import json
 import subprocess
 from pathlib import Path
@@ -488,6 +489,7 @@ def test_queue_rejects_oidc_email_mismatch_or_unverified(tmp_path, monkeypatch):
     for claims in (
         {"email": "evil@example.com", "email_verified": True},
         {"email": "push@proj.iam.gserviceaccount.com", "email_verified": False},
+        {"email": "push@proj.iam.gserviceaccount.com"},
     ):
         monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, _c=claims, **k: _c)
         r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer jwt"})
@@ -500,3 +502,47 @@ def test_queue_ignores_oidc_when_audience_unset(tmp_path, monkeypatch):
     monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, **k: {"email": "x"})
     r = _client().post("/trigger/queue", json={"message": {}}, headers={"Authorization": "Bearer jwt"})
     assert r.status_code == 401
+
+
+def test_queue_rejects_oidc_when_service_account_email_unset_or_empty(tmp_path, monkeypatch, caplog):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    calls = _no_submit(monkeypatch)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "aud")
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        lambda *a, **k: {"email": "any@other.iam.gserviceaccount.com", "email_verified": True},
+    )
+    for email in (None, ""):
+        if email is None:
+            monkeypatch.delenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", raising=False)
+        else:
+            monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", email)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="agentra.server.queue_auth"):
+            r = _client().post(
+                "/trigger/queue", json=_envelope(_valid_request()), headers={"Authorization": "Bearer jwt"}
+            )
+        assert r.status_code == 401
+        assert "AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL" in caplog.text
+    assert calls == []
+
+
+def test_queue_401_body_has_error_and_static_hint_without_secrets(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _queue_env(monkeypatch)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "secret-audience")
+    monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", "push@proj.iam.gserviceaccount.com")
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    hints = set()
+    for headers in ({}, {"Authorization": "Basic abc"}, {"Authorization": "Bearer garbage"}):
+        r = _client().post("/trigger/queue", json=_envelope(_valid_request()), headers=headers)
+        body = r.json()
+        assert r.status_code == 401
+        assert body["detail"] == "authentication required" and body["error"] == "authentication_required"
+        assert "AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL" in body["hint"] and "AGENTRA_INTERNAL_TOKEN" in body["hint"]
+        blob = r.text + str(dict(r.headers))
+        for secret in (TOKEN, "secret-audience", "push@proj.iam.gserviceaccount.com"):
+            assert secret not in blob
+        hints.add(body["hint"])
+    assert len(hints) == 1

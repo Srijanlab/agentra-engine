@@ -247,6 +247,30 @@ def test_startup_warnings(monkeypatch, caplog):
     assert caplog.text == ""
 
 
+def test_startup_warns_when_pubsub_audience_set_without_email(monkeypatch, caplog):
+    _configure(monkeypatch, cloud=True, firebase=True, allowlist=True)
+    monkeypatch.setenv("AGENTRA_PUBSUB_AUDIENCE", "aud")
+    for email in (None, ""):
+        if email is None:
+            monkeypatch.delenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", raising=False)
+        else:
+            monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", email)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="agentra.server.auth"):
+            auth.log_startup_warnings()
+        assert "AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL" in caplog.text
+    monkeypatch.setenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL", "push@proj.iam.gserviceaccount.com")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="agentra.server.auth"):
+        auth.log_startup_warnings()
+    assert caplog.text == ""
+    monkeypatch.delenv("AGENTRA_PUBSUB_AUDIENCE")
+    monkeypatch.delenv("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL")
+    with caplog.at_level(logging.WARNING, logger="agentra.server.auth"):
+        auth.log_startup_warnings()
+    assert caplog.text == ""
+
+
 COMBOS = [
     (cloud, fb, al) for cloud in (True, False) for fb in (True, False) for al in (True, False)
 ]
