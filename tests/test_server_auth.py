@@ -56,7 +56,7 @@ def test_protected_path_401_without_token(monkeypatch):
 def test_valid_token_wrong_email_403(monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
-    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "intruder@evil.com"})
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "intruder@evil.com", "email_verified": True})
     client = TestClient(server.app)
     r = client.get("/agents/metadata", headers={"Authorization": "Bearer x"})
     assert r.status_code == 403
@@ -65,7 +65,7 @@ def test_valid_token_wrong_email_403(monkeypatch):
 def test_valid_token_allowed_email_passes(monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
-    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "Allowed@example.com"})
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "Allowed@example.com", "email_verified": True})
     client = TestClient(server.app)
     assert client.get("/agents/metadata", headers={"Authorization": "Bearer x"}).status_code == 200
 
@@ -73,10 +73,57 @@ def test_valid_token_allowed_email_passes(monkeypatch):
 def test_token_via_query_param_for_eventsource(monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
-    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "allowed@example.com"} if tok == "good" else None)
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "allowed@example.com", "email_verified": True} if tok == "good" else None)
     client = TestClient(server.app)
-    assert client.get("/agents/metadata?access_token=good").status_code == 200
-    assert client.get("/agents/metadata?access_token=bad").status_code == 401
+    r = client.get("/runs/nope/logs?access_token=good")
+    assert r.status_code == 404 and r.json() == {"detail": "unknown run_key"}
+    r = client.get("/runs/nope/logs?access_token=bad")
+    assert r.status_code == 401 and r.json()["error"] == "authentication_required"
+    assert client.get("/runs/nope/logs").status_code == 401
+    assert client.get("/runs/nope/logs", headers={"Authorization": "Bearer good"}).status_code == 404
+
+
+def test_query_token_rejected_off_the_sse_path(monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "allowed@example.com", "email_verified": True} if tok == "good" else None)
+    client = TestClient(server.app)
+    for path in ("/apps", "/agents/metadata", "/runs/nope/screenshot"):
+        r = client.get(f"{path}?access_token=good")
+        assert r.status_code == 401
+        assert r.json() == auth.unauthenticated_body()
+        assert client.get(path, headers={"Authorization": "Bearer good"}).status_code != 401
+
+
+def _claims_verify(claims):
+    return lambda tok, proj: claims
+
+
+def test_unverified_email_gets_non_leaky_403(monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
+    client = TestClient(server.app)
+    for claims in (
+        {"email": "allowed@example.com", "email_verified": False},
+        {"email": "allowed@example.com"},
+        {"email": "allowed@example.com", "email_verified": "true"},
+        {"email": "intruder@evil.com", "email_verified": False},
+    ):
+        monkeypatch.setattr(auth, "_verify", _claims_verify(claims))
+        r = client.get("/apps", headers={"Authorization": "Bearer x"})
+        assert r.status_code == 403
+        assert r.json() == {"detail": "email not verified", "error": "email_not_verified"}
+        assert "example.com" not in r.text and "evil" not in r.text and "agentra-prod" not in r.text
+
+
+def test_verified_allowlisted_email_passes(monkeypatch):
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
+    monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
+    monkeypatch.setattr(auth, "_verify", _claims_verify({"email": "allowed@example.com", "email_verified": True}))
+    client = TestClient(server.app)
+    headers = {"Authorization": "Bearer x"}
+    assert client.get("/apps", headers=headers).status_code == 200
+    assert client.get("/agents/metadata", headers=headers).status_code == 200
 
 
 def test_debug_endpoints_need_sign_in(monkeypatch):
@@ -91,7 +138,7 @@ def test_debug_endpoints_need_sign_in(monkeypatch):
 def test_debug_endpoints_pass_gate_with_valid_token(monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "agentra-prod")
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "allowed@example.com")
-    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "allowed@example.com"})
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "allowed@example.com", "email_verified": True})
     client = TestClient(server.app)
     headers = {"Authorization": "Bearer x"}
     assert client.get("/debug/dynamodb", headers=headers).status_code == 200
@@ -124,7 +171,7 @@ def _configure(monkeypatch, *, cloud, firebase, allowlist):
         monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", EMAIL)
     else:
         monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", " , ")
-    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": EMAIL} if tok == "good" else None)
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": EMAIL, "email_verified": True} if tok == "good" else None)
     return TestClient(server.app)
 
 
@@ -164,7 +211,7 @@ def test_cloud_fully_configured_keeps_401_403_200(monkeypatch):
     assert body["error"] == "authentication_required"
     assert "Firebase" in body["hint"] and "X-Agentra-Verify-Token" in body["hint"]
     assert client.get("/apps", headers={"Authorization": "Bearer bad"}).status_code == 401
-    assert client.get("/apps?access_token=bad").status_code == 401
+    assert client.get("/apps?access_token=good").status_code == 401
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "other@example.com")
     assert client.get("/apps", headers=GOOD).status_code == 403
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", EMAIL)

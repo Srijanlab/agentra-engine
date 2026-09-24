@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -29,6 +30,8 @@ _PUBLIC_PREFIXES = (
 _PUBLIC_EXACT = {"", "/"}
 
 _ISSUER_PREFIX = "https://securetoken.google.com/"
+
+_QUERY_TOKEN_PATH = re.compile(r"^/runs/[^/]+/logs$")
 
 
 def _allowed_emails() -> set[str]:
@@ -111,11 +114,13 @@ def log_startup_warnings() -> None:
 
 
 def _token_from(request: Request) -> str | None:
+    """Return the bearer token, falling back to ?access_token= only on the SSE logs path."""
     header = request.headers.get("authorization") or ""
     if header[:7].lower() == "bearer ":
         return header[7:].strip()
-    # EventSource cannot set headers -> accept the ID token as a query param.
-    return request.query_params.get("access_token")
+    if request.method == "GET" and _QUERY_TOKEN_PATH.match(request.url.path):
+        return request.query_params.get("access_token")
+    return None
 
 
 def _verify(token: str, project: str) -> dict | None:
@@ -157,6 +162,9 @@ async def auth_middleware(request: Request, call_next):
     claims = _verify(token, _firebase_project()) if token else None
     if claims is None:
         return JSONResponse(unauthenticated_body(), status_code=401)
+
+    if claims.get("email_verified") is not True:
+        return JSONResponse({"detail": "email not verified", "error": "email_not_verified"}, status_code=403)
 
     email = (claims.get("email") or "").lower()
     allowed = _allowed_emails()
