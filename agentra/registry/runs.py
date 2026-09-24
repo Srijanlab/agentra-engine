@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import time
@@ -88,20 +89,36 @@ def last_run_at(app: str, source: str | None = None) -> float | None:
     return runs[0]["started_at"] if runs else None
 
 
-def list_app_runs(app: str, sources: tuple[str, ...] | list[str] | None = None, limit: int = 50) -> list[dict]:
-    """The app's own runs (optionally only from `sources`), newest first by started_at, at most `limit`."""
+def list_app_runs(
+    app: str,
+    sources: tuple[str, ...] | list[str] | None = None,
+    limit: int | None = 50,
+    statuses: tuple[str, ...] | list[str] | None = None,
+    loop_id: str | None = None,
+) -> list[dict]:
+    """The app's own runs (optionally filtered), newest first by started_at, at most `limit` (None = all)."""
     if core._ddb is not None:
-        return _query_app_runs(app, sources, limit)
+        return _query_app_runs(app, sources, limit, statuses, loop_id)
     matches = [
         {"run_key": key, **info}
         for key, info in _local_runs().items()
-        if info.get("app") == app and info.get("started_at") is not None and (not sources or info.get("source") in sources)
+        if info.get("app") == app
+        and info.get("started_at") is not None
+        and (not sources or info.get("source") in sources)
+        and (not statuses or info.get("status") in statuses)
+        and (loop_id is None or info.get("loop_id") == loop_id)
     ]
     matches.sort(key=lambda r: r["started_at"], reverse=True)
-    return matches[:limit]
+    return matches if limit is None else matches[:limit]
 
 
-def _query_app_runs(app: str, sources: tuple[str, ...] | list[str] | None, limit: int) -> list[dict]:
+def _query_app_runs(
+    app: str,
+    sources: tuple[str, ...] | list[str] | None,
+    limit: int | None,
+    statuses: tuple[str, ...] | list[str] | None = None,
+    loop_id: str | None = None,
+) -> list[dict]:
     from boto3.dynamodb.conditions import Attr, Key
 
     from agentra.registry import _dynamo
@@ -109,23 +126,39 @@ def _query_app_runs(app: str, sources: tuple[str, ...] | list[str] | None, limit
     kwargs: dict[str, Any] = {
         "IndexName": "by-app-recency", "KeyConditionExpression": Key("app").eq(app), "ScanIndexForward": False,
     }
+    conditions = []
     if sources:
-        kwargs["FilterExpression"] = Attr("source").is_in(list(sources))
+        conditions.append(Attr("source").is_in(list(sources)))
+    if statuses:
+        conditions.append(Attr("status").is_in(list(statuses)))
+    if loop_id is not None:
+        conditions.append(Attr("loop_id").eq(loop_id))
+    if conditions:
+        kwargs["FilterExpression"] = functools.reduce(lambda a, b: a & b, conditions)
     found: list[dict] = []
-    while len(found) < limit:
+    while limit is None or len(found) < limit:
         resp = _dynamo.table("runs").query(**kwargs)
         found.extend(_strip_internal(_dynamo.from_item(i)) for i in resp.get("Items", []))
         if "LastEvaluatedKey" not in resp:
             break
         kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-    return found[:limit]
+    return found if limit is None else found[:limit]
+
+
+def _stale_run_candidates() -> list[dict]:
+    """Newest global window plus every queued/running run of each registered app, deduped by run_key."""
+    candidates = {run["run_key"]: run for run in list_runs(limit=200)}
+    for app in core.list_apps():
+        for run in list_app_runs(app, statuses=("queued", "running"), limit=None):
+            candidates[run["run_key"]] = run
+    return list(candidates.values())
 
 
 def reconcile_stale_runs() -> list[str]:
     now = time.time()
     threshold = core.stale_heartbeat_seconds()
     marked: list[str] = []
-    for run in list_runs(limit=200):
+    for run in _stale_run_candidates():
         if run.get("status") not in ("queued", "running"):
             continue
         run_key = run["run_key"]

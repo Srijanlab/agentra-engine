@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from agentra.registry import _cache, core
-from agentra.registry.runs import list_runs, loop_id_for_issue
+from agentra.registry.runs import list_app_runs, list_runs, loop_id_for_issue
 
 _LOOPS_LIST_LIMIT = 100
 _VALID_KINDS = ("feature", "bug", "objective")
@@ -236,8 +236,12 @@ def get_loop(loop_id: str) -> dict | None:
     doc = _get_loop_doc(loop_id)
     if doc is None:
         return None
-    runs = [r for r in list_runs(limit=300) if r.get("loop_id") == loop_id]
-    runs.sort(key=lambda r: r.get("started_at", 0), reverse=True)
+    app = doc.get("app")
+    if app:
+        runs = list_app_runs(app, loop_id=loop_id, limit=None)
+    else:
+        runs = [r for r in list_runs(limit=300) if r.get("loop_id") == loop_id]
+    runs.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
     return {**doc, "runs": runs}
 
 
