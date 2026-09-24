@@ -277,6 +277,97 @@ def test_alarm_enqueues_a_prod_debug_job_and_respects_the_alarm_toggle(tmp_path,
     assert off["triggered"] is False
 
 
+def _basic(password: str) -> dict:
+    return {"Authorization": "Basic " + base64.b64encode(f"user:{password}".encode()).decode()}
+
+
+def test_alarm_unset_password_is_rejected_in_cloud_mode(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.delenv("ALARM_WEBHOOK_PASSWORD", raising=False)
+    monkeypatch.setenv("AGENTRA_DYNAMODB_TABLE_PREFIX", "test-")
+
+    resp = _client().post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "alarm webhook password not configured"
+    assert registry.list_jobs() == []
+
+
+def test_alarm_unset_password_is_rejected_when_cloud_mode_patched(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.delenv("ALARM_WEBHOOK_PASSWORD", raising=False)
+    monkeypatch.setattr(registry, "cloud_mode", lambda: True)
+
+    assert _client().post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"}).status_code == 401
+    assert registry.list_jobs() == []
+
+
+def test_alarm_wrong_or_missing_credentials_return_401(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.setenv("ALARM_WEBHOOK_PASSWORD", "s3cret")
+    body = {"app": "myapp", "symptom": "500s"}
+
+    wrong = _client().post("/trigger/alarm", json=body, headers=_basic("nope"))
+    assert wrong.status_code == 401
+    assert "s3cret" not in wrong.text
+    assert _client().post("/trigger/alarm", json=body).status_code == 401
+    assert _client().post("/trigger/alarm", json=body, headers={"Authorization": "Bearer abc"}).status_code == 401
+    assert _client().post("/trigger/alarm", json=body, headers={"Authorization": "Basic !!!notbase64"}).status_code == 401
+    assert registry.list_jobs() == []
+
+
+def test_alarm_correct_password_enqueues_prod_debug(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+    monkeypatch.setenv("ALARM_WEBHOOK_PASSWORD", "s3cret")
+
+    resp = _client().post("/trigger/alarm", json={"app": "myapp", "symptom": "500s"}, headers=_basic("s3cret"))
+    assert resp.status_code == 200
+    assert resp.json()["queued"] is True
+    assert registry.list_jobs()[0]["kind"] == "prod_debug"
+
+
+def test_alarm_null_documentation_does_not_500(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    resp = _client().post("/trigger/alarm", json={"incident": {"summary": "boom", "documentation": None}})
+    assert resp.status_code == 200
+    assert resp.json() == {"triggered": False, "reason": "could not resolve app from incident payload"}
+    assert registry.list_jobs() == []
+
+    with_app = _client().post(
+        "/trigger/alarm", json={"app": "myapp", "incident": {"summary": "boom", "documentation": None}}
+    )
+    assert with_app.status_code == 200
+    assert with_app.json()["triggered"] is True
+    assert registry.list_jobs()[0]["payload"]["symptom"] == "boom"
+
+
+def test_alarm_malformed_incident_documentation_is_a_no_op(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    for doc in ({"content": None}, {"content": "not json"}, {"content": "[1]"}, "str", []):
+        resp = _client().post("/trigger/alarm", json={"incident": {"documentation": doc}})
+        assert resp.status_code == 200
+        assert resp.json()["triggered"] is False
+    assert registry.list_jobs() == []
+
+
+def test_alarm_non_dict_incident_is_a_no_op(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    _register_tmp_app(tmp_path)
+
+    for incident in ("not-an-object", [1, 2], 7, True):
+        resp = _client().post("/trigger/alarm", json={"app": "myapp", "incident": incident})
+        assert resp.status_code == 200
+        assert resp.json()["triggered"] is False
+    assert registry.list_jobs() == []
+
+
 def test_paused_system_enqueues_nothing(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _register_tmp_app(tmp_path)

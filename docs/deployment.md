@@ -76,7 +76,8 @@ and `/health` reports `auth.mode: "misconfigured"`); the loop reads rotation sta
 
 ## Triggers
 
-`POST /trigger/scheduled`, `/trigger/alarm` (HTTP Basic, `ALARM_WEBHOOK_PASSWORD`),
+`POST /trigger/scheduled`, `/trigger/alarm` (HTTP Basic, `ALARM_WEBHOOK_PASSWORD` -- required in production;
+unset, it returns 401 in cloud mode and is open only for local dev),
 `/trigger/queue`, and `POST /apps/{name}/run`. Each checks the durable pause
 marker (`registry.PAUSE_PATH` / the `system` table) first and no-ops while paused.
 
