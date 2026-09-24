@@ -34,17 +34,17 @@ def _set_run(run_key: str, **fields: Any) -> None:
     registry.record_run(run_key, **fields)
 
 
-def _server_log(channel: str, message: str) -> None:
+def _server_log(channel: str, message: str, actor: str | None = None) -> None:
     """Logs a server event and persists it as a signal, never raising on storage errors."""
     logger.info("[server:%s] %s", channel, message)
     try:
-        registry.record_signal(channel, message)
+        registry.record_signal(channel, message, actor=actor)
     except Exception as exc:
         logger.warning("[server:%s] failed to persist signal: %s", channel, exc)
 
 
-def _paused_response(source: str) -> dict:
-    _server_log(source, "system is paused -- trigger skipped")
+def _paused_response(source: str, actor: str | None = None) -> dict:
+    _server_log(source, "system is paused -- trigger skipped", actor=actor)
     return {"triggered": False, "reason": "system is paused"}
 
 

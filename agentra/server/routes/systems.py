@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from agentra import registry
+from agentra.server.audit import audit_log
 from agentra.server.state import _active_runs
 from agentra.server.utils import _server_log
 
@@ -27,17 +28,17 @@ async def get_system_paused() -> dict:
 
 
 @router.post("/system/pause")
-async def pause_system(payload: dict | None = None) -> dict:
+async def pause_system(request: Request, payload: dict | None = None) -> dict:
     reason = (payload or {}).get("reason")
     registry.pause(reason)
-    _server_log("pause", f"system paused: reason={reason!r}")
+    audit_log(request, "pause", f"system paused: reason={reason!r}")
     return {"paused": True}
 
 
 @router.post("/system/resume")
-async def resume_system() -> dict:
+async def resume_system(request: Request) -> dict:
     registry.resume()
-    _server_log("resume", "system resumed")
+    audit_log(request, "resume", "system resumed")
     return {"paused": False}
 
 
@@ -47,13 +48,13 @@ async def get_llm_backend() -> dict:
 
 
 @router.post("/system/llm-backend")
-async def set_llm_backend(payload: dict | None = None) -> dict:
+async def set_llm_backend(request: Request, payload: dict | None = None) -> dict:
     backend = (payload or {}).get("backend")
     try:
         registry.set_llm_backend(backend)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _server_log("llm-backend", f"llm backend set to {backend!r}")
+    audit_log(request, "llm-backend", f"llm backend set to {backend!r}")
     return {"backend": backend}
 
 
@@ -68,12 +69,12 @@ async def debug_llm_rotation() -> dict:
 
 
 @router.put("/system/llm-pool")
-async def set_llm_pool(payload: dict | None = None) -> dict:
+async def set_llm_pool(request: Request, payload: dict | None = None) -> dict:
     try:
         pool = registry.set_llm_rotation((payload or {}).get("backends"))
     except registry.InvalidLLMPool as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _server_log("llm-pool", f"llm pool set to {pool['backends']!r}")
+    audit_log(request, "llm-pool", f"llm pool set to {pool['backends']!r}")
     return pool
 
 

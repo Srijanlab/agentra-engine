@@ -56,9 +56,11 @@ def _trim_dynamo(tbl, size: int) -> bool:
         raise
 
 
-def record_signal(source: str, message: str, ts: float | None = None) -> None:
-    """Appends a signal event, keeping only the most recent `_CAP` entries."""
+def record_signal(source: str, message: str, ts: float | None = None, actor: str | None = None) -> None:
+    """Appends a signal event tagged with an optional actor, keeping only the most recent `_CAP` entries."""
     entry = {"ts": ts if ts is not None else time.time(), "source": source, "message": message}
+    if actor is not None:
+        entry["actor"] = actor
     if core._ddb is not None:
         _append_dynamo(entry)
         return
@@ -79,4 +81,4 @@ def list_signals(limit: int = 100) -> list[dict]:
     else:
         path = _path()
         events = json.loads(path.read_text()) if path.exists() else []
-    return list(reversed(events))[:limit]
+    return [{**e, "actor": e.get("actor")} for e in reversed(events)][:limit]

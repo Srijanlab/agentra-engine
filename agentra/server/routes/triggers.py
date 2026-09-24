@@ -14,7 +14,7 @@ import logging
 import os
 import time
 import uuid
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from agentra import environments, registry
@@ -24,6 +24,7 @@ from agentra.registry.scheduler import compute_schedule_status
 from agentra.server.digests.awaiting_testing import post_awaiting_testing_digest
 from agentra.server.queue_auth import verify_queue_auth
 from agentra.server.routes.human_input import dispatch_human_answer
+from agentra.server.audit import actor_for
 from agentra.server.state import _active_runs
 from agentra.server.utils import _paused_response, _server_log
 
@@ -65,25 +66,25 @@ def _new_run_key(app_name: str, source: str, objective: str, feature: str | None
 
 async def _enqueue_cycle(
     app_name: str, source: str, objective_override: str | None, feature: str | None,
-    skip_deploy: bool, *, enforce_schedule: bool,
+    skip_deploy: bool, *, enforce_schedule: bool, actor: str | None = None,
 ) -> dict:
     if registry.is_paused():
-        return _paused_response(source)
+        return _paused_response(source, actor)
 
     repo = registry.get_app_repo(app_name)
     if repo is None:
-        _server_log(source, f"app={app_name!r} not registered -- no-op")
+        _server_log(source, f"app={app_name!r} not registered -- no-op", actor=actor)
         return {"triggered": False, "reason": f"app {app_name!r} not registered"}
 
     objective = objective_override or Memory(repo).get_objective()
     if not objective:
-        _server_log(source, f"app={app_name!r} has no objective set -- no-op")
+        _server_log(source, f"app={app_name!r} has no objective set -- no-op", actor=actor)
         return {"triggered": False, "reason": "no objective set for this app"}
 
     if enforce_schedule:
         status = compute_schedule_status(app_name, repo)
         if not status.due_now:
-            _server_log(source, f"app={app_name!r} not due (due_in={status.due_in_seconds}) -- skipped")
+            _server_log(source, f"app={app_name!r} not due (due_in={status.due_in_seconds}) -- skipped", actor=actor)
             return {"triggered": False, "reason": "not due yet per this app's configured schedule"}
 
     # dedup: one open cycle job per app (pending or claimed) -- the loop runs one backlog item per run.
@@ -100,7 +101,7 @@ async def _enqueue_cycle(
         "run_key": run_key, "app": app_name, "objective": objective,
         "feature": feature, "skip_deploy": skip_deploy,
     }, dedup_key=f"cycle:{app_name}")
-    _server_log(source, f"app={app_name!r} run_key={run_key} job={job_id} -- queued for the loop")
+    _server_log(source, f"app={app_name!r} run_key={run_key} job={job_id} -- queued for the loop", actor=actor)
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
@@ -312,19 +313,20 @@ async def trigger_scheduled(payload: ScheduledTrigger) -> dict:
 
 
 @router.post("/apps/{app_name}/run")
-async def run_app_now(app_name: str, payload: ScheduledTrigger | None = None) -> dict:
+async def run_app_now(app_name: str, request: Request, payload: ScheduledTrigger | None = None) -> dict:
     body = payload or ScheduledTrigger(app=app_name)
     return await _enqueue_cycle(
-        app_name, "on-demand", body.objective, body.feature, body.skip_deploy, enforce_schedule=False
+        app_name, "on-demand", body.objective, body.feature, body.skip_deploy,
+        enforce_schedule=False, actor=actor_for(request),
     )
 
 
 @router.post("/apps/{app_name}/promote")
-async def promote_app(app_name: str, payload: PromoteTrigger | None = None) -> dict:
+async def promote_app(app_name: str, request: Request, payload: PromoteTrigger | None = None) -> dict:
     if app_name not in registry.list_apps():
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
     if registry.is_paused():
-        return _paused_response("promote")
+        return _paused_response("promote", actor_for(request))
 
     repo = registry.get_app_repo(app_name)
     if repo is None:
@@ -352,7 +354,7 @@ async def promote_app(app_name: str, payload: PromoteTrigger | None = None) -> d
     job_id = registry.enqueue_job("promote", {
         "run_key": run_key, "app": app_name, "target_repos": target_repos,
     }, dedup_key=f"promote:{app_name}")
-    _server_log("promote", f"app={app_name!r} run_key={run_key} job={job_id} target_repos={target_repos!r} -- promotion queued")
+    _server_log("promote", f"app={app_name!r} run_key={run_key} job={job_id} target_repos={target_repos!r} -- promotion queued", actor=actor_for(request))
     return {"triggered": True, "run_key": run_key, "job_id": job_id, "queued": True}
 
 
@@ -420,7 +422,7 @@ async def trigger_alarm(payload: dict) -> dict:
 
     objective = (payload.get("objective") if incident is None else None) or Memory(repo).get_objective()
     if not objective:
-        _server_log("alarm", f"app={app_name!r} has no objective set -- no-op")
+        _server_log("alarm", f"app={app_name!r} has no objective set -- no-op", actor=actor)
         return {"triggered": False, "reason": "no objective set for this app"}
 
     run_key = _new_run_key(app_name, "alarm", objective)
