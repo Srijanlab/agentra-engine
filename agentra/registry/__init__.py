@@ -78,6 +78,10 @@ from agentra.registry.loops import (
     set_loop_pipeline,
     set_loop_status,
 )
+from agentra.registry.loop_context import (
+    get_loop_context,
+    set_loop_context,
+)
 from agentra.registry.llm_pool import (
     InvalidLLMPool,
     get_llm_provider_health,
@@ -170,6 +174,8 @@ __all__ = [
     "bind_promote_loop",
     "get_loop",
     "get_loop_pipeline",
+    "get_loop_context",
+    "set_loop_context",
     "roll_up_loop",
     "set_loop_human_input",
     "set_loop_pipeline",

@@ -32,6 +32,14 @@ async def get_loop(loop_id: str) -> dict:
     return loop
 
 
+@router.get("/loops/{loop_id}/context")
+async def get_loop_context(loop_id: str) -> dict:
+    context = await asyncio.to_thread(registry.get_loop_context, loop_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail=f"loop {loop_id!r} not found")
+    return context
+
+
 @router.get("/runs/{run_key}/trace")
 async def get_run_trace(run_key: str) -> dict:
     """The run's full Langfuse trace (observation tree), fetched server-side so the
