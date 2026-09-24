@@ -137,3 +137,20 @@ def test_dynamo_caps_at_200_newest_first(ddb_env):
     assert result[0]["message"] == "event 209"
     assert result[-1]["message"] == "event 10"
     assert [e["ts"] for e in result] == sorted((e["ts"] for e in result), reverse=True)
+
+
+def test_record_signal_persists_actor_locally_and_legacy_entries_read_none(local_env):
+    signals.record_signal("pause", "with actor", ts=1.0, actor="op@example.com")
+    signals.record_signal("scheduled", "no actor", ts=2.0)
+
+    newest, oldest = signals.list_signals()
+    assert oldest["actor"] == "op@example.com"
+    assert newest["actor"] is None
+
+
+def test_record_signal_persists_actor_in_dynamodb(ddb_env):
+    signals.record_signal("pause", "m", ts=1.0, actor="op@example.com")
+    signals.record_signal("scheduled", "n", ts=2.0)
+
+    newest, oldest = signals.list_signals()
+    assert oldest["actor"] == "op@example.com" and newest["actor"] is None

@@ -6,11 +6,12 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from agentra import registry
 from agentra.memory import Memory
+from agentra.server.audit import actor_for
 from agentra.server.utils import _server_log
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ def _ack_slack_thread(app_name: str, issue_number: int, answer: str, source: str
         logger.warning("_ack_slack_thread failed for app=%s issue=#%s", app_name, issue_number, exc_info=True)
 
 
-def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: str, *, source: str) -> dict:
+def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: str, *, source: str, actor: str | None = None) -> dict:
     """Records `answer` on the needs_human issue (removing the needs_human label -- Memory.record_human_answer) and dispatches a resume in the background that reuses the original branch/session_id."""
     mem = Memory(repo)
     context = mem.get_human_input_context(issue_number)
@@ -58,7 +59,7 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
     # has answered, the need_human label is gone and this is a no-op ack.
     if not mem.human_input_pending(issue_number):
         _ack_slack_thread(app_name, issue_number, answer, source)
-        _server_log(source, f"app={app_name!r} issue=#{issue_number} -- answer ignored, already resolved")
+        _server_log(source, f"app={app_name!r} issue=#{issue_number} -- answer ignored, already resolved", actor=actor)
         return {"run_key": None, "already_answered": True}
 
     objective = mem.get_objective() or ""
@@ -96,14 +97,14 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         logger.warning("dispatch_human_answer: could not set loop %s active", loop_id, exc_info=True)
     mem.record_human_answer(issue_number, answer, resumed_run_key=run_key)
     _ack_slack_thread(app_name, issue_number, answer, source)
-    _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} job={job_id} -- human answer accepted, resume queued")
+    _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} job={job_id} -- human answer accepted, resume queued", actor=actor)
     return {"run_key": run_key, "job_id": job_id, "branch": context.get("branch"), "session_id": context.get("session_id")}
 
 
 @router.post("/apps/{app_name}/human-input")
-async def submit_human_input(app_name: str, payload: HumanInputAnswerPayload) -> dict:
+async def submit_human_input(app_name: str, payload: HumanInputAnswerPayload, request: Request) -> dict:
     if registry.is_paused():
-        _server_log("human-input", "system is paused -- human answer rejected")
+        _server_log("human-input", "system is paused -- human answer rejected", actor=actor_for(request))
         raise HTTPException(
             status_code=409,
             detail="System is paused; the answer was NOT recorded. Unpause and resubmit the answer.",
@@ -112,7 +113,7 @@ async def submit_human_input(app_name: str, payload: HumanInputAnswerPayload) ->
     if repo is None:
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
     try:
-        dispatched = dispatch_human_answer(app_name, repo, payload.issue_number, payload.answer, source="human-input")
+        dispatched = dispatch_human_answer(app_name, repo, payload.issue_number, payload.answer, source="human-input", actor=actor_for(request))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

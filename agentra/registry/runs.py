@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import time
@@ -84,31 +85,80 @@ def loop_id_for_issue(app: str, issue_number: int | str) -> str:
 
 
 def last_run_at(app: str, source: str | None = None) -> float | None:
+    runs = list_app_runs(app, sources=(source,) if source else None, limit=1)
+    return runs[0]["started_at"] if runs else None
+
+
+def list_app_runs(
+    app: str,
+    sources: tuple[str, ...] | list[str] | None = None,
+    limit: int | None = 50,
+    statuses: tuple[str, ...] | list[str] | None = None,
+    loop_id: str | None = None,
+) -> list[dict]:
+    """The app's own runs (optionally filtered), newest first by started_at, at most `limit` (None = all)."""
     if core._ddb is not None:
-        from boto3.dynamodb.conditions import Key
+        return _query_app_runs(app, sources, limit, statuses, loop_id)
+    matches = [
+        {"run_key": key, **info}
+        for key, info in _local_runs().items()
+        if info.get("app") == app
+        and info.get("started_at") is not None
+        and (not sources or info.get("source") in sources)
+        and (not statuses or info.get("status") in statuses)
+        and (loop_id is None or info.get("loop_id") == loop_id)
+    ]
+    matches.sort(key=lambda r: r["started_at"], reverse=True)
+    return matches if limit is None else matches[:limit]
 
-        from agentra.registry import _dynamo
 
-        resp = _dynamo.table("runs").query(
-            IndexName="by-app-recency", KeyConditionExpression=Key("app").eq(app), ScanIndexForward=False, Limit=100
-        )
-        matches = [
-            r for r in (_strip_internal(_dynamo.from_item(i)) for i in resp.get("Items", []))
-            if source is None or r.get("source") == source
-        ]
-        return max((r["started_at"] for r in matches), default=None)
+def _query_app_runs(
+    app: str,
+    sources: tuple[str, ...] | list[str] | None,
+    limit: int | None,
+    statuses: tuple[str, ...] | list[str] | None = None,
+    loop_id: str | None = None,
+) -> list[dict]:
+    from boto3.dynamodb.conditions import Attr, Key
 
-    matches = [r for r in list_runs(limit=200) if r.get("app") == app and (source is None or r.get("source") == source)]
-    if not matches:
-        return None
-    return max(r["started_at"] for r in matches)
+    from agentra.registry import _dynamo
+
+    kwargs: dict[str, Any] = {
+        "IndexName": "by-app-recency", "KeyConditionExpression": Key("app").eq(app), "ScanIndexForward": False,
+    }
+    conditions = []
+    if sources:
+        conditions.append(Attr("source").is_in(list(sources)))
+    if statuses:
+        conditions.append(Attr("status").is_in(list(statuses)))
+    if loop_id is not None:
+        conditions.append(Attr("loop_id").eq(loop_id))
+    if conditions:
+        kwargs["FilterExpression"] = functools.reduce(lambda a, b: a & b, conditions)
+    found: list[dict] = []
+    while limit is None or len(found) < limit:
+        resp = _dynamo.table("runs").query(**kwargs)
+        found.extend(_strip_internal(_dynamo.from_item(i)) for i in resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return found if limit is None else found[:limit]
+
+
+def _stale_run_candidates() -> list[dict]:
+    """Newest global window plus every queued/running run of each registered app, deduped by run_key."""
+    candidates = {run["run_key"]: run for run in list_runs(limit=200)}
+    for app in core.list_apps():
+        for run in list_app_runs(app, statuses=("queued", "running"), limit=None):
+            candidates[run["run_key"]] = run
+    return list(candidates.values())
 
 
 def reconcile_stale_runs() -> list[str]:
     now = time.time()
     threshold = core.stale_heartbeat_seconds()
     marked: list[str] = []
-    for run in list_runs(limit=200):
+    for run in _stale_run_candidates():
         if run.get("status") not in ("queued", "running"):
             continue
         run_key = run["run_key"]
@@ -135,9 +185,7 @@ def reconcile_stale_loops() -> list[str]:
     now = time.time()
     threshold = core.stale_heartbeat_seconds()
     fixed: list[str] = []
-    for loop in _loops.list_loops(limit=200):
-        if loop.get("last_run_status") not in ("running", "queued"):
-            continue
+    for loop in _loops.list_loops_by_status(last_run_statuses=("running", "queued")):
         loop_id, last_key = loop.get("loop_id"), loop.get("last_run_key")
         run = get_run(last_key) if last_key else None
         run_status = (run or {}).get("status")

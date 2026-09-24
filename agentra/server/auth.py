@@ -151,6 +151,8 @@ async def auth_middleware(request: Request, call_next):
     verify = check_verify_token(request)
     if isinstance(verify, JSONResponse):
         return verify
+    if verify is True:
+        request.state.actor = "verify-token"
     if path in _PUBLIC_EXACT or path.startswith(_PUBLIC_PREFIXES) or verify is True:
         return await call_next(request)
 

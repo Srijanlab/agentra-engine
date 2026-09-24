@@ -450,6 +450,23 @@ def test_last_run_at_filters_by_app_and_source(ddb_env):
     assert runs.last_run_at("nonexistent") is None
 
 
+def test_last_run_at_source_filter_survives_100_newer_other_source_runs(ddb_env):
+    from agentra.registry import runs
+
+    now = time.time()
+    runs.record_run("old", app="myapp", source="scheduled", status="completed", started_at=now - 5000)
+    for i in range(120):
+        runs.record_run(f"od{i}", app="myapp", source="on-demand", status="completed", started_at=now - 1000 + i)
+    for i in range(210):
+        runs.record_run(f"x{i}", app="otherapp", source="scheduled", status="completed", started_at=now - 500 + i)
+
+    assert runs.last_run_at("myapp", source="scheduled") == now - 5000
+    assert runs.last_run_at("myapp") == now - 1000 + 119
+    cycle = runs.list_app_runs("myapp", sources=("scheduled", "on-demand"), limit=50)
+    assert len(cycle) == 50 and cycle[0]["run_key"] == "od119"
+    assert all(r["app"] == "myapp" for r in cycle)
+
+
 def test_reconcile_stale_runs_marks_orphaned_runs_failed(ddb_env):
     from agentra.registry import runs
 
