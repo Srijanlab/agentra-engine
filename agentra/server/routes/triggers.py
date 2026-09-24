@@ -140,9 +140,7 @@ def _reconcile_closed_issue_loops(app_name: str) -> None:
     if repo is None:
         return
     mem = Memory(repo)
-    for loop in registry.list_loops(app=app_name):
-        if loop.get("status") not in ("active", "waiting_for_human", "escalated"):
-            continue
+    for loop in registry.list_loops_by_status(("active", "waiting_for_human", "escalated"), app=app_name):
         issue_number = loop.get("issue_number")
         if not issue_number:
             continue

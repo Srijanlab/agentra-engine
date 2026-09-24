@@ -82,8 +82,7 @@ def bind_loop_for_run(app: str, objective: str) -> str:
     # waiting_for_human loop whose issue was later closed hijack every future cycle
     # (confirmed live: agentra#20 / run 02499a0e). Mirrors agentra-loop.
     existing_loops = [
-        l for l in list_loops(app=app, limit=10)
-        if l.get("issue_number") and l.get("status") == "active"
+        l for l in list_loops_by_status(("active",), app=app) if l.get("issue_number")
     ]
     if existing_loops:
         return existing_loops[0]["loop_id"]
@@ -204,10 +203,11 @@ def set_loop_human_input(loop_id: str, human_input: dict) -> None:
     })
 
 
-def list_waiting_for_human(limit: int = _LOOPS_LIST_LIMIT) -> list[dict]:
+def list_waiting_for_human(limit: int | None = None) -> list[dict]:
     """Loops parked on a blocking human question -- backs the dashboard's 'Needs
     your input' panel and the GitHub-comment answer reconciler."""
-    return [l for l in list_loops(limit=limit) if l.get("status") in ("waiting_for_human", "escalated")]
+    found = list_loops_by_status(("waiting_for_human", "escalated"))
+    return found if limit is None else found[:limit]
 
 
 def reconcile_waiting_for_human() -> list[dict]:
@@ -219,9 +219,7 @@ def reconcile_waiting_for_human() -> list[dict]:
     no outbound calls -- keeps registry/ dependency-free of connectors/."""
     now = time.time()
     escalated: list[dict] = []
-    for loop in list_loops():
-        if loop.get("status") != "waiting_for_human":
-            continue
+    for loop in list_loops_by_status(("waiting_for_human",)):
         waiting_since = (loop.get("human_input") or {}).get("waiting_since")
         if waiting_since is None or now - waiting_since <= core.HUMAN_INPUT_MAX_WAIT_SECONDS:
             continue
@@ -265,10 +263,28 @@ def list_loops(app: str | None = None, limit: int = _LOOPS_LIST_LIMIT) -> list[d
             return _cache.get_or_set(f"loops:{app}:{limit}", lambda: _query_loops_by_app(app, limit), ttl=15)
         return _cache.get_or_set(f"loops:{limit}", lambda: _scan_loops(limit), ttl=15)
 
-    loops = sorted(_local_loops().values(), key=_recency, reverse=True)[:limit]
-    if app is not None:
-        loops = [l for l in loops if l.get("app") == app]
-    return loops
+    loops = [l for l in _local_loops().values() if app is None or l.get("app") == app]
+    return sorted(loops, key=_recency, reverse=True)[:limit]
+
+
+def list_loops_by_status(
+    statuses: tuple[str, ...] | list[str] | None = None,
+    app: str | None = None,
+    last_run_statuses: tuple[str, ...] | list[str] | None = None,
+) -> list[dict]:
+    """Every stored loop matching the status filters (optionally one app), most recently active first, never truncated."""
+    if core._ddb is not None:
+        items = _query_all_loops_by_app(app, statuses, last_run_statuses) if app is not None else _scan_all_loops()
+    else:
+        items = list(_local_loops().values())
+    matches = [
+        l for l in items
+        if (app is None or l.get("app") == app)
+        and (not statuses or l.get("status") in statuses)
+        and (not last_run_statuses or l.get("last_run_status") in last_run_statuses)
+    ]
+    matches.sort(key=_recency, reverse=True)
+    return matches
 
 
 # --- storage -----------------------------------------------------------------
@@ -303,6 +319,43 @@ def _query_loops_by_app(app: str, limit: int) -> list[dict]:
     items = [_dynamo.from_item(i) for i in resp.get("Items", [])]
     items.sort(key=_recency, reverse=True)
     return items[:limit]
+
+
+def _scan_all_loops() -> list[dict]:
+    from agentra.registry import _dynamo
+
+    return _dynamo.scan_all(_dynamo.table("loops"))
+
+
+def _query_all_loops_by_app(
+    app: str,
+    statuses: tuple[str, ...] | list[str] | None,
+    last_run_statuses: tuple[str, ...] | list[str] | None,
+) -> list[dict]:
+    """Follow LastEvaluatedKey through the app's whole by-app-recency partition, filtering server-side."""
+    import functools
+
+    from boto3.dynamodb.conditions import Attr, Key
+
+    from agentra.registry import _dynamo
+
+    kwargs: dict[str, Any] = {
+        "IndexName": "by-app-recency", "KeyConditionExpression": Key("app").eq(app), "ScanIndexForward": False,
+    }
+    conditions = []
+    if statuses:
+        conditions.append(Attr("status").is_in(list(statuses)))
+    if last_run_statuses:
+        conditions.append(Attr("last_run_status").is_in(list(last_run_statuses)))
+    if conditions:
+        kwargs["FilterExpression"] = functools.reduce(lambda a, b: a & b, conditions)
+    items: list[dict] = []
+    while True:
+        resp = _dynamo.table("loops").query(**kwargs)
+        items.extend(_dynamo.from_item(i) for i in resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            return items
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
 def _get_loop_doc(loop_id: str) -> dict | None:

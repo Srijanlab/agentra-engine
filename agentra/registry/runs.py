@@ -185,9 +185,7 @@ def reconcile_stale_loops() -> list[str]:
     now = time.time()
     threshold = core.stale_heartbeat_seconds()
     fixed: list[str] = []
-    for loop in _loops.list_loops(limit=200):
-        if loop.get("last_run_status") not in ("running", "queued"):
-            continue
+    for loop in _loops.list_loops_by_status(last_run_statuses=("running", "queued")):
         loop_id, last_key = loop.get("loop_id"), loop.get("last_run_key")
         run = get_run(last_key) if last_key else None
         run_status = (run or {}).get("status")
