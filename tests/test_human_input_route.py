@@ -114,17 +114,79 @@ def test_submit_human_input_endpoint(tmp_path, monkeypatch):
     assert registry.list_jobs()[0]["kind"] == "human_resume"
 
 
-def test_submit_human_input_respects_system_pause(tmp_path, monkeypatch):
+def _waiting_loop(repo: Path, issue_number: int) -> str:
+    loop_id = registry.bind_loop("myapp", issue_number)
+    registry.set_loop_human_input(loop_id, {"question": "OAuth or magic links?", "issue_number": issue_number})
+    registry.set_loop_status(loop_id, "waiting_for_human")
+    return loop_id
+
+
+def _loop_status(loop_id: str) -> str:
+    return next(l["status"] for l in registry.list_loops("myapp") if l["loop_id"] == loop_id)
+
+
+def _boom(*_a, **_k):
+    raise RuntimeError("queue down")
+
+
+def test_submit_human_input_rejects_while_paused(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     repo = _register_tmp_app(tmp_path)
     issue_number = _escalate(repo)
+    loop_id = _waiting_loop(repo, issue_number)
     registry.pause("maintenance")
+    client = TestClient(server.app)
 
-    body = TestClient(server.app).post(
-        "/apps/myapp/human-input", json={"issue_number": issue_number, "answer": "x"}
-    ).json()
-    assert body["triggered"] is False
+    resp = client.post("/apps/myapp/human-input", json={"issue_number": issue_number, "answer": "x"})
+    assert resp.status_code == 409
+    assert "paused" in resp.json()["detail"] and "triggered" not in resp.json()
     assert registry.list_jobs() == []
+    assert Memory(repo).human_input_pending(issue_number)
+    assert _loop_status(loop_id) == "waiting_for_human"
+
+    registry.resume()
+    ok = client.post("/apps/myapp/human-input", json={"issue_number": issue_number, "answer": "x"})
+    assert ok.status_code == 200 and ok.json()["run_key"] and ok.json()["job_id"]
+
+
+def test_dispatch_human_answer_enqueue_failure_leaves_answer_pending(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    issue_number = _escalate(repo)
+    loop_id = _waiting_loop(repo, issue_number)
+    monkeypatch.setattr(registry, "enqueue_job", _boom)
+
+    with pytest.raises(RuntimeError):
+        human_input.dispatch_human_answer("myapp", repo, issue_number, "OAuth", source="human-input")
+
+    assert Memory(repo).human_input_pending(issue_number)
+    assert _loop_status(loop_id) == "waiting_for_human"
+    assert registry.list_jobs() == []
+    assert not [r for r in registry.list_runs() if r.get("status") == "queued"]
+
+
+def test_submit_human_input_enqueue_failure_returns_503_then_retry_succeeds(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    repo = _register_tmp_app(tmp_path)
+    issue_number = _escalate(repo)
+    loop_id = _waiting_loop(repo, issue_number)
+    client = TestClient(server.app, raise_server_exceptions=False)
+    real_enqueue = registry.enqueue_job
+    monkeypatch.setattr(registry, "enqueue_job", _boom)
+
+    resp = client.post("/apps/myapp/human-input", json={"issue_number": issue_number, "answer": "OAuth"})
+    assert resp.status_code == 503
+    assert "NOT recorded" in resp.json()["detail"]
+    assert Memory(repo).human_input_pending(issue_number)
+    assert _loop_status(loop_id) == "waiting_for_human"
+
+    monkeypatch.setattr(registry, "enqueue_job", real_enqueue)
+    ok = client.post("/apps/myapp/human-input", json={"issue_number": issue_number, "answer": "OAuth"})
+    assert ok.status_code == 200 and ok.json()["accepted"] is True and ok.json()["job_id"]
+    assert not Memory(repo).human_input_pending(issue_number)
+    assert _loop_status(loop_id) == "active"
+    [job] = registry.list_jobs()
+    assert job["kind"] == "human_resume"
 
 
 def test_list_needs_human(tmp_path, monkeypatch):

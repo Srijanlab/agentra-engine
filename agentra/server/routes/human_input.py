@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from agentra import registry
 from agentra.memory import Memory
-from agentra.server.utils import _paused_response, _server_log
+from agentra.server.utils import _server_log
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +78,17 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         objective=objective,
         loop_id=loop_id,
     )
-    # The loop is being actively worked again -- drop it out of the "needs input"
-    # listing now; the resume run's own roll-up sets the next loop status.
+    try:
+        job_id = registry.enqueue_job("human_resume", {
+            "run_key": run_key, "app": app_name, "issue_number": issue_number,
+            "answer": answer, "context": context,
+        }, dedup_key=f"human_resume:{app_name}:{issue_number}")
+    except Exception as exc:
+        try:
+            registry.record_run(run_key, status="failed", error=f"human_resume enqueue failed: {exc}")
+        except Exception:
+            logger.warning("dispatch_human_answer: could not mark run %s failed", run_key, exc_info=True)
+        raise
     try:
         if tracking_issue is not None:
             registry.set_loop_status(loop_id, "active")
@@ -87,10 +96,6 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
         logger.warning("dispatch_human_answer: could not set loop %s active", loop_id, exc_info=True)
     mem.record_human_answer(issue_number, answer, resumed_run_key=run_key)
     _ack_slack_thread(app_name, issue_number, answer, source)
-    job_id = registry.enqueue_job("human_resume", {
-        "run_key": run_key, "app": app_name, "issue_number": issue_number,
-        "answer": answer, "context": context,
-    }, dedup_key=f"human_resume:{app_name}:{issue_number}")
     _server_log(source, f"app={app_name!r} issue=#{issue_number} run_key={run_key} job={job_id} -- human answer accepted, resume queued")
     return {"run_key": run_key, "job_id": job_id, "branch": context.get("branch"), "session_id": context.get("session_id")}
 
@@ -98,7 +103,11 @@ def dispatch_human_answer(app_name: str, repo: Path, issue_number: int, answer: 
 @router.post("/apps/{app_name}/human-input")
 async def submit_human_input(app_name: str, payload: HumanInputAnswerPayload) -> dict:
     if registry.is_paused():
-        return _paused_response("human-input")
+        _server_log("human-input", "system is paused -- human answer rejected")
+        raise HTTPException(
+            status_code=409,
+            detail="System is paused; the answer was NOT recorded. Unpause and resubmit the answer.",
+        )
     repo = registry.get_app_repo(app_name)
     if repo is None:
         raise HTTPException(status_code=404, detail=f"app {app_name!r} not registered")
@@ -106,6 +115,12 @@ async def submit_human_input(app_name: str, payload: HumanInputAnswerPayload) ->
         dispatched = dispatch_human_answer(app_name, repo, payload.issue_number, payload.answer, source="human-input")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("submit_human_input: dispatch failed for app=%s issue=#%s", app_name, payload.issue_number, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not queue the resume; the answer was NOT recorded. Please retry.",
+        ) from exc
     return {"accepted": True, **dispatched}
 
 
