@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 VERIFY_HEADER = "x-agentra-verify-token"
 
-_ELIGIBLE = re.compile(r"^/(apps|apps/[^/]+/schedule|runs/[^/]+)$")
+_ELIGIBLE = re.compile(r"^/(apps|apps/[^/]+/schedule|runs/[^/]+|openapi\.json|docs)$")
 
 _AUTH_HINT = (
     "Provide a Firebase ID token via 'Authorization: Bearer <token>', or, for "
