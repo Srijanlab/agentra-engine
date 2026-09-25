@@ -121,10 +121,16 @@ def test_correct_token_reads_openapi_schema(client):
     assert {"/apps", "/health", "/runs/{run_key}"} <= set(body["paths"])
 
 
-@pytest.mark.parametrize("path", ["/docs", "/redoc"])
-def test_correct_token_does_not_read_docs_page(client, path):
-    assert client.get(path).status_code == 401
-    r = client.get(path, headers=HDR)
+def test_correct_token_reads_docs_page(client):
+    assert client.get("/docs").status_code == 401
+    r = client.get("/docs", headers=HDR)
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+
+
+def test_correct_token_does_not_read_redoc_page(client):
+    assert client.get("/redoc").status_code == 401
+    r = client.get("/redoc", headers=HDR)
     assert r.status_code == 401
     assert r.json()["error"] == "authentication_required"
     assert "text/html" not in r.headers["content-type"]
@@ -181,7 +187,7 @@ def test_preview_deployment_allows_the_token(client, monkeypatch):
     assert client.get("/apps", headers=HDR).status_code == 200
 
 
-ELIGIBLE_PATHS = ["/apps", "/apps/demo/schedule", "/runs/rk1", "/openapi.json"]
+ELIGIBLE_PATHS = ["/apps", "/apps/demo/schedule", "/runs/rk1", "/openapi.json", "/docs"]
 
 
 @pytest.mark.parametrize("path", ELIGIBLE_PATHS)
