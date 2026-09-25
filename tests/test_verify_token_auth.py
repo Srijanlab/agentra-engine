@@ -167,3 +167,43 @@ def test_health_stays_public(client):
 def test_preview_deployment_allows_the_token(client, monkeypatch):
     monkeypatch.setenv("VERCEL_ENV", "preview")
     assert client.get("/apps", headers=HDR).status_code == 200
+
+
+ELIGIBLE_PATHS = ["/apps", "/apps/demo/schedule", "/runs/rk1", "/openapi.json", "/docs", "/redoc"]
+
+
+@pytest.mark.parametrize("path", ELIGIBLE_PATHS)
+def test_whitespace_padded_env_token_still_authorizes(client, monkeypatch, path):
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", f"  {TOKEN}\n")
+    assert client.get(path, headers=HDR).status_code != 401
+
+
+def test_whitespace_padded_header_value_is_trimmed(client):
+    r = client.get("/apps", headers={"X-Agentra-Verify-Token": f" {TOKEN} "})
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("blank", ["   ", "\n", " \t "])
+def test_whitespace_only_env_token_fails_closed(client, monkeypatch, blank):
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", blank)
+    assert client.get("/apps", headers=HDR).status_code == 401
+    assert client.get("/apps", headers={"X-Agentra-Verify-Token": blank.strip() or " "}).status_code == 401
+    assert client.get("/health").json()["verify_token_enabled"] is False
+
+
+@pytest.mark.parametrize("path", ["/health", "/healthz"])
+def test_health_reports_verify_token_enabled(client, monkeypatch, path):
+    body = client.get(path).json()
+    assert body["verify_token_enabled"] is True
+    assert {"status", "apps_registered", "commit", "auth"} <= set(body)
+    assert set(body["auth"]) == {"mode", "cloud_mode", "firebase_configured", "allowlist_configured", "problems"}
+    assert TOKEN not in client.get(path).text and "a@example.com" not in client.get(path).text
+    monkeypatch.delenv("AGENTRA_VERIFY_TOKEN")
+    assert client.get(path).json()["verify_token_enabled"] is False
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", TOKEN)
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    assert client.get(path).json()["verify_token_enabled"] is False
+
+
+def test_health_and_healthz_match(client):
+    assert client.get("/health").json() == client.get("/healthz").json()
