@@ -207,3 +207,50 @@ def test_health_reports_verify_token_enabled(client, monkeypatch, path):
 
 def test_health_and_healthz_match(client):
     assert client.get("/health").json() == client.get("/healthz").json()
+
+
+@pytest.mark.parametrize("path", ["/health", "/healthz"])
+def test_health_verify_token_status_values(client, monkeypatch, path):
+    body = client.get(path).json()
+    assert (body["verify_token_status"], body["verify_token_enabled"]) == ("enabled", True)
+    for blank in (None, "", "   "):
+        if blank is None:
+            monkeypatch.delenv("AGENTRA_VERIFY_TOKEN")
+        else:
+            monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", blank)
+        body = client.get(path).json()
+        assert (body["verify_token_status"], body["verify_token_enabled"]) == ("not_configured", False)
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", TOKEN)
+    for env in ("VERCEL_ENV", "AGENTRA_ENVIRONMENT"):
+        monkeypatch.setenv(env, "production")
+        body = client.get(path).json()
+        assert (body["verify_token_status"], body["verify_token_enabled"]) == ("disabled_in_production", False)
+        monkeypatch.delenv(env)
+
+
+def test_health_verify_token_status_in_degraded_branch(client, monkeypatch):
+    def boom():
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(registry, "list_apps", boom)
+    for path in ("/health", "/healthz"):
+        body = client.get(path).json()
+        assert body["status"] == "degraded"
+        assert body["verify_token_status"] == "enabled" and body["verify_token_enabled"] is True
+        assert TOKEN not in str(body)
+
+
+def test_health_status_leaks_no_token_material(client, monkeypatch):
+    text = client.get("/health").text
+    assert TOKEN not in text and "a@example.com" not in text
+    assert str(len(TOKEN)) not in client.get('/health').json()['verify_token_status']
+    monkeypatch.delenv("AGENTRA_VERIFY_TOKEN")
+    assert TOKEN not in client.get("/healthz").text
+
+
+@pytest.mark.parametrize("path", SCHEMA_PATHS)
+def test_schema_paths_ignore_query_and_authorization_token(client, path):
+    r = client.get(path, params={"verify_token": TOKEN}, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert r.status_code == 401
+    assert r.json()["error"] == "authentication_required" and "paths" not in r.text
+    assert client.get(f"{path}?verify_token={TOKEN}").status_code == 401

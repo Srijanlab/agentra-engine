@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
 from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware, auth_status, log_startup_warnings
-from agentra.server.verify_token import verify_token_enabled
+from agentra.server.verify_token import verify_token_status
 from agentra.server.queue_auth import QueueAuthError, queue_auth_error_handler
 
 from agentra import registry
@@ -126,16 +126,18 @@ async def health() -> dict:
     before the Testing Agent runs."""
     commit = _build_commit()
     auth = auth_status().as_dict()
-    verify_enabled = verify_token_enabled()
+    verify_status = verify_token_status()
     try:
         return {
             "status": "ok", "apps_registered": len(registry.list_apps()), "commit": commit,
-            "auth": auth, "verify_token_enabled": verify_enabled,
+            "auth": auth, "verify_token_enabled": verify_status == "enabled",
+            "verify_token_status": verify_status,
         }
     except Exception as exc:  # never let a backend blip fail the liveness probe
         return {
             "status": "degraded", "error": f"{type(exc).__name__}", "commit": commit,
-            "auth": auth, "verify_token_enabled": verify_enabled,
+            "auth": auth, "verify_token_enabled": verify_status == "enabled",
+            "verify_token_status": verify_status,
         }
 
 

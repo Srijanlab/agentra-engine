@@ -34,9 +34,16 @@ def _configured_token() -> str:
     return (os.environ.get("AGENTRA_VERIFY_TOKEN") or "").strip()
 
 
+def verify_token_status() -> str:
+    """One of enabled | not_configured | disabled_in_production; never reveals the token."""
+    if _is_production():
+        return "disabled_in_production"
+    return "enabled" if _configured_token() else "not_configured"
+
+
 def verify_token_enabled() -> bool:
     """True only when a non-blank AGENTRA_VERIFY_TOKEN is set on a non-production deployment."""
-    return bool(_configured_token()) and not _is_production()
+    return verify_token_status() == "enabled"
 
 
 def check_verify_token(request: Request) -> JSONResponse | bool | None:

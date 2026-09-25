@@ -33,7 +33,7 @@ def test_healthz_is_a_pure_alias_of_health(tmp_path, monkeypatch):
     body = healthz.json()
     assert body["status"] == "ok"
     assert isinstance(body["apps_registered"], int)
-    assert set(body) == {"status", "apps_registered", "commit", "auth", "verify_token_enabled"}
+    assert set(body) == {"status", "apps_registered", "commit", "auth", "verify_token_enabled", "verify_token_status"}
 
 
 def test_health_body_unchanged(tmp_path, monkeypatch):
@@ -49,6 +49,7 @@ def test_health_body_unchanged(tmp_path, monkeypatch):
         "apps_registered": 0,
         "commit": "",
         "verify_token_enabled": False,
+        "verify_token_status": "not_configured",
         "auth": {
             "mode": "open",
             "cloud_mode": False,
