@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
 from agentra.server.auth import CORS_ORIGIN_REGEX, auth_middleware, auth_status, log_startup_warnings
+from agentra.server.build_info import build_commit
 from agentra.server.verify_token import verify_token_status
 from agentra.server.queue_auth import QueueAuthError, queue_auth_error_handler
 
@@ -90,11 +91,6 @@ def _run_report_path(run_key: str) -> Path | None:
     return report_path(repo, run_key)
 
 
-def _build_commit() -> str:
-    """Deployed git SHA (Vercel-injected, else AGENTRA_BUILD_SHA), or "" when unknown."""
-    return os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("AGENTRA_BUILD_SHA") or ""
-
-
 def _dashboard_url() -> str:
     """The configured dashboard URL when it is an http(s) URL, else ""."""
     url = (os.environ.get("AGENTRA_DASHBOARD_URL") or "").strip()
@@ -107,7 +103,7 @@ async def root() -> Response | dict:
     dashboard_url = _dashboard_url()
     if dashboard_url:
         return RedirectResponse(dashboard_url, status_code=307)
-    return {"service": "agentra-engine", "status": "ok", "commit": _build_commit(), "health": "/health"}
+    return {"service": "agentra-engine", "status": "ok", "commit": build_commit(), "health": "/health"}
 
 
 @app.get("/favicon.ico", response_model=None)
@@ -124,7 +120,7 @@ async def health() -> dict:
     `commit` is the deployed build's git SHA (Vercel injects VERCEL_GIT_COMMIT_SHA) --
     the loop's verify_pre_prod uses it to confirm a pre-prod deploy has caught up
     before the Testing Agent runs."""
-    commit = _build_commit()
+    commit = build_commit()
     auth = auth_status().as_dict()
     verify_status = verify_token_status()
     try:
