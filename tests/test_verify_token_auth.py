@@ -29,6 +29,16 @@ def client(tmp_path, monkeypatch):
     return TestClient(server.app)
 
 
+def test_verify_token_reads_loop_context(client):
+    loop_id = registry.bind_loop("demo", 1, title="t")
+    r = client.get(f"/loops/{loop_id}/context", headers=HDR)
+    assert r.status_code == 200
+    assert set(r.json()) == {"objective", "current_step", "state", "decisions", "findings", "refs", "last_outcome", "updated_at"}
+    assert client.get("/loops/does-not-exist/context", headers=HDR).status_code == 404
+    assert client.get(f"/loops/{loop_id}/context").status_code == 401
+    assert client.get(f"/loops/{loop_id}/context", headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 401
+
+
 def test_correct_token_reads_allowed_routes(client):
     assert client.get("/apps", headers=HDR).status_code == 200
     assert client.get("/runs/rk1", headers=HDR).json()["app"] == "demo"
@@ -63,7 +73,7 @@ def test_authorization_header_does_not_carry_the_verify_token(client):
 
 @pytest.mark.parametrize("path", [
     "/apps/demo", "/runs", "/runs/rk1/logs", "/runs/rk1/screenshot", "/runs/rk1/trace",
-    "/loops", "/needs-human", "/system/llm-pool",
+    "/loops", "/loops/demo-1", "/loops/demo-1/pipeline", "/internal/loops/demo-1/context", "/needs-human", "/system/llm-pool",
 ])
 def test_token_is_route_scoped(client, path):
     assert client.get(path, headers=HDR).status_code == 401

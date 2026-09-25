@@ -239,3 +239,80 @@ def test_dashboard_view_requires_sign_in(client, loop_id):
     assert r.json()["error"] == "authentication_required"
     assert client.put(f"/loops/{loop_id}/context", json={"state": "x"}).status_code == 401
     assert client.get(f"/loops/{loop_id}/context", headers=DASH).status_code == 200
+
+
+VERIFY = "verify-secret"
+VHDR = {"X-Agentra-Verify-Token": VERIFY}
+DEFAULTS = {
+    "objective": None, "current_step": None, "state": None, "decisions": [], "findings": [],
+    "refs": {"issue": None, "pr": None, "branch": None}, "last_outcome": None, "updated_at": None,
+}
+
+
+@pytest.fixture
+def verify(monkeypatch):
+    monkeypatch.setenv("AGENTRA_VERIFY_TOKEN", VERIFY)
+    for var in ("VERCEL_ENV", "AGENTRA_ENVIRONMENT"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_verify_token_reads_default_context(client, loop_id, verify):
+    r = client.get(f"/loops/{loop_id}/context", headers=VHDR)
+    assert r.status_code == 200 and r.json() == DEFAULTS
+    missing = client.get("/loops/does-not-exist/context", headers=VHDR)
+    assert missing.status_code == 404 and "detail" in missing.json()
+
+
+@pytest.mark.parametrize("headers", [
+    {}, {"X-Agentra-Verify-Token": "wrong"}, {"X-Agentra-Verify-Token": ""},
+])
+def test_verify_token_rejected_shapes_are_401(client, loop_id, verify, headers):
+    r = client.get(f"/loops/{loop_id}/context", headers=headers)
+    body = r.json()
+    assert r.status_code == 401 and body["error"] == "authentication_required"
+    assert {"detail", "hint"} <= set(body)
+    assert VERIFY not in r.text and "a@b.c" not in r.text
+
+
+def test_verify_token_unset_is_401(client, loop_id, verify, monkeypatch):
+    monkeypatch.delenv("AGENTRA_VERIFY_TOKEN")
+    assert client.get(f"/loops/{loop_id}/context", headers=VHDR).status_code == 401
+
+
+@pytest.mark.parametrize("method", ["put", "post", "delete"])
+def test_verify_token_cannot_mutate_context(client, loop_id, verify, method):
+    before = _put(client, loop_id, FULL).json()
+    r = getattr(client, method)(f"/loops/{loop_id}/context", headers=VHDR, **({"json": {"state": "x"}} if method == "put" else {}))
+    assert r.status_code == 401
+    assert _get(client, loop_id).json() == before
+
+
+@pytest.mark.parametrize("env", ["VERCEL_ENV", "AGENTRA_ENVIRONMENT"])
+def test_verify_token_forbidden_in_production(client, loop_id, verify, monkeypatch, env):
+    monkeypatch.setenv(env, "production")
+    r = client.get(f"/loops/{loop_id}/context", headers=VHDR)
+    assert r.status_code == 403 and "production" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("path", ["/loops", "/loops/{}", "/internal/loops/{}/context"])
+def test_verify_token_grants_no_other_loop_access(client, loop_id, verify, path):
+    assert client.get(path.format(loop_id), headers=VHDR).status_code == 401
+
+
+def test_internal_context_rejects_post_and_delete(client, loop_id):
+    url = f"/internal/loops/{loop_id}/context"
+    assert client.post(url, headers=AUTH, json={"state": "x"}).status_code == 405
+    assert client.delete(url, headers=AUTH).status_code == 405
+    r = _put(client, loop_id, {"state": "x"})
+    assert r.status_code == 200 and r.json()["state"] == "x" and set(r.json()) == KEYS
+
+
+def test_internal_unconfigured_is_503_with_detail(client, loop_id, monkeypatch):
+    monkeypatch.delenv("AGENTRA_INTERNAL_TOKEN")
+    for r in (_get(client, loop_id), _put(client, loop_id, {"state": "x"})):
+        assert r.status_code == 503 and r.json()["detail"] == "internal API not configured"
+
+
+def test_dashboard_context_default_keys_with_firebase(client, loop_id):
+    r = client.get(f"/loops/{loop_id}/context", headers=DASH)
+    assert r.status_code == 200 and r.json() == DEFAULTS and set(r.json()["refs"]) == {"issue", "pr", "branch"}
