@@ -102,6 +102,11 @@ def auth_status() -> AuthStatus:
         return AuthStatus(True, False, False)
 
 
+def internal_token_configured() -> bool:
+    """True when AGENTRA_INTERNAL_TOKEN is non-empty, the same test /internal/* uses; never reveals the token."""
+    return bool(os.environ.get("AGENTRA_INTERNAL_TOKEN"))
+
+
 def _warn_pubsub_email_missing() -> None:
     if os.environ.get("AGENTRA_PUBSUB_AUDIENCE") and not os.environ.get("AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL"):
         logger.warning(

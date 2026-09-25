@@ -272,3 +272,30 @@ def test_schema_paths_ignore_query_and_authorization_token(client, path):
     assert r.status_code == 401
     assert r.json()["error"] == "authentication_required" and "paths" not in r.text
     assert client.get(f"{path}?verify_token={TOKEN}").status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/health", "/healthz"])
+def test_health_reports_internal_token_configured(client, monkeypatch, path):
+    body = client.get(path).json()
+    assert body["internal_token_configured"] is True
+    assert "internal" not in {v for v in body.values() if isinstance(v, str)}
+    monkeypatch.delenv("AGENTRA_INTERNAL_TOKEN")
+    assert client.get(path).json()["internal_token_configured"] is False
+    monkeypatch.setenv("AGENTRA_INTERNAL_TOKEN", "")
+    assert client.get(path).json()["internal_token_configured"] is False
+    loop_id = registry.bind_loop("demo", 1, title="t")
+    r = client.get(f"/internal/loops/{loop_id}/context", headers={"Authorization": "Bearer x"})
+    assert (r.status_code, r.json()["detail"]) == (503, "internal API not configured")
+
+
+def test_health_internal_token_configured_in_degraded_branch_and_no_leak(client, monkeypatch):
+    def boom():
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(registry, "list_apps", boom)
+    for path in ("/health", "/healthz"):
+        res = client.get(path)
+        body = res.json()
+        assert body["status"] == "degraded" and body["internal_token_configured"] is True
+        assert '"internal"' not in res.text and "a@example.com" not in res.text
+    assert client.get("/health").json() == client.get("/healthz").json()
