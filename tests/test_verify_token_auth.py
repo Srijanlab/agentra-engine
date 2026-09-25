@@ -100,7 +100,7 @@ def test_production_rejects_the_header(client, monkeypatch, env):
     assert client.get("/apps").status_code == 401
 
 
-SCHEMA_PATHS = ["/openapi.json", "/docs"]
+SCHEMA_PATHS = ["/openapi.json", "/docs", "/redoc"]
 
 
 def test_correct_token_reads_openapi_schema(client):
@@ -111,8 +111,9 @@ def test_correct_token_reads_openapi_schema(client):
     assert {"/apps", "/health", "/runs/{run_key}"} <= set(body["paths"])
 
 
-def test_correct_token_reads_docs_page(client):
-    r = client.get("/docs", headers=HDR)
+@pytest.mark.parametrize("path", ["/docs", "/redoc"])
+def test_correct_token_reads_docs_page(client, path):
+    r = client.get(path, headers=HDR)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
 
@@ -146,9 +147,8 @@ def test_schema_paths_reject_bearer_verify_token(client):
     assert client.get("/openapi.json", headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 401
 
 
-@pytest.mark.parametrize("path", ["/redoc", "/docs/oauth2-redirect"])
-def test_token_does_not_reach_other_doc_routes(client, path):
-    assert client.get(path, headers=HDR).status_code == 401
+def test_token_does_not_reach_other_doc_routes(client):
+    assert client.get("/docs/oauth2-redirect", headers=HDR).status_code == 401
 
 
 @pytest.mark.parametrize("env", ["VERCEL_ENV", "AGENTRA_ENVIRONMENT"])

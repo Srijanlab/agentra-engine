@@ -6,3 +6,4 @@ Notes: Verified the actual feature: agentra/web/src/components/StandupsPanel.tsx
 - Pre-prod (beta) must use its own `AGENTRA_DYNAMODB_TABLE_PREFIX` and distinct `AGENTRA_INTERNAL_TOKEN` / `AGENTRA_TICK_TOKEN` / `AGENTRA_VERIFY_TOKEN`; never share the live loop's registry.
 - Send `X-Agentra-Verify-Token: <token>` (not `Authorization`) to read `GET /apps`, `GET /apps/{name}/schedule`, `GET /runs/{run_key}` with no Firebase token. Every other route/method returns 401; Production returns 403 for the header.
 - `GET /trigger/cron` needs the tick token (or `CRON_SECRET`); the verify token never works there. See `docs/deployment.md`.
+- The OpenAPI schema/docs (`/openapi.json`, `/docs`, `/redoc`) are intentionally auth-gated (401); on non-production only, black-box checks read them via `GET` + `X-Agentra-Verify-Token` (never non-GET; production refuses with 403).
