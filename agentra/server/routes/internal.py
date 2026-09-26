@@ -7,6 +7,7 @@ datastore or GitHub itself.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hmac
 import logging
@@ -22,6 +23,7 @@ from agentra import registry
 from agentra.connectors import github_app
 from agentra.git_ops import GitOpError, push_branch
 from agentra.memory import Memory
+from agentra.registry.loop_context import InvalidLoopContext, LoopContextUpdate
 
 logger = logging.getLogger("agentra.server.internal")
 
@@ -69,7 +71,7 @@ _REGISTRY_METHODS = frozenset({
     "report_llm_provider_failure", "report_llm_provider_success", "get_llm_provider_health",
     "record_slack_thread", "resolve_slack_thread", "slack_thread_for",
     "get_run", "list_runs", "list_app_runs", "record_run", "last_run_at",
-    "list_loops", "get_loop", "get_loop_pipeline", "bind_loop", "bind_loop_for_run", "bind_promote_loop",
+    "list_loops", "get_loop", "get_loop_pipeline", "get_loop_context", "set_loop_context", "bind_loop", "bind_loop_for_run", "bind_promote_loop",
     "roll_up_loop", "set_loop_human_input", "set_loop_pipeline", "set_loop_status",
     "loop_id_for", "loop_id_for_issue",
     "list_agent_steps",
@@ -198,6 +200,8 @@ async def rpc(req: RpcRequest) -> dict:
         raise
     except registry.InvalidLLMPool as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InvalidLoopContext as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.warning("rpc %s.%s failed: %s", req.target, req.method, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
@@ -213,6 +217,23 @@ async def rpc(req: RpcRequest) -> dict:
             human_gate.maybe_raise(run_key)
 
     return {"result": _json_safe(result)}
+
+
+@router.get("/loops/{loop_id}/context", dependencies=[Depends(_require_token)])
+async def get_loop_context(loop_id: str) -> dict:
+    context = await asyncio.to_thread(registry.get_loop_context, loop_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail=f"loop {loop_id!r} not found")
+    return context
+
+
+@router.put("/loops/{loop_id}/context", dependencies=[Depends(_require_token)])
+async def put_loop_context(loop_id: str, body: LoopContextUpdate) -> dict:
+    fields = body.model_dump(exclude_unset=True)
+    context = await asyncio.to_thread(registry.set_loop_context, loop_id, **fields)
+    if context is None:
+        raise HTTPException(status_code=404, detail=f"loop {loop_id!r} not found")
+    return context
 
 
 class HeartbeatRequest(BaseModel):

@@ -41,3 +41,13 @@ def _clear_gh_cache_inprocess_layer():
     _inprocess.clear()
     yield
     _inprocess.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_build_commit_cache():
+    """build_commit() is memoised per process, so clear it around every test."""
+    from agentra.server.build_info import reset_build_commit_cache
+
+    reset_build_commit_cache()
+    yield
+    reset_build_commit_cache()

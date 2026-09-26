@@ -33,7 +33,8 @@ def test_healthz_is_a_pure_alias_of_health(tmp_path, monkeypatch):
     body = healthz.json()
     assert body["status"] == "ok"
     assert isinstance(body["apps_registered"], int)
-    assert set(body) == {"status", "apps_registered", "commit", "auth"}
+    assert set(body) == {"status", "apps_registered", "commit", "auth", "verify_token_enabled", "verify_token_status",
+                        "internal_token_configured"}
 
 
 def test_health_body_unchanged(tmp_path, monkeypatch):
@@ -43,10 +44,15 @@ def test_health_body_unchanged(tmp_path, monkeypatch):
     client = TestClient(server.app)
     monkeypatch.delenv("FIREBASE_PROJECT_ID", raising=False)
     monkeypatch.delenv("AGENTRA_ALLOWED_EMAILS", raising=False)
+    monkeypatch.delenv("AGENTRA_VERIFY_TOKEN", raising=False)
+    monkeypatch.delenv("AGENTRA_INTERNAL_TOKEN", raising=False)
     assert client.get("/health").json() == {
         "status": "ok",
         "apps_registered": 0,
         "commit": "",
+        "verify_token_enabled": False,
+        "verify_token_status": "not_configured",
+        "internal_token_configured": False,
         "auth": {
             "mode": "open",
             "cloud_mode": False,

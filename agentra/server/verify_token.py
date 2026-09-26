@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 VERIFY_HEADER = "x-agentra-verify-token"
 
-_ELIGIBLE = re.compile(r"^/(apps|apps/[^/]+/schedule|runs/[^/]+)$")
+_ELIGIBLE = re.compile(r"^/(apps|apps/[^/]+/schedule|runs/[^/]+|loops/[^/]+/context|openapi\.json|docs)$")
 
 _AUTH_HINT = (
     "Provide a Firebase ID token via 'Authorization: Bearer <token>', or, for "
@@ -30,6 +30,22 @@ def _is_production() -> bool:
     )
 
 
+def _configured_token() -> str:
+    return (os.environ.get("AGENTRA_VERIFY_TOKEN") or "").strip()
+
+
+def verify_token_status() -> str:
+    """One of enabled | not_configured | disabled_in_production; never reveals the token."""
+    if _is_production():
+        return "disabled_in_production"
+    return "enabled" if _configured_token() else "not_configured"
+
+
+def verify_token_enabled() -> bool:
+    """True only when a non-blank AGENTRA_VERIFY_TOKEN is set on a non-production deployment."""
+    return verify_token_status() == "enabled"
+
+
 def check_verify_token(request: Request) -> JSONResponse | bool | None:
     """None: no verify header or feature disabled (use the normal gate); True: authorized; JSONResponse: rejected."""
     supplied = request.headers.get(VERIFY_HEADER)
@@ -37,9 +53,10 @@ def check_verify_token(request: Request) -> JSONResponse | bool | None:
         return None
     if _is_production():
         return JSONResponse({"detail": "verification token is not accepted in production"}, status_code=403)
-    expected = os.environ.get("AGENTRA_VERIFY_TOKEN") or ""
+    expected = _configured_token()
     if not expected:
         return None
+    supplied = supplied.strip()
     eligible = request.method == "GET" and bool(_ELIGIBLE.match(request.url.path))
     if supplied and eligible and hmac.compare_digest(supplied.encode(), expected.encode()):
         return True
