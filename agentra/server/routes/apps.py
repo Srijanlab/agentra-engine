@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from agentra import environments, registry
 from agentra.memory import Memory
+from agentra.server.audit import audit_log
+from agentra.server.routes.app_config import _apply_app_config
 from agentra.server.routes.app_payloads import (
     BacklogRequestPayload,
     RegisterAppPayload,
@@ -21,53 +23,6 @@ from agentra.server.utils import _server_log
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _apply_app_config(
-    dest: Path,
-    branch: str,
-    *,
-    objective: str | None,
-    vercel: bool | None,
-    firebase: bool | None,
-    ci_cd_on_push: bool | None,
-    pre_prod_branch: str | None,
-    prod_branch: str | None,
-    schedule_hours: float | None,
-    schedule_continuous: bool | None,
-    alarm_enabled: bool | None,
-    detect_defaults: bool,
-    commit_message: str,
-) -> str | None:
-    mem = Memory(dest)
-    if objective:
-        mem.set_objective(objective)
-
-    env_config = environments.detect(dest) if detect_defaults else (environments.load(dest) or environments.EnvironmentConfig())
-    for field, value in (
-        ("vercel", vercel),
-        ("firebase", firebase),
-        ("ci_cd_on_push", ci_cd_on_push),
-        ("pre_prod_branch", pre_prod_branch),
-        ("prod_branch", prod_branch),
-        ("schedule_hours", schedule_hours),
-        ("schedule_continuous", schedule_continuous),
-        ("alarm_enabled", alarm_enabled),
-    ):
-        if value is not None:
-            setattr(env_config, field, value)
-    environments.save(dest, env_config)
-
-    if registry.cloud_mode():
-        return None  # cloud: no local checkout to commit .agentra/ from
-
-    from agentra.git_ops import GitOpError, commit_and_push
-
-    try:
-        commit_and_push(dest, branch, commit_message, [".agentra/"])
-        return None
-    except GitOpError as exc:
-        return str(exc)
 
 
 def _invalidate_app_cache(name: str) -> None:
@@ -234,7 +189,7 @@ async def list_apps() -> dict:
 
 
 
-async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
+async def _register_multi_repo_app(payload: RegisterAppPayload, request: Request) -> dict:
     """A multi-repo app: N code repos plus exactly one coordination repo (issues,
     .agentra/memory, objective -- no deployable code). Each code repo's own deploy
     config (vercel/firebase/branches/ci_cd_on_push) lives in that repo's own GitHub
@@ -253,7 +208,7 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
             try:
                 clone_repo(r.repo_url, repo_dest, branch=r.branch)
             except GitOpError as exc:
-                _server_log("register", f"app={payload.name!r} repo={r.name!r} clone failed: {exc}")
+                audit_log(request, "register", f"app={payload.name!r} repo={r.name!r} clone failed: {exc}")
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     registry.register_app(payload.name, repos=[r.model_dump() for r in payload.repos])
@@ -269,7 +224,7 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
         github_issues.ensure_labels(coord.repo_url, extra=[f"repo:{name}" for name in code_repo_names])
         github_issues.migrate_awaiting_testing_label(coord.repo_url)
     except Exception as exc:
-        _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
+        audit_log(request, "register", f"app={payload.name!r} ensure_labels failed: {exc}")
 
     push_warning = _apply_app_config(
         coord_dest,
@@ -287,11 +242,12 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
         commit_message="agentra: register multi-repo app (objective/schedule)",
     )
     if push_warning:
-        _server_log("register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {push_warning}")
+        audit_log(request, "register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {push_warning}")
 
-    _server_log(
-        "register",
-        f"app={payload.name!r} repos={[r.name for r in payload.repos]!r} coordination={coord.name!r} -- registered",
+    note = " -- objective set" if payload.objective else ""
+    audit_log(
+        request, "register",
+        f"app={payload.name!r} repos={[r.name for r in payload.repos]!r} coordination={coord.name!r} -- registered{note}",
     )
     result = {"registered": True, "name": payload.name, "repos": [r.model_dump() for r in payload.repos]}
     if push_warning:
@@ -300,12 +256,12 @@ async def _register_multi_repo_app(payload: RegisterAppPayload) -> dict:
 
 
 @router.post("/apps")
-async def register_app(payload: RegisterAppPayload) -> dict:
+async def register_app(payload: RegisterAppPayload, request: Request) -> dict:
     if payload.name in registry.list_apps():
         raise HTTPException(status_code=409, detail=f"app {payload.name!r} already registered")
 
     if payload.repos:
-        return await _register_multi_repo_app(payload)
+        return await _register_multi_repo_app(payload, request)
 
     if not payload.repo_url:
         raise HTTPException(status_code=400, detail="repo_url is required (or pass repos= for a multi-repo app)")
@@ -319,7 +275,7 @@ async def register_app(payload: RegisterAppPayload) -> dict:
 
             clone_repo(payload.repo_url, dest, branch=payload.branch)
         except GitOpError as exc:
-            _server_log("register", f"app={payload.name!r} clone failed: {exc}")
+            audit_log(request, "register", f"app={payload.name!r} clone failed: {exc}")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     registry.register_app(payload.name, str(dest), repo_url=payload.repo_url, branch=payload.branch)
@@ -334,7 +290,7 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         github_issues.ensure_labels(payload.repo_url)
         github_issues.migrate_awaiting_testing_label(payload.repo_url)
     except Exception as exc:
-        _server_log("register", f"app={payload.name!r} ensure_labels failed: {exc}")
+        audit_log(request, "register", f"app={payload.name!r} ensure_labels failed: {exc}")
 
     push_warning = _apply_app_config(
         dest,
@@ -352,9 +308,10 @@ async def register_app(payload: RegisterAppPayload) -> dict:
         commit_message="agentra: register app (objective/environment/notes)",
     )
     if push_warning:
-        _server_log("register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {push_warning}")
+        audit_log(request, "register", f"app={payload.name!r} registered, but persisting .agentra/ failed: {push_warning}")
 
-    _server_log("register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}")
+    note = " -- objective set" if payload.objective else ""
+    audit_log(request, "register", f"app={payload.name!r} repo_url={payload.repo_url!r} branch={payload.branch!r} -- registered at {dest}{note}")
     result = {"registered": True, "name": payload.name, "repo_path": str(dest)}
     if push_warning:
         result["warning"] = f"registered, but could not push .agentra/ to the remote: {push_warning}"
@@ -362,10 +319,10 @@ async def register_app(payload: RegisterAppPayload) -> dict:
 
 
 @router.delete("/apps/{name}")
-async def delete_app(name: str) -> dict:
+async def delete_app(name: str, request: Request) -> dict:
     if not registry.remove_app(name):
         raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
-    _server_log("register", f"app={name!r} -- removed")
+    audit_log(request, "register", f"app={name!r} -- removed")
     return {"removed": True, "name": name}
 
 
@@ -432,7 +389,7 @@ async def _build_app_detail(name: str, info: dict) -> dict:
 
 
 @router.patch("/apps/{name}")
-async def update_app(name: str, payload: UpdateAppPayload) -> dict:
+async def update_app(name: str, payload: UpdateAppPayload, request: Request) -> dict:
     apps = registry.list_apps()
     if name not in apps:
         raise HTTPException(status_code=404, detail=f"app {name!r} not registered")
@@ -462,7 +419,8 @@ async def update_app(name: str, payload: UpdateAppPayload) -> dict:
     _set_app_backends_or_400(name, payload.llm_backends)
     _set_app_backend_or_400(name, payload.llm_backend)
     _invalidate_app_cache(name)
-    _server_log("update", f"app={name!r} configuration updated" + (f" -- push failed: {push_warning}" if push_warning else ""))
+    note = " -- objective updated" if payload.objective else ""
+    audit_log(request, "update", f"app={name!r} configuration updated{note}" + (f" -- push failed: {push_warning}" if push_warning else ""))
     result = {"updated": True, "name": name}
     if push_warning:
         result["warning"] = f"updated, but could not push .agentra/ to the remote: {push_warning}"

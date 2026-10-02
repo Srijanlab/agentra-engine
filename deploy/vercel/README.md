@@ -41,16 +41,16 @@ Full list with placeholders: [`.env.example`](.env.example).
 | `AGENTRA_ALLOWED_EMAILS` | your email(s), comma-separated |
 | `AGENTRA_INTERNAL_TOKEN` | shared bearer for `/internal/*` (same value in the loop's secret); on pre-prod use a distinct value, never the prod one (see `docs/deployment.md`) |
 | `AGENTRA_TICK_TOKEN` | dedicated bearer for `GET /trigger/cron` (`CRON_SECRET` also works; the internal token is a fallback only while this is unset); on pre-prod use a distinct value |
-| `AGENTRA_VERIFY_TOKEN` | pre-prod ONLY: read-only `X-Agentra-Verify-Token` for `GET /apps`, `/apps/{name}/schedule`, `/runs/{key}`; never set on Production (refused there with 403); unset = disabled |
+| `AGENTRA_VERIFY_TOKEN` | pre-prod ONLY: read-only `X-Agentra-Verify-Token` for `GET /apps`, `/apps/{name}/schedule`, `/runs/{key}`, `/loops/{loop_id}/context` and the intentionally auth-gated `/openapi.json` schema only (not `/docs` or `/redoc`); GET only, non-production only; a 401 caused by an unprovisioned credential is classified as unverified, not a failure; never set on Production (refused there with 403); unset = disabled |
 | `GITHUB_APP_ID` | `agentra-orchestrator` App ID (`4545406`) |
 | `GITHUB_APP_PRIVATE_KEY` | the App's `.pem` contents (multi-line) |
 | `GITHUB_TOKEN` | optional PAT fallback (repo scope) |
 | `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN` | Slack app credentials |
-| `ALARM_WEBHOOK_PASSWORD` | optional; unset leaves `/trigger/alarm` open |
+| `ALARM_WEBHOOK_PASSWORD` | **required in production**; HTTP Basic password for `/trigger/alarm` (an unset value makes it return 401 in cloud mode) |
 
 GitHub access is the `agentra-orchestrator` GitHub App (per-repo installation
 tokens minted by `agentra/connectors/github_app.py`); the PAT is only a fallback.
 
 `/debug/dynamodb` reports which of these resolved (no secret values); it requires a Firebase sign-in when `FIREBASE_PROJECT_ID` is set.
 
-`POST /trigger/queue` requires `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Pub/Sub OIDC token (set `AGENTRA_PUBSUB_AUDIENCE`, optionally `AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL`).
+`POST /trigger/queue` requires `Authorization: Bearer <AGENTRA_INTERNAL_TOKEN>` or a Pub/Sub OIDC token (set `AGENTRA_PUBSUB_AUDIENCE` and `AGENTRA_PUBSUB_SERVICE_ACCOUNT_EMAIL` — the email is required whenever the audience is set, otherwise all OIDC requests get 401 and a startup warning is logged).

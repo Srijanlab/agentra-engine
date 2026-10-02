@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import subprocess
 import time
@@ -268,17 +267,14 @@ def _seed_runs() -> None:
 
 
 def _seed_signals(dev_repos_root: Path) -> None:
-    signals_path = registry.AGENTRA_HOME / "server.log"
-    signals_path.parent.mkdir(parents=True, exist_ok=True)
-    ts = dt.datetime.now(dt.timezone.utc).isoformat()
-    lines = [
-        f"[{ts}] source=register app='cap' registered at {dev_repos_root / 'cap'}",
-        f"[{ts}] source=scheduled app='agentra' run_key=seed0004 agentra_run_id=seed0004 completed | cost=$0.91",
-        f"[{ts}] source=alarm app='agentra' run_key=seed0003 root_cause_found=True promoted_to_prod=False",
-        f"[{ts}] source=queue app='cap' run_key=seed0007 dispatched",
+    events = [
+        ("register", f"app='cap' registered at {dev_repos_root / 'cap'}"),
+        ("scheduled", "app='agentra' run_key=seed0004 agentra_run_id=seed0004 completed | cost=$0.91"),
+        ("alarm", "app='agentra' run_key=seed0003 root_cause_found=True promoted_to_prod=False"),
+        ("queue", "app='cap' run_key=seed0007 dispatched"),
     ]
-    with signals_path.open("a") as f:
-        f.write("\n".join(lines) + "\n")
+    for source, message in events:
+        registry.record_signal(source, message)
 
 
 if __name__ == "__main__":

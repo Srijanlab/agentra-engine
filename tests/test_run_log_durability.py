@@ -217,7 +217,7 @@ def _isolate_registry(tmp_path, monkeypatch):
     server._app_locks.clear()
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "test-project")
     monkeypatch.setenv("AGENTRA_ALLOWED_EMAILS", "me@example.com")
-    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "me@example.com"})
+    monkeypatch.setattr(auth, "_verify", lambda tok, proj: {"email": "me@example.com", "email_verified": True})
 
 
 def test_stream_run_logs_falls_back_to_the_registry_when_local_file_missing(tmp_path, ddb_run_logs, monkeypatch):

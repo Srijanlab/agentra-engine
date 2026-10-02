@@ -12,6 +12,7 @@ from agentra import environments, registry
 _DEFAULT_GAP_SECONDS = 60.0
 _CYCLE_RUN_SOURCES = ("scheduled", "on-demand")
 _IN_FLIGHT = ("queued", "running")
+_CYCLE_RUN_LIMIT = 50
 
 
 def continuous_gap_seconds() -> float:
@@ -71,8 +72,8 @@ def compute_schedule_status(app: str, repo: Path) -> ScheduleStatus:
     cadence_hours = env.schedule_hours
     last = registry.last_run_at(app, source="scheduled")
     now = time.time()
-    pending_jobs = registry.list_jobs(status="pending")
-    claimed_jobs = registry.list_jobs(status="claimed")
+    pending_jobs = registry.list_jobs(status="pending", limit=None)
+    claimed_jobs = registry.list_jobs(status="claimed", limit=None)
     cycle_job_pending = _targets_app(pending_jobs, app, kind="cycle")
     cycle_job_claimed = _targets_app(claimed_jobs, app, kind="cycle")
     gap = continuous_gap_seconds()
@@ -102,7 +103,7 @@ def compute_schedule_status(app: str, repo: Path) -> ScheduleStatus:
 
 
 def _cycle_runs(app: str) -> list[dict]:
-    return [r for r in registry.list_runs(limit=200) if r.get("app") == app and r.get("source") in _CYCLE_RUN_SOURCES]
+    return registry.list_app_runs(app, sources=_CYCLE_RUN_SOURCES, limit=_CYCLE_RUN_LIMIT)
 
 
 def _continuous_due(cycle_runs: list[dict], in_flight: bool, gap: float, now: float) -> tuple[float | None, float | None]:

@@ -47,6 +47,10 @@ from agentra.registry.digests import (
     get_last_awaiting_digest_at,
     record_awaiting_digest,
 )
+from agentra.registry.signals import (
+    list_signals,
+    record_signal,
+)
 from agentra.registry.inbox import (
     DispatchSummary,
     dispatch_once,
@@ -56,6 +60,7 @@ from agentra.registry.runs import (
     get_run,
     last_run_at,
     list_agent_steps,
+    list_app_runs,
     list_runs,
     loop_id_for,
     loop_id_for_issue,
@@ -70,12 +75,17 @@ from agentra.registry.loops import (
     get_loop,
     get_loop_pipeline,
     list_loops,
+    list_loops_by_status,
     list_waiting_for_human,
     reconcile_waiting_for_human,
     roll_up_loop,
     set_loop_human_input,
     set_loop_pipeline,
     set_loop_status,
+)
+from agentra.registry.loop_context import (
+    get_loop_context,
+    set_loop_context,
 )
 from agentra.registry.llm_pool import (
     InvalidLLMPool,
@@ -158,6 +168,8 @@ __all__ = [
     "get_coordination_repo",
     "get_last_awaiting_digest_at",
     "record_awaiting_digest",
+    "list_signals",
+    "record_signal",
     "get_llm_backend",
     "get_run",
     "get_slack_channel",
@@ -172,17 +184,21 @@ __all__ = [
     "bind_promote_loop",
     "get_loop",
     "get_loop_pipeline",
+    "get_loop_context",
+    "set_loop_context",
     "roll_up_loop",
     "set_loop_human_input",
     "set_loop_pipeline",
     "set_loop_status",
     "list_loops",
+    "list_loops_by_status",
     "JOB_KINDS",
     "enqueue_job",
     "claim_next_job",
     "report_job",
     "touch_job",
     "list_jobs",
+    "list_app_runs",
     "list_runs",
     "list_waiting_for_human",
     "loop_id_for",

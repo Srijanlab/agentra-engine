@@ -57,3 +57,54 @@ def test_root_public_but_other_routes_gated_with_firebase(client, monkeypatch):
 
 def test_assets_path_is_404(client):
     assert client.get("/assets/anything").status_code == 404
+
+
+_COMMIT_PATHS = ("/", "/health", "/healthz")
+
+
+def _commits(client):
+    return [client.get(p).json()["commit"] for p in _COMMIT_PATHS]
+
+
+@pytest.mark.parametrize(
+    ("vercel", "build", "expected"),
+    [("v1", None, "v1"), (None, "b1", "b1"), ("v1", "b1", "v1"), (None, None, ""), ("  v1\n", None, "v1")],
+)
+def test_all_endpoints_report_same_commit(client, monkeypatch, vercel, build, expected):
+    if vercel is not None:
+        monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", vercel)
+    if build is not None:
+        monkeypatch.setenv("AGENTRA_BUILD_SHA", build)
+    assert _commits(client) == [expected] * 3
+
+
+def test_degraded_health_reports_same_commit_as_root(client, monkeypatch):
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "deadbeef")
+
+    def boom():
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(server.registry, "list_apps", boom)
+    body = client.get("/health").json()
+    assert body["status"] == "degraded"
+    assert body["commit"] == client.get("/").json()["commit"] == "deadbeef"
+
+
+def test_commit_is_stable_after_env_changes_until_cache_reset(client, monkeypatch):
+    from agentra.server.build_info import reset_build_commit_cache
+
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "first")
+    assert _commits(client) == ["first"] * 3
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "second")
+    monkeypatch.setenv("AGENTRA_BUILD_SHA", "other")
+    assert _commits(client) == ["first"] * 3
+    reset_build_commit_cache()
+    assert _commits(client) == ["second"] * 3
+
+
+def test_repeated_calls_return_same_commit(client, monkeypatch):
+    monkeypatch.setenv("AGENTRA_BUILD_SHA", "abc123")
+    seen = set()
+    for _ in range(10):
+        seen.update(_commits(client))
+    assert seen == {"abc123"}

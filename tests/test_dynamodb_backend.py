@@ -12,7 +12,7 @@ import pytest
 from moto import mock_aws
 
 from agentra import registry
-from agentra.registry import _cache, _dynamo, core, llm_pool
+from agentra.registry import _cache, _dynamo, core, llm_pool, signals
 
 
 @pytest.fixture
@@ -142,6 +142,27 @@ def test_pause_resume_round_trip(ddb_env):
 
     core.resume()
     assert core.is_paused() is None
+
+
+def test_signals_round_trip_and_order_over_dynamodb(ddb_env):
+    assert signals.list_signals() == []
+
+    signals.record_signal("pause", "first", ts=1.0)
+    signals.record_signal("resume", "second", ts=2.0)
+
+    result = signals.list_signals()
+    assert [e["source"] for e in result] == ["resume", "pause"]
+    assert result[0]["message"] == "second"
+
+
+def test_signals_cap_at_200_over_dynamodb(ddb_env):
+    for i in range(210):
+        signals.record_signal("scheduled", f"event {i}", ts=float(i))
+
+    result = signals.list_signals(limit=1000)
+    assert len(result) == 200
+    assert result[0]["message"] == "event 209"
+    assert result[-1]["message"] == "event 10"
 
 
 def test_llm_backend_defaults_and_round_trips(ddb_env):
@@ -427,6 +448,23 @@ def test_last_run_at_filters_by_app_and_source(ddb_env):
     assert runs.last_run_at("myapp", source="scheduled") == 100.0
     assert runs.last_run_at("otherapp") == 500.0
     assert runs.last_run_at("nonexistent") is None
+
+
+def test_last_run_at_source_filter_survives_100_newer_other_source_runs(ddb_env):
+    from agentra.registry import runs
+
+    now = time.time()
+    runs.record_run("old", app="myapp", source="scheduled", status="completed", started_at=now - 5000)
+    for i in range(120):
+        runs.record_run(f"od{i}", app="myapp", source="on-demand", status="completed", started_at=now - 1000 + i)
+    for i in range(210):
+        runs.record_run(f"x{i}", app="otherapp", source="scheduled", status="completed", started_at=now - 500 + i)
+
+    assert runs.last_run_at("myapp", source="scheduled") == now - 5000
+    assert runs.last_run_at("myapp") == now - 1000 + 119
+    cycle = runs.list_app_runs("myapp", sources=("scheduled", "on-demand"), limit=50)
+    assert len(cycle) == 50 and cycle[0]["run_key"] == "od119"
+    assert all(r["app"] == "myapp" for r in cycle)
 
 
 def test_reconcile_stale_runs_marks_orphaned_runs_failed(ddb_env):

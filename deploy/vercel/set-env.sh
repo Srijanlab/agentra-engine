@@ -14,7 +14,7 @@
 #   GITHUB_APP_PRIVATE_KEY_FILE     - path to the downloaded .pem
 #   SLACK_SIGNING_SECRET            - api.slack.com/apps -> Basic Information
 #   SLACK_BOT_TOKEN                 - api.slack.com/apps -> OAuth & Permissions (xoxb-)
-#   ALARM_WEBHOOK_PASSWORD          - optional; unset leaves /trigger/alarm open
+#   ALARM_WEBHOOK_PASSWORD          - REQUIRED in production; unset makes /trigger/alarm return 401
 #   GITHUB_TOKEN                    - optional PAT fallback (repo scope)
 set -euo pipefail
 
@@ -49,7 +49,9 @@ set_var GITHUB_APP_PRIVATE_KEY "$PEM"
 echo "slack + misc:"
 set_var SLACK_SIGNING_SECRET          "$(ask SLACK_SIGNING_SECRET 'Slack signing secret')"
 set_var SLACK_BOT_TOKEN               "$(ask SLACK_BOT_TOKEN 'Slack bot token (xoxb-)')"
-set_var ALARM_WEBHOOK_PASSWORD        "${ALARM_WEBHOOK_PASSWORD:-}"   # optional
+ALARM_PW="$(ask ALARM_WEBHOOK_PASSWORD 'Alarm webhook Basic-auth password (required)')"
+[ -z "$ALARM_PW" ] && { echo "ERROR: ALARM_WEBHOOK_PASSWORD is required; /trigger/alarm returns 401 without it" >&2; exit 1; }
+set_var ALARM_WEBHOOK_PASSWORD        "$ALARM_PW"
 set_var GITHUB_TOKEN                  "${GITHUB_TOKEN:-}"   # optional fallback
 
 echo
