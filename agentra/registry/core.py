@@ -222,13 +222,112 @@ def _validate_agent_backend_map(backends: dict) -> dict[str, str]:
     return out
 
 
+_SYSTEM_LLM_BACKENDS_KEY = "system_llm_backends"
+_SYSTEM_LLM_BACKENDS_PATH = AGENTRA_HOME / "system_llm_backends.json"
+
+
+def get_system_llm_backends() -> dict[str, str]:
+    """Account-level default runtime-agent map. Apps that have not set their own
+    value for an agent inherit from here; the hard fallback is "claude"."""
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        item = _dynamo.get_item(_dynamo.table("system"), {"key": _SYSTEM_LLM_BACKENDS_KEY})
+        raw = (item or {}).get("backends") if item else None
+    elif _SYSTEM_LLM_BACKENDS_PATH.exists():
+        raw = json.loads(_SYSTEM_LLM_BACKENDS_PATH.read_text()).get("backends")
+    else:
+        raw = None
+
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in VALID_SDLC_AGENT_IDS and v in VALID_APP_LLM_BACKENDS}
+
+
+def set_system_llm_backends(backends: dict) -> None:
+    """Set the account-level default map. Pass an empty dict to clear all defaults."""
+    validated = _validate_agent_backend_map(backends)
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(_dynamo.table("system"), {"key": _SYSTEM_LLM_BACKENDS_KEY, "backends": validated})
+        return
+    _SYSTEM_LLM_BACKENDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _SYSTEM_LLM_BACKENDS_PATH.write_text(json.dumps({"backends": validated}, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Backend credentials — API keys stored server-side, never returned to the UI.
+# Keyed by backend name ("claude", "codex", "gemini", "kiro").
+# Each entry: {"api_key": "sk-..."}  (more fields possible in future).
+# The GET route returns presence only ({"claude": true, "codex": false, ...}).
+# ---------------------------------------------------------------------------
+
+_BACKEND_CREDENTIALS_KEY = "backend_credentials"
+_BACKEND_CREDENTIALS_PATH = AGENTRA_HOME / "backend_credentials.json"
+
+
+def get_backend_credentials() -> dict[str, dict]:
+    """Raw credentials dict keyed by backend name. Only used internally (loop
+    subprocess injection). Never exposed to the UI — use get_backend_credential_status
+    for dashboard display."""
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        item = _dynamo.get_item(_dynamo.table("system"), {"key": _BACKEND_CREDENTIALS_KEY})
+        raw = (item or {}).get("credentials") if item else None
+    elif _BACKEND_CREDENTIALS_PATH.exists():
+        raw = json.loads(_BACKEND_CREDENTIALS_PATH.read_text()).get("credentials")
+    else:
+        raw = None
+
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in VALID_APP_LLM_BACKENDS and isinstance(v, dict)}
+
+
+def get_backend_credential_status() -> dict[str, bool]:
+    """Which backends have an api_key stored — safe for dashboard display."""
+    creds = get_backend_credentials()
+    return {name: bool((creds.get(name) or {}).get("api_key")) for name in VALID_APP_LLM_BACKENDS}
+
+
+def set_backend_credentials(backend: str, api_key: str | None) -> None:
+    """Store or clear the API key for one backend.
+    Pass api_key=None or api_key="" to remove the stored key."""
+    if backend not in VALID_APP_LLM_BACKENDS:
+        raise ValueError(f"unknown backend {backend!r} -- expected one of {VALID_APP_LLM_BACKENDS}")
+    current = get_backend_credentials()
+    if api_key:
+        current[backend] = {"api_key": api_key}
+    else:
+        current.pop(backend, None)
+    if _ddb is not None:
+        from agentra.registry import _dynamo
+
+        _dynamo.put_item(_dynamo.table("system"), {"key": _BACKEND_CREDENTIALS_KEY, "credentials": current})
+        return
+    _BACKEND_CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _BACKEND_CREDENTIALS_PATH.write_text(json.dumps({"credentials": current}, indent=2))
+
+
 def get_app_llm_backends(name: str) -> dict[str, str]:
-    """Per-app runtime-agent map keyed by SDLC agent id."""
+    """Per-app runtime-agent map keyed by SDLC agent id.
+
+    Resolution order (highest to lowest priority):
+    1. Per-app llm_backends entry (or legacy scalar llm_backend for implementation)
+    2. Account-level system default (get_system_llm_backends)
+    3. Hard fallback: "claude"
+    """
     app = list_apps().get(name) or {}
-    configured = app.get("llm_backends") if isinstance(app.get("llm_backends"), dict) else {}
+    app_configured = app.get("llm_backends") if isinstance(app.get("llm_backends"), dict) else {}
     legacy = app.get("llm_backend")
+
+    # Start from the hard default, layer in system defaults, then per-app overrides.
     merged = {agent_id: _DEFAULT_APP_LLM_BACKEND for agent_id in VALID_SDLC_AGENT_IDS}
-    merged.update({k: v for k, v in configured.items() if k in VALID_SDLC_AGENT_IDS and v in VALID_APP_LLM_BACKENDS})
+    system = get_system_llm_backends()
+    merged.update(system)
+    merged.update({k: v for k, v in app_configured.items() if k in VALID_SDLC_AGENT_IDS and v in VALID_APP_LLM_BACKENDS})
     if legacy in VALID_APP_LLM_BACKENDS:
         merged["implementation"] = legacy
     return merged

@@ -63,6 +63,8 @@ _REGISTRY_METHODS = frozenset({
     "list_apps", "register_app", "remove_app",
     "get_slack_channel", "set_slack_channel",
     "get_app_llm_backend", "get_app_llm_backends", "set_app_llm_backend", "set_app_llm_backends",
+    "get_system_llm_backends", "set_system_llm_backends",
+    "get_backend_credentials", "get_backend_credential_status", "set_backend_credentials",
     "is_paused", "pause", "resume",
     "get_llm_backend", "set_llm_backend",
     "get_llm_rotation", "set_llm_rotation", "select_llm_provider",

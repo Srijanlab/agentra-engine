@@ -18,10 +18,13 @@ from agentra.registry.core import (
     get_app_llm_backends,
     get_app_repo,
     get_app_repos,
+    get_backend_credential_status,
+    get_backend_credentials,
     get_code_repos,
     get_coordination_repo,
     get_llm_backend,
     get_slack_channel,
+    get_system_llm_backends,
     is_paused,
     list_apps,
     repo_url_for_path,
@@ -33,10 +36,12 @@ from agentra.registry.core import (
     resolve_slack_thread,
     slack_thread_for,
     resume,
+    set_backend_credentials,
     set_llm_backend,
     set_app_llm_backend,
     set_app_llm_backends,
     set_slack_channel,
+    set_system_llm_backends,
 )
 from agentra.registry.digests import (
     get_last_awaiting_digest_at,
@@ -107,6 +112,8 @@ _DELEGATED_NAMES = {
     "_LOOPS_PATH",
     "_JOBS_PATH",
     "_AGENT_STEPS_PATH",
+    "_SYSTEM_LLM_BACKENDS_PATH",
+    "_BACKEND_CREDENTIALS_PATH",
 }
 
 
@@ -145,6 +152,8 @@ __all__ = [
     "get_app_llm_backends",
     "get_app_repo",
     "get_app_repos",
+    "get_backend_credential_status",
+    "get_backend_credentials",
     "get_code_repos",
     "get_coordination_repo",
     "get_last_awaiting_digest_at",
@@ -152,6 +161,7 @@ __all__ = [
     "get_llm_backend",
     "get_run",
     "get_slack_channel",
+    "get_system_llm_backends",
     "is_paused",
     "last_run_at",
     "list_agent_steps",
@@ -192,7 +202,9 @@ __all__ = [
     "set_llm_backend",
     "set_app_llm_backend",
     "set_app_llm_backends",
+    "set_backend_credentials",
     "set_slack_channel",
+    "set_system_llm_backends",
     "dispatch_once",
     "submit_request",
 ]

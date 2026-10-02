@@ -37,6 +37,8 @@ def _isolate_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_RUNS_PATH", home / "runs.json")
     monkeypatch.setattr(registry, "_LOOPS_PATH", home / "loops.json")
     monkeypatch.setattr(registry, "_AGENT_STEPS_PATH", home / "agent_steps.jsonl")
+    monkeypatch.setattr(registry, "_SYSTEM_LLM_BACKENDS_PATH", home / "system_llm_backends.json")
+    monkeypatch.setattr(registry, "_BACKEND_CREDENTIALS_PATH", home / "backend_credentials.json")
     server._active_runs.clear()
     server._app_locks.clear()
     github_fake.install(monkeypatch=monkeypatch)
@@ -150,3 +152,70 @@ def test_app_runtime_map_rejects_unknown_agent_or_backend(tmp_path, monkeypatch)
 
     assert client.patch("/apps/invalid-runtime", json={"llm_backends": {"nope": "claude"}}).status_code == 400
     assert client.patch("/apps/invalid-runtime", json={"llm_backends": {"testing": "wat"}}).status_code == 400
+
+
+def test_system_default_agent_backends_fallthrough(tmp_path, monkeypatch):
+    """Account-level default applies when an app has no per-agent override."""
+    _isolate_registry(tmp_path, monkeypatch)
+    client = TestClient(server.app)
+
+    origin = _init_origin(tmp_path / "sys-default-origin")
+    assert client.post("/apps", json={"name": "myapp", "repo_url": str(origin), "branch": "main"}).status_code == 200
+
+    # No per-app override set yet — should be claude everywhere.
+    detail = client.get("/apps/myapp").json()
+    assert detail["llm_backends"]["testing"] == "claude"
+
+    # Set account-level default.
+    resp = client.post("/system/agent-backends", json={"backends": {"testing": "gemini", "codebase": "kiro"}})
+    assert resp.status_code == 200
+    assert resp.json()["backends"]["testing"] == "gemini"
+
+    # App without override now inherits system default.
+    detail = client.get("/apps/myapp").json()
+    assert detail["llm_backends"]["testing"] == "gemini"
+    assert detail["llm_backends"]["codebase"] == "kiro"
+    assert detail["llm_backends"]["implementation"] == "claude"  # not in system default
+
+    # Per-app override wins over system default.
+    client.patch("/apps/myapp", json={"llm_backends": {"testing": "codex"}})
+    detail = client.get("/apps/myapp").json()
+    assert detail["llm_backends"]["testing"] == "codex"   # per-app wins
+    assert detail["llm_backends"]["codebase"] == "kiro"   # system default still applies
+
+    # GET /system/agent-backends round-trips.
+    assert client.get("/system/agent-backends").json()["backends"]["testing"] == "gemini"
+
+    # Invalid agent/backend rejected.
+    assert client.post("/system/agent-backends", json={"backends": {"nope": "claude"}}).status_code == 400
+    assert client.post("/system/agent-backends", json={"backends": {"testing": "wat"}}).status_code == 400
+
+
+def test_backend_credentials_set_get_clear(tmp_path, monkeypatch):
+    """Backend credentials: set shows key_set=True, GET never returns the key, clear removes it."""
+    _isolate_registry(tmp_path, monkeypatch)
+    client = TestClient(server.app)
+
+    # Initially nothing configured.
+    resp = client.get("/system/backend-credentials")
+    assert resp.status_code == 200
+    assert resp.json()["credentials"]["codex"] is False
+
+    # Store a key.
+    resp = client.post("/system/backend-credentials", json={"backend": "codex", "api_key": "sk-test-123"})
+    assert resp.status_code == 200
+    assert resp.json()["credentials"]["codex"] is True
+    assert "sk-test-123" not in resp.text  # key value must never appear in response
+
+    # GET still only shows presence.
+    resp = client.get("/system/backend-credentials")
+    assert resp.json()["credentials"]["codex"] is True
+    assert "sk-test-123" not in resp.text
+
+    # Clear the key.
+    resp = client.post("/system/backend-credentials", json={"backend": "codex", "api_key": ""})
+    assert resp.status_code == 200
+    assert resp.json()["credentials"]["codex"] is False
+
+    # Unknown backend rejected.
+    assert client.post("/system/backend-credentials", json={"backend": "bogus", "api_key": "x"}).status_code == 400
